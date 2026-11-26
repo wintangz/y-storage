@@ -89,6 +89,8 @@ pub enum UiAction {
         collapsed: bool,
         height_px: Option<f32>,
     },
+    LocateInExplorer(String),
+    OpenWebSearch(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,7 +258,9 @@ pub struct StorageUiState {
     pub icon_textures: HashMap<String, egui::TextureHandle>,
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
+    pub first_unattrib_web_search_rect: Option<Rect>,
     wt_logo_tex: Option<(u32, egui::TextureHandle)>,
+    unattrib_exists_cache: HashMap<String, bool>,
     cached_report: Option<CachedReportData>,
     cached_filtered: Option<CachedFilteredList>,
     cached_rim: Option<CachedRimMesh>,
@@ -290,7 +294,9 @@ impl Default for StorageUiState {
             icon_textures: HashMap::new(),
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
+            first_unattrib_web_search_rect: None,
             wt_logo_tex: None,
+            unattrib_exists_cache: HashMap::new(),
             cached_report: None,
             cached_filtered: None,
             cached_rim: None,
@@ -2057,6 +2063,7 @@ fn ensure_report_and_filter_caches(
         ui_state.icon_cache_scan_ts = Some(rep.scan_timestamp_unix);
         ui_state.expanded_row_heights.clear();
         ui_state.truncate_cache.clear();
+        ui_state.unattrib_exists_cache.clear();
     }
 
     let report_stale = ui_state.cached_report.as_ref().is_none_or(|c| {
@@ -2243,6 +2250,7 @@ pub fn draw_app_ui(
             .any(|fam| *fam == FontFamily::Name("ProportionalStrong".into()))
     });
     let pal = ThemePalette::for_mode(mode);
+    ui_state.first_unattrib_web_search_rect = None;
 
     let sys_drive_letter = report
         .and_then(|r| {
@@ -4420,6 +4428,13 @@ fn draw_pinned_bottom_groups(
         || ui_state.expand_unattributed;
     let unattrib_tick = lerp_color(pal.border, pal.muted, 0.55);
 
+    let expand_windows_system = &mut ui_state.expand_windows_system;
+    let expand_your_files = &mut ui_state.expand_your_files;
+    let expand_shared_caches = &mut ui_state.expand_shared_caches;
+    let expand_unattributed = &mut ui_state.expand_unattributed;
+    let unattrib_exists_cache = &mut ui_state.unattrib_exists_cache;
+    let first_unattrib_web_search_rect = &mut ui_state.first_unattrib_web_search_rect;
+
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
         ui.spacing_mut().item_spacing.y = 0.0;
         draw_crisp_frame(
@@ -4438,7 +4453,7 @@ fn draw_pinned_bottom_groups(
                     rep.windows_system_total_bytes,
                     "ESTIMATE · system remainder + pagefile/hiberfil",
                     pal.muted,
-                    &mut ui_state.expand_windows_system,
+                    expand_windows_system,
                     true,
                     pal,
                     |ui| {
@@ -4463,7 +4478,7 @@ fn draw_pinned_bottom_groups(
                     rep.your_files_total_bytes,
                     "Personal shell folders · unzoned · read-only",
                     pal.muted,
-                    &mut ui_state.expand_your_files,
+                    expand_your_files,
                     true,
                     pal,
                     |ui| {
@@ -4479,7 +4494,7 @@ fn draw_pinned_bottom_groups(
                     rep.shared_caches_total_bytes,
                     &format!("{} regenerable Temp / DXCache / Package Cache folders", rep.shared_caches.len()),
                     STATUS_GREEN,
-                    &mut ui_state.expand_shared_caches,
+                    expand_shared_caches,
                     true,
                     pal,
                     |ui| {
@@ -4501,21 +4516,20 @@ fn draw_pinned_bottom_groups(
                     rep.unattributed_total_bytes,
                     &format!("{} folders with no verified app owner", rep.unattributed.len()),
                     unattrib_tick,
-                    &mut ui_state.expand_unattributed,
+                    expand_unattributed,
                     false,
                     pal,
                     |ui| {
-                        for item in rep.unattributed.iter().take(40) {
-                            draw_simple_item_row(ui, &item.path, item.bytes, None, pal);
-                        }
-                        if rep.unattributed.len() > 40 {
-                            ui.label(
-                                RichText::new(format!(
-                                    "... and {} smaller unattributed folders",
-                                    rep.unattributed.len() - 40
-                                ))
-                                .size(10.5)
-                                .color(pal.subtle_text),
+                        for (idx, item) in rep.unattributed.iter().enumerate() {
+                            draw_unattributed_item_row(
+                                ui,
+                                idx,
+                                &item.path,
+                                item.bytes,
+                                pal,
+                                unattrib_exists_cache,
+                                first_unattrib_web_search_rect,
+                                emit,
                             );
                         }
                     },
@@ -4649,6 +4663,9 @@ fn draw_pinned_group_card(
             );
             if resp.clicked() {
                 *expanded = !*expanded;
+                if *expanded {
+                    resp.scroll_to_me(Some(Align::TOP));
+                }
             }
             if *expanded {
                 body(ui);
@@ -4701,6 +4718,124 @@ fn draw_simple_item_row(
             draw_right_aligned_size(ui, bytes, 11.5, pal.muted, false);
         },
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_unattributed_item_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    path: &str,
+    bytes: u64,
+    pal: &ThemePalette,
+    exists_cache: &mut HashMap<String, bool>,
+    first_web_search_rect: &mut Option<Rect>,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    const ROW_H: f32 = 22.0;
+    const RIGHT_CLUSTER_W: f32 = SIZE_COL_W + SPACE_8 + 148.0;
+    let avail_w = ui.available_width().max(RIGHT_CLUSTER_W + 60.0);
+    let (row_rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, ROW_H), Sense::hover());
+    if !ui.clip_rect().expand2(Vec2::new(0.0, 24.0)).intersects(row_rect) {
+        return;
+    }
+
+    let right_rect = Rect::from_min_max(
+        Pos2::new((row_rect.max.x - RIGHT_CLUSTER_W).max(row_rect.min.x), row_rect.min.y),
+        row_rect.max,
+    );
+    let left_rect = Rect::from_min_max(
+        row_rect.min,
+        Pos2::new((right_rect.min.x - SPACE_8).max(row_rect.min.x), row_rect.max.y),
+    );
+
+    let mut left_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    left_ui.set_clip_rect(
+        left_rect
+            .expand2(Vec2::new(1.0, 1.0))
+            .intersect(ui.clip_rect()),
+    );
+    left_ui.add_space(SPACE_16);
+    draw_truncated_text(
+        &mut left_ui,
+        path,
+        FontId::new(11.0, FontFamily::Monospace),
+        pal.text,
+        false,
+    );
+
+    let mut right_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(right_rect)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    right_ui.set_clip_rect(
+        right_rect
+            .expand2(Vec2::new(1.0, 1.0))
+            .intersect(ui.clip_rect()),
+    );
+    right_ui.spacing_mut().item_spacing.x = 0.0;
+
+    // 1. Fixed SIZE_COL_W column flush with ledger size alignment (YS1)
+    let (size_slot, _) = right_ui.allocate_exact_size(Vec2::new(SIZE_COL_W, ROW_H), Sense::hover());
+    let mut size_ui = right_ui.new_child(
+        UiBuilder::new()
+            .max_rect(size_slot)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    draw_right_aligned_size(&mut size_ui, bytes, 11.5, pal.muted, false);
+
+    right_ui.add_space(SPACE_8);
+
+    // 2. Web search (opens default browser via OS ShellExecute; exact constructed query on hover)
+    let (search_query, search_url) = crate::unattributed_assist::build_unattributed_search_url(path);
+    let web_resp = draw_z_button(
+        &mut right_ui,
+        "Web search",
+        Vec2::new(0.0, 18.0),
+        10.5,
+        RADIUS_PILL,
+        true,
+        false,
+        ButtonVariant::SecondaryOutline,
+        pal,
+    );
+    if row_idx == 0 {
+        *first_web_search_rect = Some(web_resp.rect);
+    }
+    if web_resp.clicked() {
+        emit(UiAction::OpenWebSearch(search_url));
+    }
+    let _ = web_resp.on_hover_text(format!("Web search (Google): {search_query}"));
+
+    right_ui.add_space(SPACE_4);
+
+    // 3. Locate (opens Explorer selecting target folder, or disabled with "no longer on disk")
+    let exists = *exists_cache
+        .entry(path.to_string())
+        .or_insert_with(|| std::path::Path::new(path).exists());
+    let loc_resp = draw_z_button(
+        &mut right_ui,
+        "Locate",
+        Vec2::new(0.0, 18.0),
+        10.5,
+        RADIUS_PILL,
+        exists,
+        false,
+        ButtonVariant::SecondaryOutline,
+        pal,
+    );
+    if exists {
+        if loc_resp.clicked() {
+            emit(UiAction::LocateInExplorer(path.to_string()));
+        }
+        let _ = loc_resp.on_hover_text(crate::unattributed_assist::build_explorer_select_command_line(path));
+    } else {
+        let _ = loc_resp.on_hover_text("no longer on disk");
+    }
 }
 
 fn draw_dependencies_view(
@@ -5510,5 +5645,108 @@ mod tests {
             );
         });
         assert!(out.shapes.len() < 260, "expected virtualized shape count < 260, got {}", out.shapes.len());
+    }
+
+    #[test]
+    fn unattributed_rows_render_locate_and_disabled_missing_folder_cleanly() {
+        let existing_dir = std::env::temp_dir()
+            .to_string_lossy()
+            .into_owned();
+        let missing_dir = r"C:\__y_storage_missing_unattributed_folder_test__";
+        let report = ScanReport {
+            scan_timestamp_unix: 3000,
+            scan_timestamp_display: "2026-11-26 23:30:00".into(),
+            duration_ms: 500,
+            drives: vec![DriveInfo {
+                letter: 'C',
+                root: "C:\\".into(),
+                total_bytes: 500_000_000,
+                free_bytes: 250_000_000,
+                used_bytes: 250_000_000,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+            }],
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: 0,
+                raw_with_install_location: 0,
+                canonical_apps: 0,
+                canonical_with_direct_install_location: 0,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps: vec![],
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system: vec![SystemDriveBreakdown {
+                drive_letter: 'C',
+                root_files: vec![],
+                remainder_bytes: 249_990_000,
+                total_bytes: 249_990_000,
+                scanned_non_system_bytes: 10_000,
+                drive_used_bytes: 250_000_000,
+                drive_free_bytes: 250_000_000,
+                drive_total_bytes: 500_000_000,
+            }],
+            windows_system_total_bytes: 249_990_000,
+            unattributed: vec![
+                UnattributedItem {
+                    path: existing_dir,
+                    bytes: 6_000,
+                    drive_letter: 'C',
+                    zone_hint: None,
+                },
+                UnattributedItem {
+                    path: missing_dir.into(),
+                    bytes: 4_000,
+                    drive_letter: 'C',
+                    zone_hint: None,
+                },
+            ],
+            unattributed_total_bytes: 10_000,
+            reverse_dependencies: vec![],
+            catalog_source: "embedded".into(),
+            warnings: vec![],
+        };
+
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut state = StorageUiState::default();
+        state.expand_unattributed = true;
+        state.ledger_height_px = Some(280.0);
+        let cfg = AppConfig::default();
+
+        for step in 0..2 {
+            let mut events = Vec::new();
+            if step == 1 {
+                if let Some(wr) = state.first_unattrib_web_search_rect {
+                    events.push(egui::Event::PointerMoved(wr.center()));
+                }
+            }
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                    time: Some(step as f64),
+                    events,
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut state,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        "C:\\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            assert!(!out.shapes.is_empty());
+        }
+        assert!(state.first_unattrib_web_search_rect.is_some());
+        assert_eq!(state.unattrib_exists_cache.get(missing_dir), Some(&false));
     }
 }

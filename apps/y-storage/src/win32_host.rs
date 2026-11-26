@@ -932,6 +932,16 @@ unsafe extern "system" fn wnd_proc(
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
+                        UiAction::LocateInExplorer(path) => {
+                            if !st.smoke_mode {
+                                launch_explorer_select(&path);
+                            }
+                        }
+                        UiAction::OpenWebSearch(url) => {
+                            if !st.smoke_mode {
+                                open_external_search_url(hwnd, &url);
+                            }
+                        }
                     }
                 }
             }
@@ -1881,6 +1891,37 @@ fn read_clipboard_unicode_text(hwnd: HWND) -> Option<String> {
     };
     unsafe { CloseClipboard() };
     out
+}
+
+fn launch_explorer_select(path: &str) {
+    use std::os::windows::process::CommandExt;
+
+    let norm = crate::unattributed_assist::normalize_unattributed_target_path(path);
+    if norm.is_empty() || !std::path::Path::new(&norm).exists() {
+        return;
+    }
+    let raw_arg = crate::unattributed_assist::build_explorer_select_raw_arg(&norm);
+    let _ = std::process::Command::new("explorer.exe")
+        .raw_arg(raw_arg)
+        .spawn();
+}
+
+fn open_external_search_url(hwnd: HWND, url: &str) {
+    if !url.starts_with("https://www.google.com/search?q=") {
+        return;
+    }
+    let op_w: Vec<u16> = "open\0".encode_utf16().collect();
+    let url_w: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            hwnd,
+            op_w.as_ptr(),
+            url_w.as_ptr(),
+            null(),
+            null(),
+            SW_SHOW,
+        );
+    }
 }
 
 fn vk_to_egui_key(vk: u32) -> Option<Key> {

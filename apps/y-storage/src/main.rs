@@ -6,6 +6,7 @@ mod logo_png;
 mod png;
 mod sw_painter;
 mod ui;
+mod unattributed_assist;
 mod win32_host;
 
 use std::path::PathBuf;
@@ -308,7 +309,15 @@ fn render_screenshot_frame(
     }
 
     let hover_size_mode = view == "hover-size";
+    let hover_web_search_mode = view == "unattributed-hover-query";
+    let hover_mode = hover_size_mode || hover_web_search_mode;
     match view {
+        "unattributed-expanded" | "unattributed-hover-query" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(300.0);
+        }
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
             if let Some(fifa) = report
@@ -378,10 +387,10 @@ fn render_screenshot_frame(
         ThemeMode::Light => 0x00EE_F4FA,
     };
 
-    let steps = if hover_size_mode { 4 } else { 3 };
+    let steps = if hover_mode { 4 } else { 3 };
     for step in 0..steps {
         let mut events = Vec::new();
-        let time_s = if hover_size_mode {
+        let time_s = if hover_mode {
             match step {
                 0 => 0.0,
                 1 => 0.1,
@@ -391,9 +400,16 @@ fn render_screenshot_frame(
         } else {
             step as f64 * 0.05
         };
-        if hover_size_mode && step >= 1 {
-            if let Some(size_r) = ui_state.first_row_size_rect {
-                events.push(egui::Event::PointerMoved(size_r.center()));
+        let target_hover_rect = if hover_size_mode {
+            ui_state.first_row_size_rect
+        } else if hover_web_search_mode {
+            ui_state.first_unattrib_web_search_rect
+        } else {
+            None
+        };
+        if hover_mode && step >= 1 {
+            if let Some(target_r) = target_hover_rect {
+                events.push(egui::Event::PointerMoved(target_r.center()));
             }
         }
         let mut raw = RawInput {
@@ -421,9 +437,16 @@ fn render_screenshot_frame(
                 sys_win,
                 &mut |_| {},
             );
-            if hover_size_mode && step + 1 == steps {
-                if let Some(size_r) = ui_state.first_row_size_rect {
-                    let hp = size_r.center();
+            let final_hover_rect = if hover_size_mode {
+                ui_state.first_row_size_rect
+            } else if hover_web_search_mode {
+                ui_state.first_unattrib_web_search_rect
+            } else {
+                None
+            };
+            if hover_mode && step + 1 == steps {
+                if let Some(target_r) = final_hover_rect {
+                    let hp = target_r.center();
                     let p = c.layer_painter(egui::LayerId::new(
                         egui::Order::Tooltip,
                         egui::Id::new("hover_cursor_indicator"),
