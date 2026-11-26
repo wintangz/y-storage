@@ -9,7 +9,9 @@ use egui::{
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{FILETIME, FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateBitmap, CreateCompatibleDC,
+    CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetDC, HDC, HGDIOBJ,
+    InvalidateRect, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, UpdateWindow,
 };
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, OpenClipboard,
@@ -21,17 +23,17 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow,
-    DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowPlacement, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, KillTimer,
-    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON,
-    SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
-    SW_SHOWMAXIMIZED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    AdjustWindowRectEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon,
+    DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HICON, ICON_BIG, ICON_SMALL, ICONINFO,
+    IDC_ARROW, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, PM_REMOVE,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON,
+    SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_SHOW, SW_SHOWMAXIMIZED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOWPLACEMENT,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETICON, WM_SIZE,
+    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{AppConfig, ThemeMode, WindowPlacementConfig};
@@ -65,6 +67,8 @@ struct WinTrackMouseEvent {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn TrackMouseEvent(lp_event_track: *mut WinTrackMouseEvent) -> i32;
+    fn PrintWindow(hwnd: HWND, hdc_blt: HDC, n_flags: u32) -> i32;
+    fn SetForegroundWindow(hwnd: HWND) -> i32;
 }
 
 const DEFAULT_LOGICAL_W: i32 = 1020;
@@ -162,6 +166,8 @@ struct WindowHostState {
     egui_ctx: egui::Context,
     painter: SoftwarePainter,
     applied_titlebar_theme: Option<ThemeMode>,
+    large_icon: HICON,
+    small_icon: HICON,
     events: Vec<Event>,
     width: usize,
     height: usize,
@@ -179,6 +185,21 @@ struct WindowHostState {
     bench_idle_wm_paints: usize,
     bench_timer_fired: bool,
     bench_samples: Vec<FrameTimingSample>,
+}
+
+impl Drop for WindowHostState {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.small_icon.is_null() {
+                DestroyIcon(self.small_icon);
+                self.small_icon = null_mut();
+            }
+            if !self.large_icon.is_null() {
+                DestroyIcon(self.large_icon);
+                self.large_icon = null_mut();
+            }
+        }
+    }
 }
 
 #[inline]
@@ -258,17 +279,92 @@ pub fn outer_size_for_dpi(
     }
 }
 
-fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
-    let cx_lg = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
-    let cy_lg = unsafe { GetSystemMetrics(SM_CYICON) }.max(32);
-    let cx_sm = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
-    let cy_sm = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+fn create_hicon_from_rgba(size: usize, rgba: &[u8]) -> HICON {
+    if size == 0 || rgba.len() < size * size * 4 {
+        return null_mut();
+    }
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size as i32,
+            biHeight: -(size as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: (size * size * 4) as u32,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [unsafe { std::mem::zeroed() }],
+    };
+    let mut bits: *mut std::ffi::c_void = null_mut();
+    let hbm_color = unsafe { CreateDIBSection(null_mut(), &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0) };
+    if hbm_color.is_null() || bits.is_null() {
+        if !hbm_color.is_null() {
+            unsafe { DeleteObject(hbm_color as HGDIOBJ) };
+        }
+        return null_mut();
+    }
+    unsafe {
+        let dst = std::slice::from_raw_parts_mut(bits as *mut u8, size * size * 4);
+        for px in 0..(size * size) {
+            let s = px * 4;
+            dst[s] = rgba[s + 2];
+            dst[s + 1] = rgba[s + 1];
+            dst[s + 2] = rgba[s];
+            dst[s + 3] = rgba[s + 3];
+        }
+    }
+    let mask_bytes_len = (((size + 15) / 16) * 2) * size;
+    let mask_buf = vec![0u8; mask_bytes_len];
+    let hbm_mask = unsafe { CreateBitmap(size as i32, size as i32, 1, 1, mask_buf.as_ptr().cast()) };
+    if hbm_mask.is_null() {
+        unsafe { DeleteObject(hbm_color as HGDIOBJ) };
+        return null_mut();
+    }
+    let ii = ICONINFO {
+        fIcon: 1,
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: hbm_mask,
+        hbmColor: hbm_color,
+    };
+    let icon = unsafe { CreateIconIndirect(&ii) };
+    unsafe {
+        DeleteObject(hbm_mask as HGDIOBJ);
+        DeleteObject(hbm_color as HGDIOBJ);
+    }
+    icon
+}
+
+fn load_app_icons_for_dpi(hinstance: HINSTANCE, dpi: u32) -> (HICON, HICON) {
+    let dpi = dpi.max(96);
+    let lg_px = ((32 * dpi + 48) / 96).clamp(32, 128) as usize;
+    let sm_px = ((16 * dpi + 48) / 96).clamp(16, 64) as usize;
+
+    let mut large = create_hicon_from_rgba(lg_px, &crate::logo::rasterize_wt_logo_rgba(lg_px));
+    let mut small = create_hicon_from_rgba(sm_px, &crate::logo::rasterize_wt_logo_rgba(sm_px));
+
     let res_id = 1usize as *const u16;
-    let large = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_lg, cy_lg, LR_DEFAULTCOLOR) }
-        as HICON;
-    let small = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_sm, cy_sm, LR_DEFAULTCOLOR) }
-        as HICON;
+    if large.is_null() {
+        let cx_lg = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
+        let cy_lg = unsafe { GetSystemMetrics(SM_CYICON) }.max(32);
+        large = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_lg, cy_lg, LR_DEFAULTCOLOR) }
+            as HICON;
+    }
+    if small.is_null() {
+        let cx_sm = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+        let cy_sm = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+        small = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_sm, cy_sm, LR_DEFAULTCOLOR) }
+            as HICON;
+    }
     (large, small)
+}
+
+fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
+    load_app_icons_for_dpi(hinstance, get_dpi_for_system())
 }
 
 fn apply_titlebar_theme(hwnd: HWND, mode: ThemeMode) {
@@ -421,6 +517,8 @@ pub fn run_gui_app(
         egui_ctx,
         painter: SoftwarePainter::new(),
         applied_titlebar_theme: None,
+        large_icon,
+        small_icon,
         events: Vec::new(),
         width: (DEFAULT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
         height: (DEFAULT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
@@ -520,14 +618,7 @@ pub fn run_gui_app(
         }
     }
 
-    unsafe {
-        if !small_icon.is_null() {
-            DestroyIcon(small_icon);
-        }
-        if !large_icon.is_null() {
-            DestroyIcon(large_icon);
-        }
-    }
+    // `WM_DESTROY` drops `WindowHostState` (including its `small_icon`/`large_icon` handles).
     Ok(())
 }
 
@@ -579,11 +670,31 @@ unsafe extern "system" fn wnd_proc(
         WM_DPICHANGED => {
             let new_dpi = ((wparam & 0xFFFF) as u32).max(96);
             {
+                let hinst = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
+                let (new_lg, new_sm) = load_app_icons_for_dpi(hinst, new_dpi);
                 let st = unsafe { &mut *state_ptr };
                 st.dpi = new_dpi;
                 st.pixels_per_point = dpi_to_ppp(new_dpi);
                 st.needs_redraw = true;
                 st.followup_budget = 2;
+                if !new_lg.is_null() {
+                    let old = std::mem::replace(&mut st.large_icon, new_lg);
+                    unsafe {
+                        SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, new_lg as isize);
+                        if !old.is_null() {
+                            DestroyIcon(old);
+                        }
+                    }
+                }
+                if !new_sm.is_null() {
+                    let old = std::mem::replace(&mut st.small_icon, new_sm);
+                    unsafe {
+                        SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, new_sm as isize);
+                        if !old.is_null() {
+                            DestroyIcon(old);
+                        }
+                    }
+                }
             }
             if lparam != 0 {
                 let rect = unsafe { *(lparam as *const RECT) };
@@ -1217,6 +1328,8 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
         egui_ctx,
         painter: SoftwarePainter::new(),
         applied_titlebar_theme: None,
+        large_icon,
+        small_icon,
         events: Vec::new(),
         width: (DEFAULT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
         height: (DEFAULT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
@@ -1454,12 +1567,6 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
 
     unsafe {
         DestroyWindow(hwnd);
-        if !small_icon.is_null() {
-            DestroyIcon(small_icon);
-        }
-        if !large_icon.is_null() {
-            DestroyIcon(large_icon);
-        }
     }
 
     let rep = PerfBenchmarkReport {
@@ -1479,6 +1586,256 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&rep).map_err(|e| e.to_string())?;
     std::fs::write(out_path, json).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn get_extended_frame_bounds(hwnd: HWND) -> Option<RECT> {
+    type DwmGetAttrFn =
+        unsafe extern "system" fn(HWND, u32, *mut std::ffi::c_void, u32) -> i32;
+    let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
+    let module = unsafe { LoadLibraryW(dll.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    let ok = if let Some(proc) = unsafe { GetProcAddress(module, b"DwmGetWindowAttribute\0".as_ptr()) } {
+        let f: DwmGetAttrFn = unsafe { std::mem::transmute_copy(&proc) };
+        unsafe { f(hwnd, 9, (&mut rc as *mut RECT).cast(), size_of::<RECT>() as u32) == 0 }
+    } else {
+        false
+    };
+    unsafe { FreeLibrary(module) };
+    if ok { Some(rc) } else { None }
+}
+
+fn capture_window_crop_bgra(hwnd: HWND, crop_h_px: usize) -> Result<(usize, usize, Vec<u32>), String> {
+    let mut wr: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut wr) } == 0 {
+        return Err("GetWindowRect failed".into());
+    }
+    let ext = get_extended_frame_bounds(hwnd).unwrap_or(wr);
+    let win_w = (wr.right - wr.left).max(1) as usize;
+    let win_h = (wr.bottom - wr.top).max(1) as usize;
+    let off_x = (ext.left - wr.left).max(0) as usize;
+    let off_y = (ext.top - wr.top).max(0) as usize;
+    let ext_w = ((ext.right - ext.left).max(1) as usize).min(win_w.saturating_sub(off_x));
+    let out_h = crop_h_px.clamp(1, (ext.bottom - ext.top).max(1) as usize);
+
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: win_w as i32,
+            biHeight: -(win_h as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: (win_w * win_h * 4) as u32,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [unsafe { std::mem::zeroed() }],
+    };
+    let mut bits: *mut std::ffi::c_void = null_mut();
+    let mem_dc = unsafe { CreateCompatibleDC(null_mut()) };
+    if mem_dc.is_null() {
+        return Err("CreateCompatibleDC failed".into());
+    }
+    let hbm = unsafe { CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0) };
+    if hbm.is_null() || bits.is_null() {
+        unsafe {
+            if !hbm.is_null() {
+                DeleteObject(hbm as HGDIOBJ);
+            }
+            DeleteDC(mem_dc);
+        }
+        return Err("CreateDIBSection failed during titlebar capture".into());
+    }
+    let old_bm = unsafe { SelectObject(mem_dc, hbm as HGDIOBJ) };
+    let pw_ok = unsafe { PrintWindow(hwnd, mem_dc, 2) };
+    let mut pixels = vec![0u32; ext_w * out_h];
+    let copy_cropped = |buf_ptr: *const u32, dst: &mut [u32]| {
+        let src = unsafe { std::slice::from_raw_parts(buf_ptr, win_w * win_h) };
+        for r in 0..out_h {
+            let sy = off_y + r;
+            if sy < win_h {
+                let s_off = sy * win_w + off_x;
+                let d_off = r * ext_w;
+                dst[d_off..d_off + ext_w].copy_from_slice(&src[s_off..s_off + ext_w]);
+            }
+        }
+    };
+    if pw_ok != 0 {
+        copy_cropped(bits as *const u32, &mut pixels);
+    }
+    // Verify title-bar row actually has non-zero RGB content; fallback to desktop DC BitBlt if PrintWindow left black.
+    let top_row_has_pixels = pixels
+        .iter()
+        .take(ext_w * out_h.min(28))
+        .any(|&p| (p & 0x00FF_FFFF) != 0);
+    if pw_ok == 0 || !top_row_has_pixels {
+        let screen_dc = unsafe { GetDC(null_mut()) };
+        if !screen_dc.is_null() {
+            unsafe {
+                BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    ext_w as i32,
+                    out_h as i32,
+                    screen_dc,
+                    ext.left,
+                    ext.top,
+                    SRCCOPY,
+                );
+                ReleaseDC(null_mut(), screen_dc);
+            }
+            let src = unsafe { std::slice::from_raw_parts(bits as *const u32, win_w * win_h) };
+            for r in 0..out_h {
+                let s_off = r * win_w;
+                let d_off = r * ext_w;
+                pixels[d_off..d_off + ext_w].copy_from_slice(&src[s_off..s_off + ext_w]);
+            }
+        }
+    }
+    unsafe {
+        SelectObject(mem_dc, old_bm);
+        DeleteObject(hbm as HGDIOBJ);
+        DeleteDC(mem_dc);
+    }
+    Ok((ext_w, out_h, pixels))
+}
+
+/// Opens a live native window briefly to capture the real Windows non-client title bar (`16px` WT icon) + client header lockup (`24px` WT icon) in Dark and Light modes.
+pub fn run_titlebar_capture(
+    controller: Arc<Mutex<AppController>>,
+    out_path: &std::path::Path,
+) -> Result<(), String> {
+    let orig_theme = controller.lock().unwrap().config.theme_mode;
+    let hinstance = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
+    let class_name: Vec<u16> = "YStorageTitlebarCaptureWindow\0".encode_utf16().collect();
+    let title: Vec<u16> = "y-storage — True App Storage Footprint\0"
+        .encode_utf16()
+        .collect();
+    let (large_icon, small_icon) = load_app_icons(hinstance);
+
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        style: 0,
+        lpfnWndProc: Some(wnd_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinstance,
+        hIcon: large_icon,
+        hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+        hbrBackground: null_mut(),
+        lpszMenuName: null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: small_icon,
+    };
+    if unsafe { RegisterClassExW(&wc) } == 0 {
+        return Err("RegisterClassExW failed in titlebar capture".into());
+    }
+
+    let init_dpi = get_dpi_for_system();
+    let (default_w, default_h) =
+        outer_size_for_dpi(DEFAULT_LOGICAL_W, DEFAULT_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
+    let init_config_snap = controller.lock().unwrap().config.clone();
+    let egui_ctx = egui::Context::default();
+    configure_fonts_and_theme(&egui_ctx, ThemeMode::Dark);
+
+    let host_state = Box::new(WindowHostState {
+        controller: Arc::clone(&controller),
+        ui_state: StorageUiState::from_config(&init_config_snap),
+        egui_ctx,
+        painter: SoftwarePainter::new(),
+        applied_titlebar_theme: None,
+        large_icon,
+        small_icon,
+        events: Vec::new(),
+        width: (DEFAULT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
+        height: (DEFAULT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
+        dpi: init_dpi,
+        pixels_per_point: dpi_to_ppp(init_dpi),
+        needs_redraw: true,
+        followup_budget: 2,
+        window_focused: true,
+        last_mouse_px: None,
+        tracking_mouse_leave: false,
+        repaint_timer_active: false,
+        smoke_mode: true,
+        start_time: Instant::now(),
+        bench_recording: false,
+        bench_idle_wm_paints: 0,
+        bench_timer_fired: false,
+        bench_samples: Vec::new(),
+    });
+    let state_ptr = Box::into_raw(host_state);
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            80,
+            80,
+            default_w,
+            default_h,
+            null_mut(),
+            null_mut(),
+            hinstance,
+            state_ptr.cast(),
+        )
+    };
+    if hwnd.is_null() {
+        unsafe { drop(Box::from_raw(state_ptr)) };
+        return Err("CreateWindowExW failed in titlebar capture".into());
+    }
+    let actual_dpi = get_dpi_for_window(hwnd);
+    let ppp = dpi_to_ppp(actual_dpi);
+    let crop_h = (112.0_f32 * ppp).round() as usize;
+
+    let mut strips: Vec<(usize, usize, Vec<u32>)> = Vec::with_capacity(2);
+    for mode in [ThemeMode::Dark, ThemeMode::Light] {
+        controller.lock().unwrap().config.theme_mode = mode;
+        unsafe {
+            let st = &mut *state_ptr;
+            st.dpi = actual_dpi;
+            st.pixels_per_point = ppp;
+            st.applied_titlebar_theme = Some(mode);
+            st.needs_redraw = true;
+            configure_fonts_and_theme(&st.egui_ctx, mode);
+            apply_titlebar_theme(hwnd, mode);
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+            InvalidateRect(hwnd, null(), 0);
+        }
+        let end = Instant::now() + std::time::Duration::from_millis(260);
+        while Instant::now() < end {
+            drain_messages_and_paint(hwnd);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        strips.push(capture_window_crop_bgra(hwnd, crop_h)?);
+    }
+
+    controller.lock().unwrap().config.theme_mode = orig_theme;
+    unsafe {
+        DestroyWindow(hwnd);
+    }
+
+    let out_w = strips[0].0.max(strips[1].0);
+    let gap = 4usize;
+    let out_h = strips[0].1 + gap + strips[1].1;
+    let mut canvas = vec![0x0026_263A_u32; out_w * out_h];
+    for (idx, (sw, sh, px)) in strips.into_iter().enumerate() {
+        let dy = if idx == 0 { 0 } else { out_h - sh };
+        for r in 0..sh {
+            let s_off = r * sw;
+            let d_off = (dy + r) * out_w;
+            canvas[d_off..d_off + sw].copy_from_slice(&px[s_off..s_off + sw]);
+        }
+    }
+    crate::png::save_bgra_u32_as_png(out_path, out_w, out_h, &canvas)
 }
 
 fn lp_xy(lparam: LPARAM) -> (f32, f32) {

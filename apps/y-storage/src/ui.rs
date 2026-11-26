@@ -256,6 +256,7 @@ pub struct StorageUiState {
     pub icon_textures: HashMap<String, egui::TextureHandle>,
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
+    wt_logo_tex: Option<(u32, egui::TextureHandle)>,
     cached_report: Option<CachedReportData>,
     cached_filtered: Option<CachedFilteredList>,
     cached_rim: Option<CachedRimMesh>,
@@ -289,6 +290,7 @@ impl Default for StorageUiState {
             icon_textures: HashMap::new(),
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
+            wt_logo_tex: None,
             cached_report: None,
             cached_filtered: None,
             cached_rim: None,
@@ -311,6 +313,71 @@ impl StorageUiState {
             ledger_height_px: cfg.ledger_height_px,
             ..Self::default()
         }
+    }
+}
+
+fn get_or_load_wt_logo_tex(
+    ctx: &egui::Context,
+    slot: &mut Option<(u32, egui::TextureHandle)>,
+    logical_px: f32,
+) -> egui::TextureId {
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let phys_px = (logical_px * ppp).round().clamp(16.0, 128.0) as u32;
+    let needs_reload = slot.as_ref().is_none_or(|(sz, _)| *sz != phys_px);
+    if needs_reload {
+        let px = phys_px as usize;
+        let rgba = crate::logo::rasterize_wt_logo_rgba(px);
+        let img = egui::ColorImage::from_rgba_unmultiplied([px, px], &rgba);
+        let handle = ctx.load_texture(
+            format!("wt_logo_mark_{phys_px}"),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
+        *slot = Some((phys_px, handle));
+    }
+    slot.as_ref().unwrap().1.id()
+}
+
+/// Shared WT header lockup (`§6.4`): unmodified `24px` WT mark + `SPACE_8` + `16.0pt` app name + `SPACE_8` + `11.5pt` muted caption.
+fn draw_wt_header_lockup(
+    ui: &mut egui::Ui,
+    logo_slot: &mut Option<(u32, egui::TextureHandle)>,
+    app_name: &str,
+    caption: &str,
+    caption_color: Color32,
+    pal: &ThemePalette,
+) {
+    const LOGO_PX: f32 = 24.0;
+    let row_h = ui.max_rect().height().clamp(LOGO_PX, HEADER_CONTROL_H);
+    let (icon_slot, _) = ui.allocate_exact_size(Vec2::new(LOGO_PX, row_h), Sense::hover());
+    let ppp = ui.ctx().pixels_per_point();
+    let icon_rect = snap_rect_to_pixels(
+        Rect::from_center_size(icon_slot.center(), Vec2::splat(LOGO_PX)),
+        ppp,
+    );
+    let tex_id = get_or_load_wt_logo_tex(ui.ctx(), logo_slot, LOGO_PX);
+    ui.painter().image(
+        tex_id,
+        icon_rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+
+    let title_font = FontId::new(16.0, FontFamily::Proportional);
+    let title_galley = ui.fonts(|f| f.layout_no_wrap(app_name.to_owned(), title_font, pal.text));
+    let (title_slot, _) =
+        ui.allocate_exact_size(Vec2::new(title_galley.size().x.ceil(), row_h), Sense::hover());
+    let title_pos = optical_galley_pos(ui, title_slot, &title_galley, None, false);
+    ui.painter().galley(title_pos, title_galley, pal.text);
+
+    if !caption.is_empty() {
+        draw_truncated_text(
+            ui,
+            caption,
+            FontId::new(11.5, FontFamily::Proportional),
+            caption_color,
+            false,
+        );
     }
 }
 
@@ -2217,13 +2284,9 @@ pub fn draw_app_ui(
                 236.0,
                 Sense::hover(),
                 |ui| {
-                    ui.label(
-                        RichText::new("y-storage")
-                            .size(16.0)
-                            .color(pal.text),
-                    );
-                    if scanning {
-                        let status = if let Some(p) = progress {
+                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                    let (status, status_color) = if scanning {
+                        let s = if let Some(p) = progress {
                             format!(
                                 "Read-only · {} · {} dirs · {}",
                                 p.phase,
@@ -2233,35 +2296,27 @@ pub fn draw_app_ui(
                         } else {
                             "Read-only · Scanning...".to_string()
                         };
-                        draw_truncated_text(
-                            ui,
-                            &status,
-                            FontId::new(11.5, FontFamily::Proportional),
-                            pal.delta_grew,
-                            false,
-                        );
+                        (s, pal.delta_grew)
                     } else if let Some(rep) = report {
-                        let status = format!(
-                            "Read-only · Last scan: {} · {:.2}s",
-                            rep.scan_timestamp_display,
-                            rep.duration_ms as f64 / 1000.0
-                        );
-                        draw_truncated_text(
-                            ui,
-                            &status,
-                            FontId::new(11.5, FontFamily::Proportional),
+                        (
+                            format!(
+                                "Read-only · Last scan: {} · {:.2}s",
+                                rep.scan_timestamp_display,
+                                rep.duration_ms as f64 / 1000.0
+                            ),
                             pal.muted,
-                            false,
-                        );
+                        )
                     } else {
-                        draw_truncated_text(
-                            ui,
-                            "Read-only · No cached scan — click Rescan",
-                            FontId::new(11.5, FontFamily::Proportional),
-                            pal.muted,
-                            false,
-                        );
-                    }
+                        ("Read-only · No cached scan — click Rescan".to_string(), pal.muted)
+                    };
+                    draw_wt_header_lockup(
+                        ui,
+                        &mut ui_state.wt_logo_tex,
+                        "y-storage",
+                        &status,
+                        status_color,
+                        &pal,
+                    );
                 },
                 |ui| {
                     // Right-to-left placement -> rightmost Settings, then Rescan, then Theme Icon immediately left of Rescan.
@@ -5044,6 +5099,37 @@ fn draw_settings_view(
                     },
                 );
             }
+
+            // About card repeating the WT header lockup (§6.4)
+            ui.add_space(SPACE_4);
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.border,
+                RADIUS_PANEL,
+                Margin::symmetric(SPACE_12, SPACE_8),
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), HEADER_CONTROL_H),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                            draw_wt_header_lockup(
+                                ui,
+                                &mut ui_state.wt_logo_tex,
+                                "y-storage",
+                                &format!(
+                                    "v{} · WT family read-only storage & dependency inspector",
+                                    env!("CARGO_PKG_VERSION")
+                                ),
+                                pal.muted,
+                                pal,
+                            );
+                        },
+                    );
+                },
+            );
         });
 
     if changed {

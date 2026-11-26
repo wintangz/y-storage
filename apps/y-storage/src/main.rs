@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod list_query;
+mod logo;
+mod logo_png;
 mod png;
 mod sw_painter;
 mod ui;
@@ -22,7 +24,9 @@ use y_platform_windows::scanner::execute_scan_with_progress;
 use crate::png::save_bgra_u32_as_png;
 use crate::sw_painter::SoftwarePainter;
 use crate::ui::{ActiveView, StorageUiState, configure_fonts_and_theme, draw_app_ui};
-use crate::win32_host::{AppController, dpi_to_ppp, run_gui_app, run_perf_benchmark};
+use crate::win32_host::{
+    AppController, dpi_to_ppp, run_gui_app, run_perf_benchmark, run_titlebar_capture,
+};
 
 #[derive(Serialize)]
 struct CliScanOutput {
@@ -46,6 +50,7 @@ fn main() {
     let mut smoke_gui_ms: Option<u64> = None;
     let mut smoke_gui_out: Option<PathBuf> = None;
     let mut bench_perf_out: Option<PathBuf> = None;
+    let mut capture_titlebar_out: Option<PathBuf> = None;
     let mut screenshot_out: Option<PathBuf> = None;
     let mut screenshot_view = "main".to_string();
     let mut screenshot_theme = ThemeMode::Dark;
@@ -83,6 +88,12 @@ fn main() {
             "--bench-perf" => {
                 if i + 1 < args.len() {
                     bench_perf_out = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
+            "--capture-titlebar" => {
+                if i + 1 < args.len() {
+                    capture_titlebar_out = Some(PathBuf::from(&args[i + 1]));
                     i += 1;
                 }
             }
@@ -189,6 +200,15 @@ fn main() {
     if let Some(bench_path) = bench_perf_out {
         if let Err(err) = run_perf_benchmark(&bench_path) {
             eprintln!("perf benchmark failed: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(cap_path) = capture_titlebar_out {
+        let controller = Arc::new(Mutex::new(AppController::load_initial()));
+        if let Err(err) = run_titlebar_capture(controller, &cap_path) {
+            eprintln!("titlebar capture failed: {err}");
             std::process::exit(1);
         }
         return;

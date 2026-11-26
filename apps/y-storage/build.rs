@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/logo_png.rs"]
+mod logo_png;
+
 fn find_rc_exe() -> Option<PathBuf> {
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
@@ -25,121 +28,15 @@ fn find_rc_exe() -> Option<PathBuf> {
     None
 }
 
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
-}
-
-fn palette_grad(t: f32) -> [u8; 3] {
-    let blue = [84u8, 185, 242];
-    let lav = [216u8, 166, 255];
-    let pink = [247u8, 168, 216];
-    let t = t.clamp(0.0, 1.0);
-    if t <= 0.5 {
-        let u = t * 2.0;
-        [
-            lerp_u8(blue[0], lav[0], u),
-            lerp_u8(blue[1], lav[1], u),
-            lerp_u8(blue[2], lav[2], u),
-        ]
-    } else {
-        let u = (t - 0.5) * 2.0;
-        [
-            lerp_u8(lav[0], pink[0], u),
-            lerp_u8(lav[1], pink[1], u),
-            lerp_u8(lav[2], pink[2], u),
-        ]
-    }
-}
-
-fn sdf_round_box(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
-    let dx = (px - cx).abs() - (hx - r);
-    let dy = (py - cy).abs() - (hy - r);
-    let ox = dx.max(0.0);
-    let oy = dy.max(0.0);
-    (ox * ox + oy * oy).sqrt() + dx.min(0.0).max(dy.min(0.0)) - r
-}
-
-fn blend(dst: &mut [u8; 4], src: [u8; 4]) {
-    let sa = src[3] as f32 / 255.0;
-    let da = dst[3] as f32 / 255.0;
-    let out_a = sa + da * (1.0 - sa);
-    if out_a <= 1e-5 {
-        *dst = [0, 0, 0, 0];
-        return;
-    }
-    for i in 0..3 {
-        let c = (src[i] as f32 * sa + dst[i] as f32 * da * (1.0 - sa)) / out_a;
-        dst[i] = c.round().clamp(0.0, 255.0) as u8;
-    }
-    dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
-}
-
-fn rasterize_icon_rgba(size: usize) -> Vec<u8> {
-    let mut out = vec![0u8; size * size * 4];
-    let s = size as f32;
-    for y in 0..size {
-        for x in 0..size {
-            let u = (x as f32 + 0.5) / s * 256.0;
-            let v = (y as f32 + 0.5) / s * 256.0;
-            let mut px = [0u8, 0, 0, 0];
-
-            // Full-bleed rounded tile (#0A0A10) + pastel rim (#54B9F2 -> #D8A6FF -> #F7A8D8), ~97% width (248/256)
-            let d_bg = sdf_round_box(u, v, 128.0, 128.0, 124.0, 124.0, 52.0);
-            if d_bg < 1.5 {
-                let cov = (1.5 - d_bg).clamp(0.0, 1.0);
-                let rim = palette_grad((u + v) / 512.0);
-                if d_bg > -12.0 {
-                    blend(&mut px, [rim[0], rim[1], rim[2], (cov * 255.0) as u8]);
-                } else {
-                    blend(&mut px, [10, 10, 16, (cov * 255.0) as u8]);
-                }
-            }
-
-            // Three stacked storage bars scaled proportionally inside full-bleed tile
-            let bars = [
-                (76.0_f32, [84u8, 185, 242], 118.0_f32, [84u8, 185, 242]),
-                (128.0_f32, [216u8, 166, 255], 152.0_f32, [247u8, 168, 216]),
-                (180.0_f32, [247u8, 168, 216], 84.0_f32, [40u8, 214, 108]),
-            ];
-            for (cy, stroke_col, fill_w, fill_col) in bars {
-                let d_tray = sdf_round_box(u, v, 128.0, cy, 90.0, 19.0, 9.5);
-                if d_tray < 1.2 {
-                    let cov = (1.2 - d_tray).clamp(0.0, 1.0);
-                    if d_tray > -5.0 {
-                        blend(
-                            &mut px,
-                            [stroke_col[0], stroke_col[1], stroke_col[2], (cov * 255.0) as u8],
-                        );
-                    } else {
-                        blend(&mut px, [20, 20, 31, (cov * 255.0) as u8]);
-                    }
-                }
-                let d_fill = sdf_round_box(u, v, 49.0 + fill_w * 0.5, cy, fill_w * 0.5, 6.5, 5.0);
-                if d_fill < 1.0 {
-                    let cov = (1.0 - d_fill).clamp(0.0, 1.0);
-                    blend(
-                        &mut px,
-                        [fill_col[0], fill_col[1], fill_col[2], (cov * 255.0) as u8],
-                    );
-                }
-            }
-
-            let off = (y * size + x) * 4;
-            out[off..off + 4].copy_from_slice(&px);
-        }
-    }
-    out
-}
-
 fn encode_ico_bmp_entry(size: usize, rgba: &[u8]) -> Vec<u8> {
-    // 40-byte BITMAPINFOHEADER + bottom-up BGRA pixels + AND mask (all 0)
+    // 40-byte BITMAPINFOHEADER + bottom-up BGRA pixels + 1-bit AND mask (transparent bit = 1)
     let mut data = Vec::new();
     data.extend_from_slice(&40u32.to_le_bytes());
     data.extend_from_slice(&(size as i32).to_le_bytes());
-    data.extend_from_slice(&((size * 2) as i32).to_le_bytes()); // color + AND mask height
-    data.extend_from_slice(&1u16.to_le_bytes()); // planes
-    data.extend_from_slice(&32u16.to_le_bytes()); // bpp
-    data.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    data.extend_from_slice(&((size * 2) as i32).to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&32u16.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&((size * size * 4) as u32).to_le_bytes());
     data.extend_from_slice(&0i32.to_le_bytes());
     data.extend_from_slice(&0i32.to_le_bytes());
@@ -155,22 +52,45 @@ fn encode_ico_bmp_entry(size: usize, rgba: &[u8]) -> Vec<u8> {
             data.push(rgba[off + 3]);
         }
     }
+
     let mask_row_bytes = ((size + 31) / 32) * 4;
-    data.resize(data.len() + mask_row_bytes * size, 0u8);
+    for y in (0..size).rev() {
+        let row_start = data.len();
+        data.resize(row_start + mask_row_bytes, 0u8);
+        for x in 0..size {
+            let off = (y * size + x) * 4;
+            if rgba[off + 3] == 0 {
+                data[row_start + (x / 8)] |= 0x80 >> (x & 7);
+            }
+        }
+    }
     data
 }
 
-fn build_multi_size_ico() -> Vec<u8> {
+fn build_multi_size_ico_from_png(logo_png_path: &Path) -> Vec<u8> {
+    let png_bytes = fs::read(logo_png_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read canonical WT artwork at '{}': {e}",
+            logo_png_path.display()
+        )
+    });
+    let (src_w, src_h, src_rgba) = logo_png::decode_png_rgba(&png_bytes).unwrap_or_else(|e| {
+        panic!(
+            "failed to decode WT artwork '{}': {e}",
+            logo_png_path.display()
+        )
+    });
+
     let sizes = [16usize, 20, 24, 32, 40, 48, 64, 128, 256];
     let mut entries = Vec::with_capacity(sizes.len());
     for s in sizes {
-        let rgba = rasterize_icon_rgba(s);
+        let rgba = logo_png::downsample_trimmed_logo_rgba(src_w, src_h, &src_rgba, s);
         entries.push((s, encode_ico_bmp_entry(s, &rgba)));
     }
 
     let mut ico = Vec::new();
-    ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    ico.extend_from_slice(&1u16.to_le_bytes()); // type = ICO
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
     ico.extend_from_slice(&(entries.len() as u16).to_le_bytes());
 
     let mut offset = 6 + entries.len() * 16;
@@ -196,14 +116,16 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=y-storage.manifest");
     println!("cargo:rerun-if-changed=app.rc");
-    println!("cargo:rerun-if-changed=../../icon.svg");
+    println!("cargo:rerun-if-changed=src/logo_png.rs");
+    println!("cargo:rerun-if-changed=../../assets/logo-mark.png");
 
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let logo_png_path = manifest_dir.join("../../assets/logo-mark.png");
     let assets_dir = manifest_dir.join("assets");
     let _ = fs::create_dir_all(&assets_dir);
     let ico_path = assets_dir.join("y-storage.ico");
-    let ico_bytes = build_multi_size_ico();
+    let ico_bytes = build_multi_size_ico_from_png(&logo_png_path);
     if fs::read(&ico_path).ok().as_deref() != Some(ico_bytes.as_slice()) {
         fs::write(&ico_path, &ico_bytes).expect("write y-storage.ico");
     }
