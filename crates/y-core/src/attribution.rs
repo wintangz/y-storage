@@ -644,6 +644,8 @@ fn find_by_token(
             &[
                 "\\appdata\\local\\microsoft\\edge",
                 "\\program files (x86)\\microsoft\\edge",
+                "\\program files (x86)\\microsoft\\edgecore",
+                "\\program files (x86)\\microsoft\\edgeupdate",
                 "\\programdata\\microsoft\\edgeupdate",
             ],
             &["microsoft edge"],
@@ -745,6 +747,22 @@ fn find_by_token(
                 return Some((idx, *is_body));
             }
         }
+    }
+
+    // EdgeWebView2 Runtime when SystemComponent=1 filtered it out of canonical registry apps.
+    if path_matches_token(path_lower, leaf_lower, "\\program files (x86)\\microsoft\\edgewebview")
+        || path_matches_token(path_lower, leaf_lower, "\\appdata\\local\\microsoft\\edgewebview")
+    {
+        let idx = ensure_synthetic_app(
+            buckets,
+            store_buckets,
+            "sys:edge-webview2",
+            "Microsoft Edge WebView2 Runtime",
+            "Microsoft Corporation",
+            Some(NoTouchCategory::SystemRuntime),
+            false,
+        );
+        return Some((idx, path_lower.contains("\\program files")));
     }
 
     // Standalone EasyAntiCheat data/install when no separate Uninstall entry exists.

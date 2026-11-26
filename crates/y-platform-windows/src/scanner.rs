@@ -679,10 +679,32 @@ fn size_single_directory(
     sum_subtree_bytes_iterative(dir_path, exclusions, sys_win_key, progress)
 }
 
+pub fn scan_directory_tree_for_test(
+    root_path: &str,
+    exclusions: &[String],
+    sys_win_dir: &str,
+) -> FolderNode {
+    let sys_win_key = normalize_path_key(sys_win_dir);
+    let progress = ProgressCounters::new(Arc::new(AtomicBool::new(false)));
+    scan_node_recursive(
+        SubtreeTask {
+            path: normalize_windows_path(root_path),
+            name: root_path.to_string(),
+            depth: 0,
+            is_drive_root: true,
+        },
+        exclusions,
+        &sys_win_key,
+        &HashSet::new(),
+        &progress,
+        None,
+    )
+}
+
 pub fn execute_scan_with_progress(
     config: &AppConfig,
     previous_history: Option<&HistoryEntryRef>,
-    on_progress: Option<&dyn Fn(ScanProgressSnapshot)>,
+    on_progress: Option<&(dyn Fn(ScanProgressSnapshot) + Sync)>,
 ) -> ScanReport {
     let start = std::time::Instant::now();
     let sys_win = get_windows_directory();
@@ -713,79 +735,89 @@ pub fn execute_scan_with_progress(
 
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = ProgressCounters::new(cancel);
-
+    let active_phase = Arc::new(Mutex::new("Preparing scan".to_string()));
     let stop_reporter = Arc::new(AtomicBool::new(false));
-    let report_handle = on_progress.map(|cb| {
-        let p = progress.clone();
-        let stop = Arc::clone(&stop_reporter);
-        // Scope handles callbacks safely; we emit snapshots from a lightweight monitor or inline.
-        let _ = (p, stop, cb);
-        ()
-    });
-    let _ = report_handle;
 
     let mut all_units: Vec<ScannedUnit> = Vec::new();
     let mut enabled_letters: HashSet<char> = HashSet::new();
 
-    for drv in &drives {
-        if drv.full_walk_enabled {
-            enabled_letters.insert(drv.letter.to_ascii_uppercase());
-            if let Some(cb) = on_progress {
-                cb(ScanProgressSnapshot {
-                    phase: format!("Scanning {}", drv.root),
-                    current_path: drv.root.clone(),
-                    dirs_walked: progress.dirs_walked.load(Ordering::Relaxed),
-                    files_counted: progress.files_counted.load(Ordering::Relaxed),
-                    bytes_counted: progress.bytes_counted.load(Ordering::Relaxed),
-                });
-            }
-            let (root_tree, root_sys) = parallel_scan_drive_root(
-                &drv.root,
-                &drv.exclusions,
-                &sys_win_key,
-                &shell_keys,
-                &progress,
-            );
-            let units = decompose_scanned_tree(&root_tree, &catalog.apps, &shell_folders, &root_sys);
-            all_units.extend(units);
+    std::thread::scope(|scope| {
+        if let Some(cb) = on_progress {
+            let p = progress.clone();
+            let stop = Arc::clone(&stop_reporter);
+            let phase = Arc::clone(&active_phase);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let cur_phase = phase.lock().unwrap().clone();
+                    let cur_path = p.current_path.lock().unwrap().clone();
+                    cb(ScanProgressSnapshot {
+                        phase: cur_phase,
+                        current_path: cur_path,
+                        dirs_walked: p.dirs_walked.load(Ordering::Relaxed),
+                        files_counted: p.files_counted.load(Ordering::Relaxed),
+                        bytes_counted: p.bytes_counted.load(Ordering::Relaxed),
+                    });
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+            });
         }
-    }
 
-    // Secondary-drive individual InstallLocation sizing for drives NOT enabled for full walk.
-    let mut secondary_candidates: Vec<String> = Vec::new();
-    let mut seen_sec_keys: HashSet<String> = HashSet::new();
-    for app in &catalog.apps {
-        for loc in &app.all_install_locations {
-            if let Some(letter) = path_drive_letter(loc) {
-                if !enabled_letters.contains(&letter.to_ascii_uppercase()) {
-                    let norm = normalize_windows_path(loc);
-                    let key = normalize_path_key(&norm);
-                    if seen_sec_keys.insert(key) && std::path::Path::new(&norm).is_dir() {
-                        secondary_candidates.push(norm);
+        for drv in &drives {
+            if drv.full_walk_enabled {
+                enabled_letters.insert(drv.letter.to_ascii_uppercase());
+                *active_phase.lock().unwrap() = format!("Scanning {}", drv.root);
+                let (root_tree, root_sys) = parallel_scan_drive_root(
+                    &drv.root,
+                    &drv.exclusions,
+                    &sys_win_key,
+                    &shell_keys,
+                    &progress,
+                );
+                let units =
+                    decompose_scanned_tree(&root_tree, &catalog.apps, &shell_folders, &root_sys);
+                all_units.extend(units);
+            }
+        }
+
+        *active_phase.lock().unwrap() = "Sizing app install locations".to_string();
+        let mut secondary_candidates: Vec<String> = Vec::new();
+        let mut seen_sec_keys: HashSet<String> = HashSet::new();
+        for app in &catalog.apps {
+            for loc in &app.all_install_locations {
+                if let Some(letter) = path_drive_letter(loc) {
+                    if !enabled_letters.contains(&letter.to_ascii_uppercase()) {
+                        let norm = normalize_windows_path(loc);
+                        let key = normalize_path_key(&norm);
+                        if seen_sec_keys.insert(key) && std::path::Path::new(&norm).is_dir() {
+                            secondary_candidates.push(norm);
+                        }
                     }
                 }
             }
         }
-    }
 
-    let sec_sized: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::with_capacity(secondary_candidates.len()));
-    let sec_queue: Mutex<VecDeque<String>> = Mutex::new(secondary_candidates.into_iter().collect());
-    std::thread::scope(|s| {
-        for _ in 0..4 {
-            s.spawn(|| {
-                let _io = BackgroundIoGuard::enter();
-                loop {
-                    let next = sec_queue.lock().unwrap().pop_front();
-                    let Some(path) = next else { break };
-                    let bytes = size_single_directory(&path, &[], &sys_win_key, &progress);
-                    sec_sized.lock().unwrap().push((path, bytes));
-                }
-            });
-        }
+        let sec_sized: Mutex<Vec<(String, u64)>> =
+            Mutex::new(Vec::with_capacity(secondary_candidates.len()));
+        let sec_queue: Mutex<VecDeque<String>> =
+            Mutex::new(secondary_candidates.into_iter().collect());
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let _io = BackgroundIoGuard::enter();
+                    loop {
+                        let next = sec_queue.lock().unwrap().pop_front();
+                        let Some(path) = next else { break };
+                        let bytes = size_single_directory(&path, &[], &sys_win_key, &progress);
+                        sec_sized.lock().unwrap().push((path, bytes));
+                    }
+                });
+            }
+        });
+
+        let sec_units = deduplicate_secondary_install_trees(&sec_sized.into_inner().unwrap());
+        all_units.extend(sec_units);
+        stop_reporter.store(true, Ordering::Relaxed);
     });
-
-    let sec_units = deduplicate_secondary_install_trees(&sec_sized.into_inner().unwrap());
-    all_units.extend(sec_units);
 
     if let Some(cb) = on_progress {
         cb(ScanProgressSnapshot {
