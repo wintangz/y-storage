@@ -203,6 +203,7 @@ fn personal_shell_folders_and_drive_reconciliation_conserve_every_byte() {
         all_install_locations: vec!["C:\\Users\\Win\\AppData\\Local\\Discord".into()],
         no_touch: None,
         is_store_fallback: false,
+        display_icon: None,
     }];
     let shell_folders = vec!["C:\\Users\\Win\\Documents".to_string()];
 
@@ -452,4 +453,22 @@ fn scan_history_config_and_cache_roundtrip_atomically() {
     assert!(load_last_scan(&last_path).is_some());
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn cached_app_icon_base64_and_json_roundtrip() {
+    use y_core::model::CachedAppIcon;
+    let mut pixels = Vec::with_capacity(18 * 18 * 4);
+    for idx in 0..(18 * 18) {
+        pixels.push((idx % 255) as u8);
+        pixels.push(((idx * 3) % 255) as u8);
+        pixels.push(((idx * 7) % 255) as u8);
+        pixels.push(if idx % 2 == 0 { 255 } else { 128 });
+    }
+    let icon = CachedAppIcon::from_rgba(18, 18, &pixels);
+    let json = serde_json::to_string(&icon).unwrap();
+    let parsed: CachedAppIcon = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.width, 18);
+    assert_eq!(parsed.height, 18);
+    assert_eq!(parsed.decode_rgba().as_deref(), Some(pixels.as_slice()));
 }

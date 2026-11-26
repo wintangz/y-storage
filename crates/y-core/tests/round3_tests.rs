@@ -47,6 +47,7 @@ fn versioned_product_under_publisher_rule_sums_versions_and_skips_non_versions()
         all_install_locations: vec!["C:\\Program Files\\Google\\Chrome\\Application".into()],
         no_touch: None,
         is_store_fallback: false,
+        display_icon: None,
     }];
     let units = vec![
         ScannedUnit {
@@ -171,6 +172,7 @@ fn xdata_rule_matches_installed_and_known_apps_without_force_matching_unknowns()
         all_install_locations: vec![],
         no_touch: None,
         is_store_fallback: false,
+        display_icon: None,
     }];
     let units = vec![
         ScannedUnit {
@@ -456,6 +458,7 @@ fn catalog_embed_override_and_corrupt_fallback_work_as_specified() {
             all_install_locations: vec!["D:\\Games\\Steam\\steamapps\\common\\FIFA 23".into()],
             no_touch: None,
             is_store_fallback: false,
+            display_icon: None,
         }],
         &HashMap::new(),
         &[ScannedUnit {

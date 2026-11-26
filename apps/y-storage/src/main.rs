@@ -243,14 +243,18 @@ fn render_screenshot(
     let mut config = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
     config.theme_mode = theme;
 
-    let report = load_last_scan(&default_last_scan_path())
+    let mut report = load_last_scan(&default_last_scan_path())
         .unwrap_or_else(|| execute_scan_with_progress(&config, None, None));
+    if !report.apps.is_empty() && report.apps.iter().all(|a| a.icon_rgba.is_none()) {
+        y_platform_windows::icons::populate_report_icons(&mut report);
+    }
 
     let mut ui_state = StorageUiState::default();
     ui_state.sort_mode = sort_mode;
     ui_state.sort_direction = sort_direction;
     ui_state.filter_chip = filter_chip;
     ui_state.search_query = search_query.to_string();
+    let hover_size_mode = view == "hover-size";
     match view {
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
@@ -303,14 +307,32 @@ fn render_screenshot(
         ThemeMode::Light => 0x00EE_F4FA,
     };
 
-    // Run 3 layout passes so ScrollAreas, Areas, and panel heights settle crisply.
-    for step in 0..3 {
+    // Run 3+ passes so ScrollAreas, panel heights, and hover tooltip delays settle crisply.
+    let steps = if hover_size_mode { 4 } else { 3 };
+    for step in 0..steps {
+        let mut events = Vec::new();
+        let time_s = if hover_size_mode {
+            match step {
+                0 => 0.0,
+                1 => 0.1,
+                2 => 0.9,
+                _ => 1.5,
+            }
+        } else {
+            step as f64 * 0.05
+        };
+        if hover_size_mode && step >= 1 {
+            if let Some(size_r) = ui_state.first_row_size_rect {
+                events.push(egui::Event::PointerMoved(size_r.center()));
+            }
+        }
         let mut raw = RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
                 Vec2::new(logical_w, logical_h),
             )),
-            time: Some(step as f64 * 0.05),
+            time: Some(time_s),
+            events,
             focused: true,
             ..Default::default()
         };
@@ -329,9 +351,29 @@ fn render_screenshot(
                 &sys_win,
                 &mut |_| {},
             );
+            if hover_size_mode && step + 1 == steps {
+                if let Some(size_r) = ui_state.first_row_size_rect {
+                    let hp = size_r.center();
+                    let p = c.layer_painter(egui::LayerId::new(
+                        egui::Order::Tooltip,
+                        egui::Id::new("hover_cursor_indicator"),
+                    ));
+                    let tip_pts = vec![
+                        hp,
+                        hp + Vec2::new(0.0, 13.0),
+                        hp + Vec2::new(3.5, 9.5),
+                        hp + Vec2::new(9.5, 9.5),
+                    ];
+                    p.add(egui::Shape::convex_polygon(
+                        tip_pts,
+                        egui::Color32::WHITE,
+                        egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
+                    ));
+                }
+            }
         });
         painter.apply_textures(&full_out.textures_delta);
-        if step == 2 {
+        if step + 1 == steps {
             let clipped = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
             painter.paint_and_blit(
                 std::ptr::null_mut(),

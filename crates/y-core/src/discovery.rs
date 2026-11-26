@@ -358,6 +358,14 @@ pub fn build_registry_catalog(
             });
 
         let publisher_clean = entry.publisher.trim().to_string();
+        let display_icon_clean = {
+            let trimmed = entry.display_icon.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
         if let Some(idx) = existing_idx {
             let existing = &mut apps[idx];
             if existing.display_name != display_name && !existing.aliases.contains(&display_name) {
@@ -371,6 +379,9 @@ pub fn build_registry_catalog(
             }
             if existing.inferred_install_location.is_none() && inferred_loc.is_some() {
                 existing.inferred_install_location = inferred_loc.clone();
+            }
+            if existing.display_icon.is_none() && display_icon_clean.is_some() {
+                existing.display_icon = display_icon_clean.clone();
             }
             if let Some(loc) = effective_loc {
                 if !existing
@@ -420,6 +431,7 @@ pub fn build_registry_catalog(
             all_install_locations: all_locs,
             no_touch,
             is_store_fallback: false,
+            display_icon: display_icon_clean,
         });
     }
 

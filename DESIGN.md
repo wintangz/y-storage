@@ -1,7 +1,7 @@
 # WT Native Instrument Design System (`DESIGN.md`)
 
 **Applies to**: All WT native desktop utilities (`y-storage`, `z-controller`, and future `WT Manager`).
-**Last Updated**: 2026-11-26 (`table-layout-1`)
+**Last Updated**: 2026-11-26 (`visual-identity-1`)
 
 ---
 
@@ -16,34 +16,34 @@ WT applications are precision instruments, not dashboards: every pixel, colour, 
 ### 2.1 Pastel & Semantic Palette
 | Token | Dark Mode | Light Mode | Permitted Usage |
 |---|---|---|---|
-| `accent_line` (`LOGO_BLUE`) | `#54B9F2` | `#2F9BE8` | Active borders, active sort/filter highlights, primary meter fills, chevron cues |
-| `lavender` (`LOGO_LAVENDER`) | `#D8A6FF` | `#783EB8` | Secondary/install-only drive meters, system remainder markers |
-| `delta_grew` (`LOGO_PINK`) | `#F7A8D8` | `#C43058` | Positive growth delta text, active pressed control border, Unattributed marker |
-| `status_green` | `#28D66C` | `#148A44` | Shrank delta, `GREEN` safety zone, zero-diff ledger indicator |
-| `status_red` | `#F04458` | `#CE2840` | `RED` user-data zone, critical reconciliation mismatch |
+| `accent_line` (`LOGO_BLUE`) | `#54B9F2` | `#2F9BE8` | Active borders, active sort/filter outlines, primary meter fills, chevron cues |
+| `lavender` (`LOGO_LAVENDER`) | `#D8A6FF` | `#D8A6FF` (`#783EB8` small text) | Secondary/install-only drive meters, `Windows & system` tick; `#783EB8` Light chip text |
+| `delta_grew` (`LOGO_PINK`) | `#F7A8D8` | `#F7A8D8` border/tick (`#C43058` text) | Active pressed control border, `Unattributed` tick; `#C43058` Light `+delta` text |
+| `status_green` (`STATUS_GREEN`) | `#28D66C` | `#28D66C` dot/tick (`#148A44` text) | Steady-state dot & `Shared caches` tick; `#148A44` Light `-delta` / `GREEN` chip text |
+| `status_red` (`STATUS_RED`) | `#F04458` | `#F04458` dot (`#CE2840` text) | Critical mismatch dot; `#CE2840` Light `RED` zone badge |
 | `no_touch_outline` | `#CE5C6C` | `#BC4050` | `NO-TOUCH` / `LOCKED` / `missing` outline badges |
 
-**Strict Pastel Rule**: Pastel and semantic colours appear **only** as thin `1px`–`2px` indicators, meter fills, active borders, and subtle tinted state badges (`pill_*_fill` + `1px` outline). **Never** use raw pastel accents as large surface fills, **never** paint solid opaque pastel badges (`#54B9F2` blocks with dark text), and **never** colour body prose with pastel accents.
+**Strict Pastel Rule**: Pastel and semantic colours appear **only** as thin `1px`–`2px` indicators, meter fills, active borders, and subtle tinted state badges (`pill_*_fill` + `1px` outline). Following `z-controller`, active `pill_blue_fill` (`#121C28` Dark / `#EBF6FF` Light) chips and buttons render text in `text` (`#EDEDF2` / `#1C2733`), not neon `#54B9F2`. `pill_red_fill` syncs to `z-controller` (`#261622` Dark / `#FDF1F9` Light). **Never** use raw pastel accents as large surface fills or paint solid opaque pastel badges.
 
 ### 2.2 Surface Hierarchy
 | Surface | Dark Mode | Light Mode | Role |
 |---|---|---|---|
 | `bg` (`S0` Canvas) | `#0A0A10` | `#EEF4FA` | Window backdrop and header canvas |
-| `panel_alt` (`S1` Recessed) | `#10101A` | `#F4F8FC` | Pinned footer background and recessed sub-sections |
-| `panel` (`S2` Primary) | `#14141F` | `#FFFFFF` | Ledger containers, drive pods, expanded inspection panels, Settings cards |
-| `widget` / `hover` / `active` (`S3`) | `#181826` / `#1F1F31` / `#182230` | `#F5F8FC` / `#E9F2FA` / `#DCEBF8` | Interactive buttons, sort toggles, filter pills |
-| `input_bg` (`Well`) | `#0A0A10` | `#FFFFFF` | Text input fields (guaranteed contrast against both header canvas and panel cards) |
+| `panel_alt` (`S1` Recessed) | `#10101A` | `#F4F8FC` | Sticky table header, expanded drawer, pinned footer (`z-controller` `faint_bg`) |
+| `panel` (`S2` Primary) | `#14141F` | `#FFFFFF` | Ledger containers, drive pods, Settings cards |
+| `widget` / `hover` / `active` (`S3`) | `#181826` / `#1F1F31` / `#182230` | `#F5F8FC` / `#E9F2FA` / `#DCEBF8` | Interactive buttons, sort toggles, filter pills, hovered table rows |
+| `input_bg` (`Well`) | `#0A0A10` | `#EEF4FA` on `panel` (`#FFFFFF` on `bg` canvas) | Text input fields (matches `z-controller` inside white cards while preserving crisp contrast on `#EEF4FA` header canvas) |
 | `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders and ledger row dividers |
 
-### 2.3 Typography & Luminance Hierarchy (`Segoe UI` + Monospace paths)
+### 2.3 Typography & Luminance Hierarchy (`Segoe UI` + `Consolas` Instrument Numerals)
 Minimum readable type floor across all UI copy: **`10.5pt`**. No text may render smaller than `10.5pt`.
 
 | Tier | Size & Weight | Luminance Token | Role |
 |---|---|---|---|
-| **T1 — Instrument Headline** | `16.0pt` Strong | `text` (`#EDEDF2` / `#1C2733`) | View titles (`y-storage`, Settings title) & **drive free-space headline figures** |
-| **T2 — Dominant Row Quantity** | `13.5pt` Strong | `text` | Primary row totals (each app's attributed byte total) |
-| **T3 — Primary Row Identity** | `13.0pt` Regular | `text` | App display names; `12.0pt`–`12.5pt` for pinned ledger titles and button labels |
-| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` Regular | `muted` (`#9A9AB0` / `#5F7186`) / `subtle_text` (`#72748C` / `#748499`) | Publishers (`11.0pt subtle_text`), breakdown paths (`11.5pt` Monospace `text`), breakdown sizes (`11.5pt` Regular `text`), shared dependency sizes (`11.5pt` Regular `muted`), provenance/basis (`10.5pt subtle_text`), section eyebrows (`10.5pt`) |
+| **T1 — Instrument Headline** | `16.0pt` Strong (`14.5pt` `Consolas Bold` for drive free space) | `text` (`#EDEDF2` / `#1C2733`) | View titles (`y-storage`, Settings title) & **drive free-space headline figures** |
+| **T2 — Dominant Row Quantity** | `13.0pt`–`13.5pt` `Consolas Bold` | `text` | Primary row totals (each app's attributed byte total) |
+| **T3 — Primary Row Identity** | `13.0pt` `Segoe UI` | `text` | App display names; `12.0pt`–`12.5pt` for pinned ledger titles and button labels |
+| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` | `muted` (`#9A9AB0` / `#5F7186`) / `subtle_text` (`#82829A` / `#748499`) | Publishers (`11.0pt subtle_text`), breakdown paths (`11.5pt` `Consolas`), breakdown & shared dependency sizes (`11.5pt` `Consolas`), provenance/basis (`10.5pt subtle_text`, word-capped `…`), section eyebrows (`10.5pt`) |
 
 ### 2.4 Spacing Scale (Multiples of 4 Only)
 `SPACE_4 = 4.0`, `SPACE_8 = 8.0`, `SPACE_12 = 12.0`, `SPACE_16 = 16.0`. All margins, row padding, and control gaps come strictly from `{4, 8, 12, 16}`.
@@ -81,9 +81,9 @@ Reject any screen exhibiting:
 ## 5. App-Specific: `y-storage`
 
 - **Signature Element 1 — Drive Instrument Header**: Each physical drive sits in an `8px` pod whose dominant readout is **free space** (`T1`, `16.0pt` Strong) paired with a full-width `2px`-radius proportional usage meter (`used_bytes / total_bytes`). Free space must visually outweigh app-row figures.
-- **Signature Element 2 — Tabular App Footprint Ledger & Sub-Tables**: The main app list renders inside one `8px` ledger panel headed by a sticky `26px` sortable column-header row (`Chevron · App name · Publisher · Growth delta · Total size`). Clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default; active column shows directional sort arrow; clicking again flips asc/desc). Collapsed rows use fixed x-positions across every row, hairline dividers, and subtle `widget_hover` row highlights (no per-row cards). Expanding a row elevates it with a `2px` `accent_line` bar over `panel_alt` and renders two aligned sub-tables whose right size columns share the exact right edge of the main `Total size` column:
-  - `Locations (N)` table: `Zone · Path · Basis · Size` (zone pill stays `design-pass-1`; truncated `Path` and `Basis` expose full text on hover).
-  - `Dependencies` table: `Dependency name · Kind · Confidence · Used by · Own size`, with long dependency `basis` placed on a quieter full-width second line beneath the dependency row.
+- **Signature Element 2 — Tabular App Footprint Ledger & Sub-Tables**: The main app list renders inside one `8px` ledger panel headed by a sticky `26px` sortable column-header row (`Chevron · App name · Publisher · Growth delta · Total size`). Clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default; active column shows directional sort arrow; clicking again flips asc/desc). Each `App name` cell renders a fixed `18x18 px` Windows app icon extracted once per scan (or one consistent neutral muted folder-tile glyph for standalone/service entries) without shifting column x-positions. All numeric columns (`Total size`, `Growth delta`, `Own size`, drive counters) use `Consolas` monospace numerals; `Total size` includes a quiet `<= 2px` muted proportion bar relative to the largest unfiltered app and exposes exact bytes + `%` share on hover. Expanding a row elevates it with a `2px` `accent_line` bar over `panel_alt` and hairline top/bottom `border` rules, rendering two aligned sub-tables whose right size columns share the exact right edge of the main `Total size` column:
+  - `Locations (N)` table: `Zone · Path · Basis · Size` (`Basis` word-boundary capped `"…"` with full hover tooltip).
+  - `Dependencies` table: `Dependency name · Kind · Confidence · Used by · Own size`, with `dep.basis` capped cleanly to one word-boundary line ending in `"…"` underneath the dependency row (full text on hover).
 - **Signature Element 3 — Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one compact `8px` ledger block with `2px` colour ticks and sizes aligned to the exact same right column as the app list; beneath them sits the exact reconciliation equation ending with a quiet green dot + `diff 0 B` (or a red alert badge only if `diff != 0`).
 
 ---

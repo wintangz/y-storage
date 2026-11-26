@@ -89,7 +89,13 @@ impl AppController {
         let config = AppConfig::load_or_default(&config_path, &drives, &sys_win);
         let history = ScanHistory::load_or_default(&history_path);
         let cache = FolderSizeCache::load_or_default(&cache_path);
-        let report = load_last_scan(&last_scan_path);
+        let mut report = load_last_scan(&last_scan_path);
+        if let Some(ref mut rep) = report {
+            if !rep.apps.is_empty() && rep.apps.iter().all(|a| a.icon_rgba.is_none()) {
+                y_platform_windows::icons::populate_report_icons(rep);
+                let _ = save_last_scan_atomic(&last_scan_path, rep);
+            }
+        }
 
         Self {
             config,

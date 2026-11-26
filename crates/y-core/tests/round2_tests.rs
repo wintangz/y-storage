@@ -114,6 +114,7 @@ fn attribution_coverage_2_routes_green_caches_dot_folders_and_flutter_preserving
         all_install_locations: vec!["C:\\Users\\Win\\AppData\\Local\\Discord".into()],
         no_touch: None,
         is_store_fallback: false,
+        display_icon: None,
     }];
     let units = vec![
         ScannedUnit {
@@ -225,6 +226,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
             all_install_locations: vec!["D:\\Games\\Steam\\steamapps\\common\\FIFA 23".into()],
             no_touch: None,
             is_store_fallback: false,
+            display_icon: None,
         },
         InstalledApp {
             id: "reg:ea".into(),
@@ -236,6 +238,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
             all_install_locations: vec!["C:\\Program Files\\Electronic Arts".into()],
             no_touch: None,
             is_store_fallback: false,
+            display_icon: None,
         },
         InstalledApp {
             id: "reg:note".into(),
@@ -247,6 +250,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
             all_install_locations: vec!["C:\\Program Files\\PlainApp".into()],
             no_touch: None,
             is_store_fallback: false,
+            display_icon: None,
         },
         InstalledApp {
             id: "store:msteams".into(),
@@ -258,6 +262,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
             all_install_locations: vec![],
             no_touch: None,
             is_store_fallback: true,
+            display_icon: None,
         },
     ];
     let units = vec![

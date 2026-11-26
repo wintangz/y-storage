@@ -1,4 +1,5 @@
 pub mod dep_scan;
+pub mod icons;
 pub mod paths;
 pub mod registry;
 pub mod scanner;

@@ -425,6 +425,8 @@ pub fn attribute_scan(
                 bases: b.bases,
                 items: b.items,
                 dependencies: Vec::new(),
+                display_icon: b.app.display_icon,
+                icon_rgba: None,
             }
         })
         .collect();
@@ -676,6 +678,7 @@ fn ensure_synthetic_app(
             all_install_locations: Vec::new(),
             no_touch,
             is_store_fallback,
+            display_icon: None,
         },
         bases: Vec::new(),
         items: Vec::new(),

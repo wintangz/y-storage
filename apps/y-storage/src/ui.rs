@@ -14,11 +14,22 @@ use y_platform_windows::scanner::ScanProgressSnapshot;
 
 use crate::list_query::filter_and_sort_apps;
 
-// Pastel accent constants (used for accents, bars, and chips only; never large fills or body text).
+// Pastel and semantic constants synced directly with z-controller (DESIGN.md §2.1).
 pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
 pub const LOGO_BLUE_READABLE: Color32 = Color32::from_rgb(47, 155, 232); // #2F9BE8
 pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 168, 216); // #F7A8D8
 pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(216, 166, 255); // #D8A6FF
+pub const STATUS_GREEN: Color32 = Color32::from_rgb(40, 214, 108); // #28D66C
+pub const STATUS_RED: Color32 = Color32::from_rgb(240, 68, 88); // #F04458
+
+#[inline]
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let u = t.clamp(0.0, 1.0);
+    let r = (a.r() as f32 + (b.r() as f32 - a.r() as f32) * u).round() as u8;
+    let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32) * u).round() as u8;
+    let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32) * u).round() as u8;
+    Color32::from_rgb(r, g, bl)
+}
 
 // Single multiples-of-4 spacing scale used uniformly everywhere.
 pub const SPACE_4: f32 = 4.0;
@@ -34,6 +45,9 @@ const RADIUS_BADGE: f32 = 2.0;
 
 const SIZE_COL_W: f32 = 96.0;
 const DELTA_COL_W: f32 = 96.0;
+const APP_ICON_SIZE: f32 = 18.0;
+const PROP_BAR_W: f32 = 76.0;
+const PROP_BAR_H: f32 = 2.0;
 const SCROLL_GUTTER_W: f32 = 6.0 + SPACE_8;
 const HEADER_CONTROL_H: f32 = 28.0;
 const TABLE_HEADER_H: f32 = 26.0;
@@ -43,6 +57,9 @@ const PINNED_ROW_H: f32 = 24.0;
 const SUB_LINE1_H: f32 = 22.0;
 const SUB_LINE2_H: f32 = 16.0;
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
+const CONSOLA_FONT_PATH: &str = r"C:\Windows\Fonts\consola.ttf";
+const CONSOLAB_FONT_PATH: &str = r"C:\Windows\Fonts\consolab.ttf";
+const CASCADIA_MONO_FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -82,6 +99,7 @@ pub struct ThemePalette {
     pub subtle_text: Color32,
     pub hint_text: Color32,
     pub input_bg: Color32,
+    pub header_input_bg: Color32,
     pub widget: Color32,
     pub widget_hover: Color32,
     pub widget_active: Color32,
@@ -104,54 +122,56 @@ impl ThemePalette {
     pub fn for_mode(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Dark => Self {
-                bg: Color32::from_rgb(10, 10, 16),        // #0A0A10
-                panel: Color32::from_rgb(20, 20, 31),     // #14141F
+                bg: Color32::from_rgb(10, 10, 16),        // #0A0A10 (z-controller bg)
+                panel: Color32::from_rgb(20, 20, 31),     // #14141F (z-controller panel)
                 panel_alt: Color32::from_rgb(16, 16, 26), // #10101A (z-controller faint_bg)
-                border: Color32::from_rgb(38, 38, 58),    // #26263A
-                text: Color32::from_rgb(237, 237, 242),   // #EDEDF2
-                muted: Color32::from_rgb(154, 154, 176),  // #9A9AB0
-                subtle_text: Color32::from_rgb(114, 116, 140), // #72748C
-                hint_text: Color32::from_rgb(86, 88, 110), // #56586E (distinct dim hint)
-                input_bg: Color32::from_rgb(10, 10, 16),  // #0A0A10
-                widget: Color32::from_rgb(24, 24, 38),    // #181826 (z-controller widget)
-                widget_hover: Color32::from_rgb(31, 31, 49), // #1F1F31 (z-controller widget_hover)
-                widget_active: Color32::from_rgb(24, 34, 48), // #182230 (z-controller widget_active)
-                accent_line: LOGO_BLUE,
-                lavender_text: LOGO_LAVENDER,
-                status_green: Color32::from_rgb(40, 214, 108),  // #28D66C
-                status_red: Color32::from_rgb(240, 68, 88),     // #F04458
-                delta_grew: LOGO_PINK,
-                no_touch_outline: Color32::from_rgb(206, 92, 108),
-                pill_blue_fill: Color32::from_rgb(18, 28, 40),  // #121C28 (z-controller pill_blue_fill)
+                border: Color32::from_rgb(38, 38, 58),    // #26263A (z-controller border)
+                text: Color32::from_rgb(237, 237, 242),   // #EDEDF2 (z-controller text)
+                muted: Color32::from_rgb(154, 154, 176),  // #9A9AB0 (z-controller muted)
+                subtle_text: Color32::from_rgb(130, 130, 154), // #82829A (pure R==G axis synced with z-controller)
+                hint_text: Color32::from_rgb(100, 100, 122),   // #64647A (pure R==G axis dim placeholder hint)
+                input_bg: Color32::from_rgb(10, 10, 16),       // #0A0A10 (z-controller extreme_bg)
+                header_input_bg: Color32::from_rgb(10, 10, 16), // #0A0A10
+                widget: Color32::from_rgb(24, 24, 38),         // #181826 (z-controller widget)
+                widget_hover: Color32::from_rgb(31, 31, 49),   // #1F1F31 (z-controller widget_hover)
+                widget_active: Color32::from_rgb(24, 34, 48),  // #182230 (z-controller widget_active)
+                accent_line: LOGO_BLUE,                        // #54B9F2 (z-controller accent_line)
+                lavender_text: LOGO_LAVENDER,                  // #D8A6FF
+                status_green: STATUS_GREEN,                    // #28D66C
+                status_red: STATUS_RED,                        // #F04458
+                delta_grew: LOGO_PINK,                         // #F7A8D8
+                no_touch_outline: Color32::from_rgb(206, 92, 108), // #CE5C6C (DESIGN.md exception)
+                pill_blue_fill: Color32::from_rgb(18, 28, 40), // #121C28 (z-controller pill_blue_fill)
                 pill_green_fill: Color32::from_rgb(16, 38, 26),
                 pill_lav_fill: Color32::from_rgb(32, 24, 46),
-                pill_red_fill: Color32::from_rgb(46, 20, 26),
+                pill_red_fill: Color32::from_rgb(38, 22, 34),  // #261622 (z-controller pill_pink_fill)
                 scrollbar_thumb: Color32::from_rgb(46, 46, 70), // #2E2E46
                 scrollbar_thumb_hover: LOGO_BLUE,
             },
             ThemeMode::Light => Self {
-                bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA
-                panel: Color32::from_rgb(255, 255, 255),  // #FFFFFF
+                bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA (z-controller bg)
+                panel: Color32::from_rgb(255, 255, 255),  // #FFFFFF (z-controller panel)
                 panel_alt: Color32::from_rgb(244, 248, 252), // #F4F8FC (z-controller faint_bg)
                 border: Color32::from_rgb(217, 228, 240), // #D9E4F0 (z-controller border)
-                text: Color32::from_rgb(28, 39, 51),      // #1C2733
-                muted: Color32::from_rgb(95, 113, 134),   // #5F7186
-                subtle_text: Color32::from_rgb(116, 132, 153), // #748499
-                hint_text: Color32::from_rgb(152, 166, 184), // #98A6B8 (distinct muted hint)
-                input_bg: Color32::from_rgb(255, 255, 255), // #FFFFFF (crisp contrast vs #EEF4FA header)
-                widget: Color32::from_rgb(245, 248, 252), // #F5F8FC (z-controller widget)
+                text: Color32::from_rgb(28, 39, 51),      // #1C2733 (z-controller text)
+                muted: Color32::from_rgb(95, 113, 134),   // #5F7186 (z-controller muted)
+                subtle_text: Color32::from_rgb(116, 132, 153), // #748499 (DESIGN.md T4 exception)
+                hint_text: Color32::from_rgb(152, 166, 184),   // #98A6B8
+                input_bg: Color32::from_rgb(238, 244, 250),    // #EEF4FA (z-controller extreme_bg on #FFFFFF cards)
+                header_input_bg: Color32::from_rgb(255, 255, 255), // #FFFFFF (crisp contrast on #EEF4FA header canvas)
+                widget: Color32::from_rgb(245, 248, 252),      // #F5F8FC (z-controller widget)
                 widget_hover: Color32::from_rgb(233, 242, 250), // #E9F2FA (z-controller widget_hover)
                 widget_active: Color32::from_rgb(220, 235, 248), // #DCEBF8 (z-controller widget_active)
-                accent_line: LOGO_BLUE_READABLE,
-                lavender_text: Color32::from_rgb(120, 62, 184),
-                status_green: Color32::from_rgb(20, 138, 68),
-                status_red: Color32::from_rgb(206, 40, 64),
-                delta_grew: Color32::from_rgb(196, 48, 88),
-                no_touch_outline: Color32::from_rgb(188, 64, 80),
+                accent_line: LOGO_BLUE_READABLE,               // #2F9BE8 (z-controller accent_line)
+                lavender_text: Color32::from_rgb(120, 62, 184), // #783EB8 (Light contrast exception)
+                status_green: Color32::from_rgb(20, 138, 68),   // #148A44 (Light text exception)
+                status_red: Color32::from_rgb(206, 40, 64),     // #CE2840 (Light text exception)
+                delta_grew: Color32::from_rgb(196, 48, 88),     // #C43058 (Light text exception)
+                no_touch_outline: Color32::from_rgb(188, 64, 80), // #BC4050 (DESIGN.md exception)
                 pill_blue_fill: Color32::from_rgb(235, 246, 255), // #EBF6FF (z-controller pill_blue_fill)
                 pill_green_fill: Color32::from_rgb(230, 248, 237),
                 pill_lav_fill: Color32::from_rgb(243, 236, 255),
-                pill_red_fill: Color32::from_rgb(253, 234, 237),
+                pill_red_fill: Color32::from_rgb(253, 241, 249), // #FDF1F9 (z-controller pill_pink_fill)
                 scrollbar_thumb: Color32::from_rgb(192, 208, 226), // #C0D0E2
                 scrollbar_thumb_hover: LOGO_BLUE_READABLE,
             },
@@ -175,6 +195,9 @@ pub struct StorageUiState {
     pub expand_unattributed: bool,
     pub new_exclusion_inputs: HashMap<char, String>,
     pub applied_theme: Option<ThemeMode>,
+    pub icon_textures: HashMap<String, egui::TextureHandle>,
+    pub icon_cache_scan_ts: Option<u64>,
+    pub first_row_size_rect: Option<Rect>,
 }
 
 impl Default for StorageUiState {
@@ -195,6 +218,9 @@ impl Default for StorageUiState {
             expand_unattributed: false,
             new_exclusion_inputs: HashMap::new(),
             applied_theme: None,
+            icon_textures: HashMap::new(),
+            icon_cache_scan_ts: None,
+            first_row_size_rect: None,
         }
     }
 }
@@ -276,16 +302,35 @@ fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> Option<(Strin
 }
 
 pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
+    let mut fonts = FontDefinitions::default();
     if let Ok(bytes) = std::fs::read(SEGOE_UI_FONT_PATH) {
-        let mut fonts = FontDefinitions::default();
         fonts
             .font_data
             .insert("segoe_ui".to_owned(), FontData::from_owned(bytes));
         if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
             list.insert(0, "segoe_ui".to_owned());
         }
-        ctx.set_fonts(fonts);
     }
+    let mono_regular_bytes = std::fs::read(CONSOLA_FONT_PATH)
+        .or_else(|_| std::fs::read(CASCADIA_MONO_FONT_PATH))
+        .ok();
+    if let Some(mono_bytes) = mono_regular_bytes {
+        fonts
+            .font_data
+            .insert("consola_mono".to_owned(), FontData::from_owned(mono_bytes.clone()));
+        if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
+            list.insert(0, "consola_mono".to_owned());
+        }
+        let bold_bytes = std::fs::read(CONSOLAB_FONT_PATH).unwrap_or(mono_bytes);
+        fonts
+            .font_data
+            .insert("consola_bold".to_owned(), FontData::from_owned(bold_bytes));
+        fonts.families.insert(
+            FontFamily::Name("MonospaceBold".into()),
+            vec!["consola_bold".to_owned(), "consola_mono".to_owned()],
+        );
+    }
+    ctx.set_fonts(fonts);
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
         (TextStyle::Heading, FontId::new(16.0, FontFamily::Proportional)),
@@ -298,6 +343,21 @@ pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
     .collect();
     ctx.set_style(style);
     apply_theme_visuals(ctx, mode);
+}
+
+#[inline]
+fn mono_font_for(ui: &egui::Ui, size_px: f32, bold: bool) -> FontId {
+    if bold
+        && ui.fonts(|f| {
+            f.families()
+                .iter()
+                .any(|fam| *fam == FontFamily::Name("MonospaceBold".into()))
+        })
+    {
+        FontId::new(size_px, FontFamily::Name("MonospaceBold".into()))
+    } else {
+        FontId::new(size_px, FontFamily::Monospace)
+    }
 }
 
 pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
@@ -324,7 +384,7 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
     visuals.widgets.noninteractive.bg_fill = pal.panel;
     visuals.widgets.noninteractive.weak_bg_fill = pal.panel;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.muted);
     visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
 
     visuals.widgets.inactive.bg_fill = pal.widget;
@@ -483,8 +543,6 @@ fn draw_z_button(
     let font_id = FontId::new(font_size, FontFamily::Proportional);
     let text_color = if !enabled {
         pal.muted
-    } else if active_highlight {
-        pal.accent_line
     } else {
         pal.text
     };
@@ -524,6 +582,7 @@ fn draw_crisp_text_input(
     text: &mut String,
     width: f32,
     hint: &str,
+    well_bg: Color32,
     pal: &ThemePalette,
 ) -> egui::Response {
     let edit_id = ui.make_persistent_id(id_salt);
@@ -538,7 +597,7 @@ fn draw_crisp_text_input(
 
     let inner = draw_crisp_frame(
         ui,
-        pal.input_bg,
+        well_bg,
         border_col,
         RADIUS_CONTROL,
         Margin::symmetric(SPACE_8, 3.0),
@@ -713,13 +772,100 @@ fn confidence_chip_style(conf: DependencyConfidence, pal: &ThemePalette) -> Chip
         DependencyConfidence::Proven => ChipStyle {
             fill: pal.pill_blue_fill,
             stroke: pal.accent_line,
-            text: pal.accent_line,
+            text: pal.text,
         },
         DependencyConfidence::Inferred => ChipStyle {
             fill: Color32::TRANSPARENT,
             stroke: pal.muted,
             text: pal.muted,
         },
+    }
+}
+
+/// Truncates a string cleanly on a word boundary ending in `"…"` so it never breaks mid-word at `max_w`.
+fn truncate_word_boundary_px(
+    ui: &egui::Ui,
+    text: &str,
+    font_id: &FontId,
+    max_w: f32,
+) -> (String, bool) {
+    if max_w <= 8.0 || text.is_empty() {
+        return (String::new(), !text.is_empty());
+    }
+    let full_w = ui.fonts(|f| {
+        f.layout_no_wrap(text.to_owned(), font_id.clone(), Color32::WHITE)
+            .size()
+            .x
+    });
+    if full_w <= max_w {
+        return (text.to_string(), false);
+    }
+
+    let mut best_end: Option<usize> = None;
+    let mut prev_sep = true;
+    for (idx, ch) in text.char_indices() {
+        let is_sep = ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '|');
+        if is_sep && !prev_sep && idx > 0 {
+            let trimmed = text[..idx].trim_end();
+            if !trimmed.is_empty() {
+                let cand = format!("{trimmed}…");
+                let w = ui.fonts(|f| {
+                    f.layout_no_wrap(cand, font_id.clone(), Color32::WHITE)
+                        .size()
+                        .x
+                });
+                if w <= max_w {
+                    best_end = Some(idx);
+                } else {
+                    break;
+                }
+            }
+        }
+        prev_sep = is_sep;
+    }
+
+    if let Some(end_idx) = best_end {
+        return (format!("{}…", text[..end_idx].trim_end()), true);
+    }
+
+    // Fallback for a single unspaced token wider than `max_w`.
+    let mut char_end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let next_idx = idx + ch.len_utf8();
+        let cand = format!("{}…", &text[..next_idx]);
+        let w = ui.fonts(|f| {
+            f.layout_no_wrap(cand, font_id.clone(), Color32::WHITE)
+                .size()
+                .x
+        });
+        if w <= max_w {
+            char_end = next_idx;
+        } else {
+            break;
+        }
+    }
+    if char_end == 0 {
+        ("…".to_string(), true)
+    } else {
+        (format!("{}…", &text[..char_end]), true)
+    }
+}
+
+fn draw_word_capped_text(
+    ui: &mut egui::Ui,
+    text: &str,
+    font_id: FontId,
+    color: Color32,
+    max_w: f32,
+) -> egui::Response {
+    let (display, truncated) = truncate_word_boundary_px(ui, text, &font_id, max_w);
+    let resp = ui.add(
+        egui::Label::new(RichText::new(&display).font(font_id).color(color)).selectable(false),
+    );
+    if truncated {
+        resp.on_hover_text(text)
+    } else {
+        resp
     }
 }
 
@@ -802,14 +948,61 @@ fn draw_right_aligned_size(
     color: Color32,
     strong: bool,
 ) {
-    let mut rt = RichText::new(format_size_2dec(bytes))
-        .size(size_px)
+    let font_id = mono_font_for(ui, size_px, strong);
+    let rt = RichText::new(format_size_2dec(bytes))
+        .font(font_id)
         .color(color);
-    if strong {
-        rt = rt.strong();
-    }
     ui.add(egui::Label::new(rt).selectable(false))
         .on_hover_text(format_exact_bytes(bytes));
+}
+
+fn get_or_load_app_icon_tex(
+    ctx: &egui::Context,
+    cache: &mut HashMap<String, egui::TextureHandle>,
+    app: &y_core::model::AttributedApp,
+) -> Option<egui::TextureId> {
+    if !cache.contains_key(&app.id) {
+        let cached = app.icon_rgba.as_ref()?;
+        let rgba = cached.decode_rgba()?;
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [cached.width as usize, cached.height as usize],
+            &rgba,
+        );
+        let handle = ctx.load_texture(
+            format!("app_icon_{}", app.id),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
+        cache.insert(app.id.clone(), handle);
+    }
+    cache.get(&app.id).map(|h| h.id())
+}
+
+/// Consistent neutral fallback tile for standalone folders, dot-folders, services, and iconless entries.
+fn draw_fallback_app_icon(painter: &egui::Painter, rect: Rect, pal: &ThemePalette, ppp: f32) {
+    let snapped = paint_crisp_bordered_box(
+        painter,
+        rect,
+        RADIUS_PILL,
+        pal.widget,
+        pal.border,
+        1.0,
+        ppp,
+    );
+    let c = snapped.center();
+    let st = Stroke::new(1.2_f32, pal.muted);
+    let pts = [
+        Pos2::new(c.x - 4.5, c.y - 3.5),
+        Pos2::new(c.x - 1.0, c.y - 3.5),
+        Pos2::new(c.x + 0.3, c.y - 2.0),
+        Pos2::new(c.x + 4.5, c.y - 2.0),
+        Pos2::new(c.x + 4.5, c.y + 3.5),
+        Pos2::new(c.x - 4.5, c.y + 3.5),
+    ];
+    for w in pts.windows(2) {
+        painter.line_segment([w[0], w[1]], st);
+    }
+    painter.line_segment([pts[5], pts[0]], st);
 }
 
 fn draw_chevron(ui: &mut egui::Ui, expanded: bool, color: Color32) {
@@ -1104,20 +1297,16 @@ fn draw_filter_radio_chip(
     pal: &ThemePalette,
 ) -> bool {
     let font_id = FontId::new(11.5, FontFamily::Proportional);
-    let text_color = if selected { pal.accent_line } else { pal.muted };
+    let text_color = if selected { pal.text } else { pal.muted };
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
     let desired_w = (galley.size().x + SPACE_16).round();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 22.0), Sense::click());
     let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
         (pal.widget_active, LOGO_PINK, pal.text)
     } else if resp.hovered() {
-        (
-            pal.widget_hover,
-            pal.accent_line,
-            if selected { pal.accent_line } else { pal.text },
-        )
+        (pal.widget_hover, pal.accent_line, pal.text)
     } else if selected {
-        (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+        (pal.pill_blue_fill, pal.accent_line, pal.text)
     } else {
         (pal.widget, pal.border, pal.muted)
     };
@@ -1295,27 +1484,28 @@ pub fn draw_app_ui(
                                     ui.set_width(inner_w);
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = SPACE_4;
-                                        // Line 1: Drive letter + used on left, headline 16pt free space on right
+                                        // Line 1: Drive letter + monospace used on left, headline 14.5pt monospace free space on right
                                         draw_split_row(
                                             ui,
                                             20.0,
-                                            (inner_w * 0.46).clamp(92.0, 102.0),
+                                            104.0,
                                             Sense::hover(),
                                             |ui| {
                                                 ui.spacing_mut().item_spacing.x = SPACE_4;
                                                 ui.label(
                                                     RichText::new(format!("{}:\\", drv.letter))
-                                                        .size(12.5)
+                                                        .size(12.0)
                                                         .strong()
                                                         .color(pal.text),
                                                 );
+                                                let used_font = mono_font_for(ui, 10.5, false);
                                                 ui.add(
                                                     egui::Label::new(
                                                         RichText::new(format!(
                                                             "{} used",
                                                             format_size_2dec(drv.used_bytes)
                                                         ))
-                                                        .size(10.5)
+                                                        .font(used_font)
                                                         .color(pal.subtle_text),
                                                     )
                                                     .selectable(false),
@@ -1336,11 +1526,11 @@ pub fn draw_app_ui(
                                                     )
                                                     .selectable(false),
                                                 );
+                                                let free_font = mono_font_for(ui, 14.5, true);
                                                 ui.add(
                                                     egui::Label::new(
                                                         RichText::new(format_size_2dec(drv.free_bytes))
-                                                            .size(16.0)
-                                                            .strong()
+                                                            .font(free_font)
                                                             .color(pal.text),
                                                     )
                                                     .selectable(false),
@@ -1451,6 +1641,7 @@ pub fn draw_app_ui(
                             &mut ui_state.search_query,
                             260.0,
                             "Search app name, publisher, or path...",
+                            pal.header_input_bg,
                             &pal,
                         );
                         if ui_state.search_query != prev_q {
@@ -1518,10 +1709,11 @@ pub fn draw_app_ui(
                     |ui| {
                         if let Some(rep) = report {
                             let apps_sum: u64 = rep.apps.iter().map(|a| a.total_bytes).sum();
+                            let sum_font = mono_font_for(ui, 11.5, false);
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(format!("{} attributed", format_size_2dec(apps_sum)))
-                                        .size(11.5)
+                                        .font(sum_font)
                                         .color(pal.muted),
                                 )
                                 .selectable(false),
@@ -1652,6 +1844,15 @@ fn draw_main_app_list(
         .iter()
         .map(|r| (r.target_id.as_str(), r.dependent_count))
         .collect();
+
+    if ui_state.icon_cache_scan_ts != Some(rep.scan_timestamp_unix) {
+        ui_state.icon_textures.clear();
+        ui_state.icon_cache_scan_ts = Some(rep.scan_timestamp_unix);
+    }
+    ui_state.first_row_size_rect = None;
+
+    let max_unfiltered_bytes = rep.apps.iter().map(|a| a.total_bytes).max().unwrap_or(0);
+    let total_attributed_bytes: u64 = rep.apps.iter().map(|a| a.total_bytes).sum();
 
     let sys_drive_letter = rep
         .drives
@@ -1826,16 +2027,50 @@ fn draw_main_app_list(
                                 );
                             }
 
-                            // 2. App name (+ inline NO-TOUCH/LOCKED state chip)
+                            // 2. App name (18x18 real icon or consistent neutral fallback + title + inline NO-TOUCH/LOCKED badge)
+                            let mut truncated_name_tip: Option<String> = None;
                             {
                                 let name_rect = cols.name.rect(y0, y1);
+                                let icon_rect = Rect::from_center_size(
+                                    Pos2::new(
+                                        (name_rect.min.x + APP_ICON_SIZE * 0.5).round(),
+                                        name_rect.center().y.round(),
+                                    ),
+                                    Vec2::splat(APP_ICON_SIZE),
+                                );
+                                if let Some(tex_id) =
+                                    get_or_load_app_icon_tex(ui.ctx(), &mut ui_state.icon_textures, app)
+                                {
+                                    ui.painter().image(
+                                        tex_id,
+                                        icon_rect,
+                                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                        Color32::WHITE,
+                                    );
+                                } else {
+                                    draw_fallback_app_icon(ui.painter(), icon_rect, pal, ppp);
+                                }
+
+                                let text_rect = Rect::from_min_max(
+                                    Pos2::new((icon_rect.max.x + SPACE_8).min(name_rect.max.x), name_rect.min.y),
+                                    name_rect.max,
+                                );
                                 let name_font = FontId::new(13.0, FontFamily::Proportional);
                                 let mut n_ui = table_cell_ui(
                                     ui,
-                                    name_rect,
+                                    text_rect,
                                     Layout::left_to_right(Align::Center),
                                 );
                                 n_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                let measured_name_w = n_ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        app.display_name.clone(),
+                                        name_font.clone(),
+                                        pal.text,
+                                    )
+                                    .size()
+                                    .x
+                                });
                                 if let Some(nt) = app.no_touch {
                                     let chip_lbl = nt.label();
                                     let chip_text_w = n_ui.fonts(|f| {
@@ -1848,16 +2083,10 @@ fn draw_main_app_list(
                                         .x
                                     });
                                     let chip_reserve = chip_text_w + 14.0 + SPACE_8;
-                                    let max_name_w = (name_rect.width() - chip_reserve).max(40.0);
-                                    let measured_name_w = n_ui.fonts(|f| {
-                                        f.layout_no_wrap(
-                                            app.display_name.clone(),
-                                            name_font.clone(),
-                                            pal.text,
-                                        )
-                                        .size()
-                                        .x
-                                    });
+                                    let max_name_w = (text_rect.width() - chip_reserve).max(40.0);
+                                    if measured_name_w > max_name_w + 0.5 {
+                                        truncated_name_tip = Some(app.display_name.clone());
+                                    }
                                     let text_alloc_w = measured_name_w.min(max_name_w);
                                     let (t_rect, _) = n_ui.allocate_exact_size(
                                         Vec2::new(text_alloc_w, y1 - y0),
@@ -1882,6 +2111,9 @@ fn draw_main_app_list(
                                         if expanded { pal.panel_alt } else { pal.panel },
                                     );
                                 } else {
+                                    if measured_name_w > text_rect.width() + 0.5 {
+                                        truncated_name_tip = Some(app.display_name.clone());
+                                    }
                                     draw_truncated_text(
                                         &mut n_ui,
                                         &app.display_name,
@@ -1893,51 +2125,111 @@ fn draw_main_app_list(
                             }
 
                             // 3. Publisher
+                            let mut truncated_pub_tip: Option<String> = None;
                             if let Some(first_pub) = app.publishers.first() {
+                                let pub_rect = cols.publisher.rect(y0, y1);
+                                let pub_font = FontId::new(11.0, FontFamily::Proportional);
+                                let pub_w = ui.fonts(|f| {
+                                    f.layout_no_wrap(first_pub.clone(), pub_font.clone(), pal.subtle_text)
+                                        .size()
+                                        .x
+                                });
+                                if pub_w > pub_rect.width() + 0.5 {
+                                    truncated_pub_tip = Some(first_pub.clone());
+                                }
                                 let mut p_ui = table_cell_ui(
                                     ui,
-                                    cols.publisher.rect(y0, y1),
+                                    pub_rect,
                                     Layout::left_to_right(Align::Center),
                                 );
                                 draw_truncated_text(
                                     &mut p_ui,
                                     first_pub,
-                                    FontId::new(11.0, FontFamily::Proportional),
+                                    pub_font,
                                     pal.subtle_text,
                                     false,
                                 );
                             }
 
-                            // 4. Growth delta
-                            if let Some((d_text, d_col, d_tip)) =
-                                format_delta_display(app.growth, pal)
-                            {
+                            // 4. Growth delta (monospace numerals for +/- deltas)
+                            let delta_info = format_delta_display(app.growth, pal);
+                            if let Some((ref d_text, d_col, _)) = delta_info {
                                 let mut d_ui = table_cell_ui(
                                     ui,
                                     cols.delta.rect(y0, y1),
                                     Layout::right_to_left(Align::Center),
                                 );
+                                let d_font = if d_text == "new" {
+                                    FontId::new(11.0, FontFamily::Proportional)
+                                } else {
+                                    mono_font_for(&d_ui, 11.5, false)
+                                };
                                 d_ui.add(
-                                    egui::Label::new(RichText::new(&d_text).size(11.5).color(d_col))
-                                        .selectable(false),
-                                )
-                                .on_hover_text(d_tip);
+                                    egui::Label::new(
+                                        RichText::new(d_text).font(d_font).color(d_col),
+                                    )
+                                    .selectable(false),
+                                );
                             }
 
-                            // 5. Total size
+                            // 5. Total size (Consolas Bold numerals + thin <= 2px quiet proportion bar)
+                            let size_cell_rect = cols.size.rect(y0, y1);
+                            if row_idx == 0 {
+                                ui_state.first_row_size_rect = Some(size_cell_rect);
+                            }
                             {
+                                let text_rect = Rect::from_min_max(
+                                    size_cell_rect.min,
+                                    Pos2::new(size_cell_rect.max.x, (y1 - 4.0).max(y0 + 14.0)),
+                                );
                                 let mut s_ui = table_cell_ui(
                                     ui,
-                                    cols.size.rect(y0, y1),
+                                    text_rect,
                                     Layout::right_to_left(Align::Center),
                                 );
-                                draw_right_aligned_size(
-                                    &mut s_ui,
-                                    app.total_bytes,
-                                    13.5,
-                                    pal.text,
-                                    true,
+                                let s_font = mono_font_for(&s_ui, 13.0, true);
+                                s_ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format_size_2dec(app.total_bytes))
+                                            .font(s_font)
+                                            .color(pal.text),
+                                    )
+                                    .selectable(false),
                                 );
+
+                                // Thin 2px muted proportion indicator relative to largest unfiltered app.
+                                let row_surface = if expanded { pal.panel_alt } else { pal.panel };
+                                let track_rect = Rect::from_min_max(
+                                    Pos2::new((size_cell_rect.max.x - PROP_BAR_W).max(size_cell_rect.min.x), y1 - PROP_BAR_H - 1.0),
+                                    Pos2::new(size_cell_rect.max.x, y1 - 1.0),
+                                );
+                                let track_col = lerp_color(row_surface, pal.border, 0.55);
+                                ui.painter()
+                                    .rect_filled(track_rect, Rounding::same(1.0), track_col);
+
+                                let ratio = if max_unfiltered_bytes > 0 {
+                                    (app.total_bytes as f64 / max_unfiltered_bytes as f64).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                                let fill_w = if app.total_bytes == 0 {
+                                    0.0
+                                } else {
+                                    (track_rect.width() * ratio as f32).clamp(1.0, track_rect.width())
+                                };
+                                if fill_w > 0.0 {
+                                    let bar_col = lerp_color(
+                                        row_surface,
+                                        pal.accent_line,
+                                        if pal.bg.r() < 128 { 0.52 } else { 0.45 },
+                                    );
+                                    let fill_rect = Rect::from_min_size(
+                                        track_rect.min,
+                                        Vec2::new(fill_w, track_rect.height()),
+                                    );
+                                    ui.painter()
+                                        .rect_filled(fill_rect, Rounding::same(1.0), bar_col);
+                                }
                             }
 
                             let sum_click_rect = Rect::from_min_max(
@@ -1949,14 +2241,40 @@ fn draw_main_app_list(
                                 ui.make_persistent_id(("app_row_toggle", &app.id)),
                                 Sense::click(),
                             );
-                            if sum_resp.clicked() {
+                            let mut cell_tooltip: Option<String> = None;
+                            if let Some(pos) = sum_resp.hover_pos() {
+                                if size_cell_rect.contains(pos) {
+                                    let share_pct = if total_attributed_bytes > 0 {
+                                        (app.total_bytes as f64 / total_attributed_bytes as f64)
+                                            * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    cell_tooltip = Some(format!(
+                                        "{} · {:.2}% share",
+                                        format_exact_bytes(app.total_bytes),
+                                        share_pct
+                                    ));
+                                } else if cols.delta.rect(y0, y1).contains(pos) {
+                                    cell_tooltip = delta_info.map(|(_, _, tip)| tip);
+                                } else if cols.publisher.rect(y0, y1).contains(pos) {
+                                    cell_tooltip = truncated_pub_tip;
+                                } else if cols.name.rect(y0, y1).contains(pos) {
+                                    cell_tooltip = truncated_name_tip;
+                                }
+                            }
+                            let row_hovered = sum_resp.hovered();
+                            let row_clicked = sum_resp.clicked();
+                            if let Some(tip) = cell_tooltip {
+                                let _ = sum_resp.on_hover_text(tip);
+                            }
+                            if row_clicked {
                                 if expanded {
                                     ui_state.expanded_apps.remove(&app.id);
                                 } else {
                                     ui_state.expanded_apps.insert(app.id.clone());
                                 }
                             }
-                            let row_hovered = sum_resp.hovered();
 
                             if expanded {
                                 let sub_x0 = cols.name.min_x;
@@ -2141,21 +2459,22 @@ fn draw_main_app_list(
                                     }
 
                                     {
+                                        let b_rect = loc_cols.basis.rect(ry0, ry1);
                                         let mut b_ui = table_cell_ui(
                                             ui,
-                                            loc_cols.basis.rect(ry0, ry1),
+                                            b_rect,
                                             Layout::left_to_right(Align::Center),
                                         );
                                         let basis_str = item
                                             .basis
                                             .map(|b| b.label())
                                             .unwrap_or("—");
-                                        draw_truncated_text(
+                                        draw_word_capped_text(
                                             &mut b_ui,
                                             basis_str,
                                             FontId::new(10.5, FontFamily::Proportional),
                                             pal.subtle_text,
-                                            false,
+                                            b_rect.width(),
                                         );
                                     }
 
@@ -2456,25 +2775,30 @@ fn draw_main_app_list(
                                             }
                                         }
 
-                                        // Full-width quieter second line for dependency basis so sub-columns stay uncrowded.
+                                        // Single word-boundary capped line ending in "…" so basis lines never form full-width walls.
                                         let (basis_r, _) = ui.allocate_exact_size(
                                             Vec2::new(panel_w, SUB_LINE2_H + 2.0),
                                             Sense::hover(),
                                         );
+                                        let basis_cap_w =
+                                            (sub_w - SIZE_COL_W - SPACE_16).clamp(180.0, 560.0);
                                         let mut db_ui = table_cell_ui(
                                             ui,
                                             Rect::from_min_max(
                                                 Pos2::new(sub_x0, basis_r.min.y),
-                                                Pos2::new(cols.size.max_x, basis_r.max.y),
+                                                Pos2::new(
+                                                    (sub_x0 + basis_cap_w).min(cols.size.max_x),
+                                                    basis_r.max.y,
+                                                ),
                                             ),
                                             Layout::left_to_right(Align::Center),
                                         );
-                                        draw_truncated_text(
+                                        draw_word_capped_text(
                                             &mut db_ui,
                                             &dep.basis,
                                             FontId::new(10.5, FontFamily::Proportional),
                                             pal.subtle_text,
-                                            false,
+                                            basis_cap_w,
                                         );
                                     }
                                 }
@@ -2503,7 +2827,7 @@ fn draw_main_app_list(
                     ui.painter().rect_filled(
                         Rect::from_min_size(inner_row_rect.min, Vec2::new(inner_row_rect.width(), 1.0)),
                         Rounding::ZERO,
-                        pal.accent_line,
+                        pal.border,
                     );
                     ui.painter().rect_filled(
                         Rect::from_min_size(
@@ -2511,7 +2835,7 @@ fn draw_main_app_list(
                             Vec2::new(inner_row_rect.width(), 1.0),
                         ),
                         Rounding::ZERO,
-                        pal.accent_line,
+                        pal.border,
                     );
                 } else if row_outer_rect.inner {
                     ui.painter().set(
@@ -2689,7 +3013,7 @@ fn draw_reverse_dependency_overlay(
                                 ChipStyle {
                                     fill: pal.pill_blue_fill,
                                     stroke: pal.accent_line,
-                                    text: pal.accent_line,
+                                    text: pal.text,
                                 },
                                 pal.panel,
                             );
@@ -2865,7 +3189,7 @@ fn draw_pinned_bottom_groups(
                     "Shared & system caches",
                     rep.shared_caches_total_bytes,
                     &format!("{} regenerable Temp / DXCache / Package Cache folders", rep.shared_caches.len()),
-                    pal.status_green,
+                    STATUS_GREEN,
                     &mut ui_state.expand_shared_caches,
                     true,
                     pal,
@@ -2887,7 +3211,7 @@ fn draw_pinned_bottom_groups(
                     "Unattributed",
                     rep.unattributed_total_bytes,
                     &format!("{} folders with no verified app owner", rep.unattributed.len()),
-                    pal.delta_grew,
+                    LOGO_PINK,
                     &mut ui_state.expand_unattributed,
                     false,
                     pal,
@@ -2992,7 +3316,7 @@ fn draw_pinned_bottom_groups(
                                 .selectable(false),
                             );
                             let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                            ui.painter().circle_filled(dot_r.center(), 3.0, pal.status_green);
+                            ui.painter().circle_filled(dot_r.center(), 3.0, STATUS_GREEN);
                         } else {
                             paint_chip(
                                 ui,
@@ -3136,6 +3460,7 @@ fn draw_dependencies_view(
                 &mut ui_state.dep_search_query,
                 250.0,
                 "Filter dependency or app...",
+                pal.header_input_bg,
                 pal,
             );
         },
@@ -3274,7 +3599,7 @@ fn draw_reverse_group_header(
                     ChipStyle {
                         fill: pal.pill_blue_fill,
                         stroke: pal.accent_line,
-                        text: pal.accent_line,
+                        text: pal.text,
                     },
                     pal.panel,
                 );
@@ -3473,6 +3798,7 @@ fn draw_settings_view(
                                 input,
                                 280.0,
                                 &format!("{}:\\FolderToExclude", target.letter),
+                                pal.input_bg,
                                 pal,
                             );
                             if draw_z_button(
@@ -3583,6 +3909,8 @@ mod tests {
                     confidence: DependencyConfidence::Proven,
                     imported_by_binary: false,
                 }],
+                display_icon: None,
+                icon_rgba: None,
             }],
             shared_caches: vec![],
             shared_caches_total_bytes: 0,
@@ -3661,5 +3989,38 @@ mod tests {
             });
             assert!(!out.shapes.is_empty());
         }
+    }
+
+    #[test]
+    fn word_boundary_truncation_never_splits_mid_word_and_ends_with_ellipsis() {
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let long_basis = "manifest: __Installer/installerdata.xml (EAAntiCheat) + fingerprint: eaanticheat.gameservicelauncher.exe, eaanticheat.gameservicelauncher.dll + catalog: EA Sports title requires EA App client & EABackgroundService";
+        let font = FontId::new(10.5, FontFamily::Proportional);
+        let mut capped_out = String::new();
+        let mut truncated_flag = false;
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
+                ..Default::default()
+            },
+            |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    let (capped, trunc) = truncate_word_boundary_px(ui, long_basis, &font, 320.0);
+                    capped_out = capped;
+                    truncated_flag = trunc;
+                });
+            },
+        );
+        assert!(truncated_flag);
+        assert!(capped_out.ends_with('…'));
+        assert!(!capped_out.contains("eaanticheat.gameservice…"));
+        let body = capped_out.trim_end_matches('…');
+        assert!(long_basis.starts_with(body));
+        let next_char = long_basis[body.len()..].chars().next().unwrap();
+        assert!(
+            next_char.is_whitespace() || matches!(next_char, ',' | ';' | ')' | '|'),
+            "expected word boundary after {body:?}, next char was {next_char:?}"
+        );
     }
 }

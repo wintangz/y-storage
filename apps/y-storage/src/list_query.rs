@@ -185,6 +185,8 @@ mod tests {
             bases,
             items,
             dependencies: Vec::new(),
+            display_icon: None,
+            icon_rgba: None,
         }
     }
 

@@ -190,6 +190,106 @@ pub struct RegistryDiscoveryStats {
     pub canonical_with_inferred_install_location: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedAppIcon {
+    pub width: u16,
+    pub height: u16,
+    pub rgba_b64: String,
+}
+
+impl CachedAppIcon {
+    #[must_use]
+    pub fn from_rgba(width: u16, height: u16, rgba: &[u8]) -> Self {
+        Self {
+            width,
+            height,
+            rgba_b64: encode_base64(rgba),
+        }
+    }
+
+    #[must_use]
+    pub fn decode_rgba(&self) -> Option<Vec<u8>> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let expected_len = (self.width as usize)
+            .checked_mul(self.height as usize)?
+            .checked_mul(4)?;
+        let decoded = decode_base64(&self.rgba_b64)?;
+        if decoded.len() == expected_len {
+            Some(decoded)
+        } else {
+            None
+        }
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) & 0x3F] as char);
+        out.push(TABLE[(n >> 12) & 0x3F] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) & 0x3F] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n & 0x3F] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let raw = input.trim().as_bytes();
+    if raw.is_empty() {
+        return Some(Vec::new());
+    }
+    if raw.len() % 4 != 0 {
+        return None;
+    }
+    let val = |b: u8| -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity((raw.len() / 4) * 3);
+    for (idx, chunk) in raw.chunks_exact(4).enumerate() {
+        let is_last = idx + 1 == raw.len() / 4;
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        let pad_c = chunk[2] == b'=';
+        let pad_d = chunk[3] == b'=';
+        if (pad_c && !pad_d) || ((pad_c || pad_d) && !is_last) {
+            return None;
+        }
+        let c = if pad_c { 0 } else { val(chunk[2])? };
+        let d = if pad_d { 0 } else { val(chunk[3])? };
+        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
+        out.push(((n >> 16) & 0xFF) as u8);
+        if !pad_c {
+            out.push(((n >> 8) & 0xFF) as u8);
+        }
+        if !pad_d {
+            out.push((n & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledApp {
     pub id: String,
@@ -201,6 +301,8 @@ pub struct InstalledApp {
     pub all_install_locations: Vec<String>,
     pub no_touch: Option<NoTouchCategory>,
     pub is_store_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_icon: Option<String>,
 }
 
 impl InstalledApp {
@@ -270,6 +372,10 @@ pub struct AttributedApp {
     pub items: Vec<BreakdownItem>,
     #[serde(default)]
     pub dependencies: Vec<DependencyRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_rgba: Option<CachedAppIcon>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
