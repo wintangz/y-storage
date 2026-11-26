@@ -346,9 +346,9 @@ pub fn run_gui_app(
         outer_size_for_dpi(DEFAULT_LOGICAL_W, DEFAULT_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
     let (min_w, min_h) =
         outer_size_for_dpi(MIN_LOGICAL_W, MIN_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
-    let (init_theme, saved_win) = {
+    let (init_theme, saved_win, init_config_snap) = {
         let g = controller.lock().unwrap();
-        (g.config.theme_mode, g.config.window)
+        (g.config.theme_mode, g.config.window, g.config.clone())
     };
     let (win_x, win_y, init_w, init_h, start_max) = if smoke_ms.is_none() {
         resolve_initial_window_bounds(saved_win, default_w, default_h, min_w, min_h)
@@ -361,7 +361,7 @@ pub fn run_gui_app(
 
     let host_state = Box::new(WindowHostState {
         controller: Arc::clone(&controller),
-        ui_state: StorageUiState::default(),
+        ui_state: StorageUiState::from_config(&init_config_snap),
         egui_ctx,
         painter: SoftwarePainter::new(),
         applied_titlebar_theme: None,
@@ -655,7 +655,26 @@ unsafe extern "system" fn wnd_proc(
                         UiAction::ToggleTheme(next_mode) => {
                             let mut g = st.controller.lock().unwrap();
                             g.config.theme_mode = next_mode;
-                            let _ = g.config.save_atomic(&g.config_path);
+                            if !st.smoke_mode {
+                                let _ = g.config.save_atomic(&g.config_path);
+                            }
+                            st.needs_redraw = true;
+                            unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
+                        }
+                        UiAction::UpdateListView {
+                            sort_mode,
+                            sort_direction,
+                            filter_chip,
+                            search_query,
+                        } => {
+                            let mut g = st.controller.lock().unwrap();
+                            g.config.sort_mode = sort_mode;
+                            g.config.sort_direction = sort_direction;
+                            g.config.filter_chip = filter_chip;
+                            g.config.search_query = search_query;
+                            if !st.smoke_mode {
+                                let _ = g.config.save_atomic(&g.config_path);
+                            }
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
@@ -663,6 +682,10 @@ unsafe extern "system" fn wnd_proc(
                             let mut g = st.controller.lock().unwrap();
                             new_cfg.theme_mode = g.config.theme_mode;
                             new_cfg.window = g.config.window;
+                            new_cfg.sort_mode = g.config.sort_mode;
+                            new_cfg.sort_direction = g.config.sort_direction;
+                            new_cfg.filter_chip = g.config.filter_chip;
+                            new_cfg.search_query = g.config.search_query.clone();
                             g.config = new_cfg;
                             let _ = g.config.save_atomic(&g.config_path);
                             st.needs_redraw = true;

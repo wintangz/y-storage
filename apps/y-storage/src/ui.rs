@@ -4,13 +4,15 @@ use egui::{
     Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, Layout, Margin,
     Order, Pos2, Rect, RichText, Rounding, Sense, Stroke, TextStyle, UiBuilder, Vec2,
 };
-use y_core::config::{AppConfig, ThemeMode};
+use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SortDirection, ThemeMode};
 use y_core::discovery::normalize_path_key;
 use y_core::model::{
     DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
     NO_KNOWN_DEPENDENCIES_LABEL, ReverseDependencyEntry, ScanReport, ZoneKind,
 };
 use y_platform_windows::scanner::ScanProgressSnapshot;
+
+use crate::list_query::filter_and_sort_apps;
 
 // Pastel accent constants (used for accents, bars, and chips only; never large fills or body text).
 pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
@@ -45,6 +47,12 @@ pub enum UiAction {
     StartRescan,
     ToggleTheme(ThemeMode),
     SaveConfig(AppConfig),
+    UpdateListView {
+        sort_mode: AppSortMode,
+        sort_direction: SortDirection,
+        filter_chip: AppFilterChip,
+        search_query: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +152,9 @@ impl ThemePalette {
 
 pub struct StorageUiState {
     pub active_view: ActiveView,
+    pub sort_mode: AppSortMode,
+    pub sort_direction: SortDirection,
+    pub filter_chip: AppFilterChip,
     pub search_query: String,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
@@ -161,6 +172,9 @@ impl Default for StorageUiState {
     fn default() -> Self {
         Self {
             active_view: ActiveView::Main,
+            sort_mode: AppSortMode::Size,
+            sort_direction: SortDirection::Desc,
+            filter_chip: AppFilterChip::All,
             search_query: String::new(),
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
@@ -172,6 +186,19 @@ impl Default for StorageUiState {
             expand_unattributed: false,
             new_exclusion_inputs: HashMap::new(),
             applied_theme: None,
+        }
+    }
+}
+
+impl StorageUiState {
+    #[must_use]
+    pub fn from_config(cfg: &AppConfig) -> Self {
+        Self {
+            sort_mode: cfg.sort_mode,
+            sort_direction: cfg.sort_direction,
+            filter_chip: cfg.filter_chip,
+            search_query: cfg.search_query.clone(),
+            ..Self::default()
         }
     }
 }
@@ -212,12 +239,17 @@ pub fn format_exact_bytes(bytes: u64) -> String {
 
 fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> Option<(String, Color32, String)> {
     match delta {
-        GrowthDelta::NoBaseline | GrowthDelta::New(0) | GrowthDelta::Changed(0) => None,
-        GrowthDelta::New(b) => Some((
-            format!("+{}", format_size_2dec(b)),
-            pal.delta_grew,
-            format!("New since previous scan (+{})", format_exact_bytes(b)),
+        GrowthDelta::NoBaseline => Some((
+            "new".to_string(),
+            pal.muted,
+            "No baseline from a previous scan".to_string(),
         )),
+        GrowthDelta::New(b) => Some((
+            "new".to_string(),
+            pal.muted,
+            format!("New since previous scan ({} total, no prior baseline)", format_exact_bytes(b)),
+        )),
+        GrowthDelta::Changed(0) => None,
         GrowthDelta::Changed(d) if d > 0 => Some((
             format!("+{}", format_size_2dec(d as u64)),
             pal.delta_grew,
@@ -806,6 +838,126 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
     clicked
 }
 
+fn draw_sort_arrow(painter: &egui::Painter, center: Pos2, desc: bool, color: Color32) {
+    let st = Stroke::new(1.4_f32, color);
+    let top = Pos2::new(center.x, center.y - 4.0);
+    let bot = Pos2::new(center.x, center.y + 4.0);
+    painter.line_segment([top, bot], st);
+    if desc {
+        painter.line_segment([bot, Pos2::new(center.x - 3.0, center.y + 1.0)], st);
+        painter.line_segment([bot, Pos2::new(center.x + 3.0, center.y + 1.0)], st);
+    } else {
+        painter.line_segment([top, Pos2::new(center.x - 3.0, center.y - 1.0)], st);
+        painter.line_segment([top, Pos2::new(center.x + 3.0, center.y - 1.0)], st);
+    }
+}
+
+fn draw_sort_mode_button(
+    ui: &mut egui::Ui,
+    mode: AppSortMode,
+    active_mode: AppSortMode,
+    active_dir: SortDirection,
+    pal: &ThemePalette,
+) -> bool {
+    let is_active = mode == active_mode;
+    let label = match mode {
+        AppSortMode::Size => "Size",
+        AppSortMode::Name => {
+            if is_active {
+                match active_dir {
+                    SortDirection::Asc => "Name A-Z",
+                    SortDirection::Desc => "Name Z-A",
+                }
+            } else {
+                "Name"
+            }
+        }
+        AppSortMode::Growth => "Growth",
+    };
+
+    let arrow_space = if is_active { 14.0 } else { 0.0 };
+    let font_id = FontId::new(12.0, FontFamily::Proportional);
+    let text_color = if is_active { pal.accent_line } else { pal.muted };
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
+    let desired_w = (galley.size().x + SPACE_12 * 2.0 + arrow_space)
+        .max(60.0)
+        .round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 26.0), Sense::click());
+
+    let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
+        (pal.widget_active, LOGO_PINK, pal.text)
+    } else if resp.hovered() {
+        (
+            pal.widget_hover,
+            pal.accent_line,
+            if is_active { pal.accent_line } else { pal.text },
+        )
+    } else if is_active {
+        (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+    } else {
+        (pal.widget, pal.border, pal.muted)
+    };
+
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(ui.painter(), rect, 6.0, fill, border_col, 1.0, ppp);
+    let content_w = galley.size().x + arrow_space;
+    let start_x = (snapped.center().x - content_w * 0.5).round();
+    let text_pos = Pos2::new(start_x, (snapped.center().y - galley.size().y * 0.5).round());
+    ui.painter().galley(text_pos, galley, draw_fg);
+    if is_active {
+        let arrow_c = Pos2::new(
+            (start_x + content_w - 4.0).round(),
+            snapped.center().y.round(),
+        );
+        draw_sort_arrow(ui.painter(), arrow_c, active_dir == SortDirection::Desc, draw_fg);
+    }
+
+    let tip = match mode {
+        AppSortMode::Size => "Sort by total storage footprint (click to flip desc/asc)",
+        AppSortMode::Name => "Sort alphabetically by name (click to flip A-Z / Z-A)",
+        AppSortMode::Growth => {
+            "Sort by growth delta vs previous scan (click to flip desc/asc; no-baseline apps follow at bottom)"
+        }
+    };
+    let clicked = resp.clicked();
+    let _ = resp.on_hover_text(tip);
+    clicked
+}
+
+fn draw_filter_radio_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    pal: &ThemePalette,
+) -> bool {
+    let font_id = FontId::new(11.5, FontFamily::Proportional);
+    let text_color = if selected { pal.accent_line } else { pal.muted };
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
+    let desired_w = (galley.size().x + SPACE_16).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 22.0), Sense::click());
+    let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
+        (pal.widget_active, LOGO_PINK, pal.text)
+    } else if resp.hovered() {
+        (
+            pal.widget_hover,
+            pal.accent_line,
+            if selected { pal.accent_line } else { pal.text },
+        )
+    } else if selected {
+        (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+    } else {
+        (pal.widget, pal.border, pal.muted)
+    };
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(ui.painter(), rect, 5.0, fill, border_col, 1.0, ppp);
+    let text_pos = Pos2::new(
+        (snapped.center().x - galley.size().x * 0.5).round(),
+        (snapped.center().y - galley.size().y * 0.5).round(),
+    );
+    ui.painter().galley(text_pos, galley, draw_fg);
+    resp.clicked()
+}
+
 pub fn draw_app_ui(
     ctx: &egui::Context,
     ui_state: &mut StorageUiState,
@@ -1093,14 +1245,40 @@ pub fn draw_app_ui(
             }
 
             if ui_state.active_view == ActiveView::Main {
+                let sys_drive_letter = report
+                    .and_then(|r| {
+                        r.drives
+                            .iter()
+                            .find(|d| d.is_system_drive)
+                            .map(|d| d.letter.to_ascii_uppercase())
+                    })
+                    .unwrap_or('C');
+                let total_apps_count = report.map_or(0, |r| r.apps.len());
+                let shown_count = report.map_or(0, |r| {
+                    filter_and_sort_apps(
+                        &r.apps,
+                        ui_state.sort_mode,
+                        ui_state.sort_direction,
+                        ui_state.filter_chip,
+                        &ui_state.search_query,
+                        sys_drive_letter,
+                    )
+                    .len()
+                });
+                let mut list_view_dirty = false;
+
                 ui.add_space(SPACE_8);
+                // Row 3: Search input (left) + Segmented Sort Control (right)
+                let mut search_dirty = false;
+                let mut sort_dirty = false;
                 draw_split_row(
                     ui,
                     HEADER_CONTROL_H,
-                    220.0,
+                    300.0,
                     Sense::hover(),
                     |ui| {
                         ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
+                        let prev_q = ui_state.search_query.clone();
                         draw_crisp_text_input(
                             ui,
                             "main_app_filter",
@@ -1109,6 +1287,9 @@ pub fn draw_app_ui(
                             "Search app name, publisher, or path...",
                             &pal,
                         );
+                        if ui_state.search_query != prev_q {
+                            search_dirty = true;
+                        }
                         if !ui_state.search_query.is_empty()
                             && draw_z_button(
                                 ui,
@@ -1123,6 +1304,72 @@ pub fn draw_app_ui(
                             .clicked()
                         {
                             ui_state.search_query.clear();
+                            search_dirty = true;
+                        }
+                    },
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_4;
+                        // Right-to-left placement -> visually left-to-right: Sort: [Size] [Name] [Growth]
+                        for mode_btn in [AppSortMode::Growth, AppSortMode::Name, AppSortMode::Size] {
+                            if draw_sort_mode_button(
+                                ui,
+                                mode_btn,
+                                ui_state.sort_mode,
+                                ui_state.sort_direction,
+                                &pal,
+                            ) {
+                                let (nm, nd) = mode_btn.click_transition(
+                                    ui_state.sort_mode,
+                                    ui_state.sort_direction,
+                                );
+                                ui_state.sort_mode = nm;
+                                ui_state.sort_direction = nd;
+                                sort_dirty = true;
+                            }
+                        }
+                        ui.add_space(SPACE_4);
+                        ui.label(RichText::new("Sort:").size(12.0).color(pal.muted));
+                    },
+                );
+                if search_dirty || sort_dirty {
+                    list_view_dirty = true;
+                }
+
+                ui.add_space(SPACE_4);
+                // Row 4: Single-select filter chip row + live "N of 262 apps" count (left) + invariant attributed total (right)
+                let has_c_label = format!("Has {sys_drive_letter}: footprint");
+                let chips = [
+                    (AppFilterChip::All, "All"),
+                    (AppFilterChip::Grew, "Grew"),
+                    (AppFilterChip::NoTouch, "NO-TOUCH"),
+                    (AppFilterChip::Standalone, "Standalone"),
+                    (AppFilterChip::HasSystemDriveFootprint, has_c_label.as_str()),
+                ];
+                draw_split_row(
+                    ui,
+                    22.0,
+                    156.0,
+                    Sense::hover(),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        for &(chip, lbl) in &chips {
+                            let selected = ui_state.filter_chip == chip;
+                            if draw_filter_radio_chip(ui, lbl, selected, &pal) && !selected {
+                                ui_state.filter_chip = chip;
+                                list_view_dirty = true;
+                            }
+                        }
+                        if report.is_some() {
+                            let filtered_active = ui_state.filter_chip != AppFilterChip::All
+                                || !ui_state.search_query.trim().is_empty();
+                            let count_txt = format!("{shown_count} of {total_apps_count} apps");
+                            let mut count_rt = RichText::new(count_txt)
+                                .size(11.5)
+                                .color(if filtered_active { pal.text } else { pal.muted });
+                            if filtered_active {
+                                count_rt = count_rt.strong();
+                            }
+                            ui.add(egui::Label::new(count_rt).selectable(false));
                         }
                     },
                     |ui| {
@@ -1130,23 +1377,28 @@ pub fn draw_app_ui(
                             let apps_sum: u64 = rep.apps.iter().map(|a| a.total_bytes).sum();
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!(
-                                        "{} apps · {} attributed",
-                                        rep.apps.len(),
-                                        format_size_2dec(apps_sum)
-                                    ))
-                                    .size(11.5)
-                                    .color(pal.muted),
+                                    RichText::new(format!("{} attributed", format_size_2dec(apps_sum)))
+                                        .size(11.5)
+                                        .color(pal.muted),
                                 )
                                 .selectable(false),
                             )
                             .on_hover_text(format!(
-                                "Total attributed app bytes: {}",
+                                "Total attributed app bytes across all drives: {}",
                                 format_exact_bytes(apps_sum)
                             ));
                         }
                     },
                 );
+
+                if list_view_dirty {
+                    emit(UiAction::UpdateListView {
+                        sort_mode: ui_state.sort_mode,
+                        sort_direction: ui_state.sort_direction,
+                        filter_chip: ui_state.filter_chip,
+                        search_query: ui_state.search_query.clone(),
+                    });
+                }
             }
 
             if let Some(rep) = report {
@@ -1249,27 +1501,26 @@ fn draw_main_app_list(
         .map(|r| (r.target_id.as_str(), r.dependent_count))
         .collect();
 
-    let q = ui_state.search_query.trim().to_ascii_lowercase();
+    let sys_drive_letter = rep
+        .drives
+        .iter()
+        .find(|d| d.is_system_drive)
+        .map(|d| d.letter.to_ascii_uppercase())
+        .unwrap_or('C');
+    let visible_apps = filter_and_sort_apps(
+        &rep.apps,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
+        ui_state.filter_chip,
+        &ui_state.search_query,
+        sys_drive_letter,
+    );
+
     draw_synced_scroll_area(ui, "main_app_scroll", None, [false, false], pal, pal.bg, |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
-            let mut shown = 0usize;
+            let shown = visible_apps.len();
 
-            for app in &rep.apps {
-                if !q.is_empty() {
-                    let name_hit = app.display_name.to_ascii_lowercase().contains(&q);
-                    let pub_hit = app
-                        .publishers
-                        .iter()
-                        .any(|p| p.to_ascii_lowercase().contains(&q));
-                    let path_hit = app
-                        .items
-                        .iter()
-                        .any(|it| it.path.to_ascii_lowercase().contains(&q));
-                    if !name_hit && !pub_hit && !path_hit {
-                        continue;
-                    }
-                }
-                shown += 1;
+            for app in visible_apps {
                 let expanded = ui_state.expanded_apps.contains(&app.id);
                 let frame_border = if expanded { pal.accent_line } else { pal.border };
 
@@ -1662,7 +1913,7 @@ fn draw_reverse_dependency_overlay(
 
     let screen = ctx.screen_rect();
     let area_w = (screen.width() * 0.48).clamp(380.0, 500.0);
-    let anchor_offset = Vec2::new(-SPACE_16, 144.0);
+    let anchor_offset = Vec2::new(-SPACE_16, 176.0);
 
     egui::Area::new(egui::Id::new("reverse_dep_overlay"))
         .order(Order::Foreground)

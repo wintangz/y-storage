@@ -13,6 +13,64 @@ pub enum ThemeMode {
     Light,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AppSortMode {
+    #[default]
+    Size,
+    Name,
+    Growth,
+}
+
+impl AppSortMode {
+    #[must_use]
+    pub const fn default_direction(self) -> SortDirection {
+        match self {
+            Self::Size | Self::Growth => SortDirection::Desc,
+            Self::Name => SortDirection::Asc,
+        }
+    }
+
+    #[must_use]
+    pub const fn click_transition(
+        self,
+        active_mode: Self,
+        active_dir: SortDirection,
+    ) -> (Self, SortDirection) {
+        if self as u8 == active_mode as u8 {
+            (self, active_dir.flipped())
+        } else {
+            (self, self.default_direction())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SortDirection {
+    #[default]
+    Desc,
+    Asc,
+}
+
+impl SortDirection {
+    #[must_use]
+    pub const fn flipped(self) -> Self {
+        match self {
+            Self::Desc => Self::Asc,
+            Self::Asc => Self::Desc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AppFilterChip {
+    #[default]
+    All,
+    Grew,
+    NoTouch,
+    Standalone,
+    HasSystemDriveFootprint,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveScanTarget {
     pub letter: char,
@@ -36,6 +94,14 @@ pub struct AppConfig {
     pub theme_mode: ThemeMode,
     #[serde(default)]
     pub window: Option<WindowPlacementConfig>,
+    #[serde(default)]
+    pub sort_mode: AppSortMode,
+    #[serde(default)]
+    pub sort_direction: SortDirection,
+    #[serde(default)]
+    pub filter_chip: AppFilterChip,
+    #[serde(default)]
+    pub search_query: String,
     pub targets: Vec<DriveScanTarget>,
 }
 
@@ -45,6 +111,10 @@ impl Default for AppConfig {
             version: 1,
             theme_mode: ThemeMode::Dark,
             window: None,
+            sort_mode: AppSortMode::Size,
+            sort_direction: SortDirection::Desc,
+            filter_chip: AppFilterChip::All,
+            search_query: String::new(),
             targets: vec![DriveScanTarget {
                 letter: 'C',
                 enabled: true,
@@ -90,6 +160,10 @@ impl AppConfig {
             version: 1,
             theme_mode: ThemeMode::Dark,
             window: None,
+            sort_mode: AppSortMode::Size,
+            sort_direction: SortDirection::Desc,
+            filter_chip: AppFilterChip::All,
+            search_query: String::new(),
             targets,
         }
     }

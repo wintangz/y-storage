@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod list_query;
 mod png;
 mod sw_painter;
 mod ui;
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use egui::{Pos2, RawInput, Rect, Vec2, ViewportId};
 use serde::Serialize;
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
-use y_core::config::{AppConfig, ThemeMode};
+use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SortDirection, ThemeMode};
 use y_core::history::ScanHistory;
 use y_core::model::ScanReport;
 use y_platform_windows::paths::{enumerate_fixed_drives, get_windows_directory};
@@ -48,6 +49,10 @@ fn main() {
     let mut screenshot_view = "main".to_string();
     let mut screenshot_theme = ThemeMode::Dark;
     let mut screenshot_dpi: u32 = 96;
+    let mut screenshot_sort = AppSortMode::Size;
+    let mut screenshot_sort_dir: Option<SortDirection> = None;
+    let mut screenshot_filter = AppFilterChip::All;
+    let mut screenshot_search = String::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -93,6 +98,44 @@ fn main() {
                     i += 1;
                 }
             }
+            "--sort" => {
+                if i + 1 < args.len() {
+                    screenshot_sort = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "name" => AppSortMode::Name,
+                        "growth" => AppSortMode::Growth,
+                        _ => AppSortMode::Size,
+                    };
+                    i += 1;
+                }
+            }
+            "--sort-dir" => {
+                if i + 1 < args.len() {
+                    screenshot_sort_dir = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "asc" => Some(SortDirection::Asc),
+                        "desc" => Some(SortDirection::Desc),
+                        _ => None,
+                    };
+                    i += 1;
+                }
+            }
+            "--filter" => {
+                if i + 1 < args.len() {
+                    screenshot_filter = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "grew" => AppFilterChip::Grew,
+                        "no-touch" | "notouch" => AppFilterChip::NoTouch,
+                        "standalone" => AppFilterChip::Standalone,
+                        "has-c" | "system-drive" => AppFilterChip::HasSystemDriveFootprint,
+                        _ => AppFilterChip::All,
+                    };
+                    i += 1;
+                }
+            }
+            "--search" => {
+                if i + 1 < args.len() {
+                    screenshot_search = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -104,7 +147,17 @@ fn main() {
     }
 
     if let Some(png_path) = screenshot_out {
-        if let Err(err) = render_screenshot(&png_path, &screenshot_view, screenshot_theme, screenshot_dpi) {
+        let sort_dir = screenshot_sort_dir.unwrap_or_else(|| screenshot_sort.default_direction());
+        if let Err(err) = render_screenshot(
+            &png_path,
+            &screenshot_view,
+            screenshot_theme,
+            screenshot_dpi,
+            screenshot_sort,
+            sort_dir,
+            screenshot_filter,
+            &screenshot_search,
+        ) {
             eprintln!("render screenshot failed: {err}");
             std::process::exit(1);
         }
@@ -180,6 +233,10 @@ fn render_screenshot(
     view: &str,
     theme: ThemeMode,
     dpi: u32,
+    sort_mode: AppSortMode,
+    sort_direction: SortDirection,
+    filter_chip: AppFilterChip,
+    search_query: &str,
 ) -> Result<(), String> {
     let drives = enumerate_fixed_drives();
     let sys_win = get_windows_directory();
@@ -190,6 +247,10 @@ fn render_screenshot(
         .unwrap_or_else(|| execute_scan_with_progress(&config, None, None));
 
     let mut ui_state = StorageUiState::default();
+    ui_state.sort_mode = sort_mode;
+    ui_state.sort_direction = sort_direction;
+    ui_state.filter_chip = filter_chip;
+    ui_state.search_query = search_query.to_string();
     match view {
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
