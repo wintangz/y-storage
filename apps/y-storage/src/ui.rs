@@ -8,7 +8,7 @@ use egui::{
     Order, Pos2, Rect, RichText, Rounding, Sense, Stroke, TextStyle, UiBuilder, Vec2,
 };
 use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SortDirection, ThemeMode};
-use y_core::discovery::normalize_path_key;
+use y_core::discovery::{normalize_app_token, normalize_path_key};
 use y_core::model::{
     DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
     NO_KNOWN_DEPENDENCIES_LABEL, ReverseDependencyEntry, ScanReport, ZoneKind,
@@ -44,7 +44,8 @@ pub const SPACE_16: f32 = 16.0;
 const RADIUS_PANEL: f32 = 8.0;
 const RADIUS_CONTROL: f32 = 6.0;
 const RADIUS_PILL: f32 = 4.0;
-const RADIUS_BADGE: f32 = 2.0;
+const BADGE_PILL_H: f32 = 18.0;
+const RADIUS_BADGE_PILL: f32 = BADGE_PILL_H * 0.5;
 
 const SIZE_COL_W: f32 = 96.0;
 const DELTA_COL_W: f32 = 96.0;
@@ -84,6 +85,10 @@ pub enum UiAction {
         filter_chip: AppFilterChip,
         search_query: String,
     },
+    UpdateLedgerLayout {
+        collapsed: bool,
+        height_px: Option<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +115,7 @@ pub struct ThemePalette {
     pub widget_active: Color32,
     pub accent_line: Color32,
     pub lavender_text: Color32,
+    pub proven_text: Color32,
     pub status_green: Color32,
     pub status_red: Color32,
     pub delta_grew: Color32,
@@ -142,6 +148,7 @@ impl ThemePalette {
                 widget_active: Color32::from_rgb(24, 34, 48),  // #182230 (z-controller widget_active)
                 accent_line: LOGO_BLUE,                        // #54B9F2 (z-controller accent_line)
                 lavender_text: LOGO_LAVENDER,                  // #D8A6FF
+                proven_text: Color32::from_rgb(124, 203, 255), // #7CCBFF (crisp blue ink inside Dark outline+tint pill)
                 status_green: STATUS_GREEN,                    // #28D66C
                 status_red: STATUS_RED,                        // #F04458
                 delta_grew: STATUS_RED,                        // #F04458 (ADD 3 saturated status)
@@ -150,8 +157,8 @@ impl ThemePalette {
                 pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (ADD 3 saturated green tint)
                 pill_lav_fill: Color32::from_rgb(32, 24, 46),
                 pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (ADD 3 saturated red tint)
-                scrollbar_thumb: Color32::from_rgb(46, 46, 70), // #2E2E46
-                scrollbar_thumb_hover: LOGO_BLUE,
+                scrollbar_thumb: Color32::from_rgb(82, 86, 122), // #52567A (FIX 4b minimum visible Dark contrast)
+                scrollbar_thumb_hover: Color32::from_rgb(122, 134, 184), // #7A86B8
             },
             ThemeMode::Light => Self {
                 bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA (z-controller bg)
@@ -169,16 +176,17 @@ impl ThemePalette {
                 widget_active: Color32::from_rgb(220, 235, 248), // #DCEBF8 (z-controller widget_active)
                 accent_line: LOGO_BLUE_READABLE,               // #2F9BE8 (z-controller accent_line)
                 lavender_text: Color32::from_rgb(120, 62, 184), // #783EB8 (Light contrast exception)
+                proven_text: Color32::from_rgb(21, 101, 184),   // #1565B8 (FIX 4c Light outline+tint ink)
                 status_green: Color32::from_rgb(15, 168, 79),   // #0FA84F (ADD 3 saturated Light green)
                 status_red: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light red)
                 delta_grew: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light delta)
                 no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444 (ADD 3 saturated Light NO-TOUCH)
-                pill_blue_fill: Color32::from_rgb(235, 246, 255), // #EBF6FF (z-controller pill_blue_fill)
+                pill_blue_fill: Color32::from_rgb(227, 242, 253), // #E3F2FD (FIX 4c soft Light blue tint)
                 pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (ADD 3 saturated Light green tint)
                 pill_lav_fill: Color32::from_rgb(243, 236, 255),
                 pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (ADD 3 saturated Light red tint)
-                scrollbar_thumb: Color32::from_rgb(192, 208, 226), // #C0D0E2
-                scrollbar_thumb_hover: LOGO_BLUE_READABLE,
+                scrollbar_thumb: Color32::from_rgb(152, 176, 202), // #98B0CA (FIX 4b Light contrast)
+                scrollbar_thumb_hover: Color32::from_rgb(100, 140, 184), // #648CB8
             },
         }
     }
@@ -203,6 +211,7 @@ struct CachedReportData {
     attributed_label: String,
     attributed_tip: String,
     rev_counts: HashMap<String, usize>,
+    rev_by_app_token: HashMap<String, (String, usize)>,
     sys_reconcile: Vec<(char, String, String, i128)>,
 }
 
@@ -241,6 +250,9 @@ pub struct StorageUiState {
     pub new_exclusion_inputs: HashMap<char, String>,
     pub applied_theme: Option<ThemeMode>,
     pub has_prop_strong: bool,
+    pub ledger_collapsed: bool,
+    pub ledger_height_px: Option<f32>,
+    ledger_drag_start_h: Option<f32>,
     pub icon_textures: HashMap<String, egui::TextureHandle>,
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
@@ -271,6 +283,9 @@ impl Default for StorageUiState {
             new_exclusion_inputs: HashMap::new(),
             applied_theme: None,
             has_prop_strong: false,
+            ledger_collapsed: false,
+            ledger_height_px: None,
+            ledger_drag_start_h: None,
             icon_textures: HashMap::new(),
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
@@ -292,6 +307,8 @@ impl StorageUiState {
             sort_direction: cfg.sort_direction,
             filter_chip: cfg.filter_chip,
             search_query: cfg.search_query.clone(),
+            ledger_collapsed: cfg.ledger_collapsed,
+            ledger_height_px: cfg.ledger_height_px,
             ..Self::default()
         }
     }
@@ -847,6 +864,203 @@ enum ButtonVariant {
     SubtleOutline,
 }
 
+#[inline]
+fn snap_scalar_to_px(v: f32, ppp: f32) -> f32 {
+    let p = ppp.max(0.5);
+    (v * p).round() / p
+}
+
+/// Computes pixel-snapped top-left origin so glyph ink is optically centered vertically in `outer_rect`.
+fn optical_galley_pos(
+    ui: &egui::Ui,
+    outer_rect: Rect,
+    galley: &std::sync::Arc<egui::epaint::Galley>,
+    align_right_x: Option<f32>,
+    align_center_x: bool,
+) -> Pos2 {
+    let ppp = ui.ctx().pixels_per_point();
+    let x = if let Some(right_x) = align_right_x {
+        (right_x - galley.size().x).max(outer_rect.min.x)
+    } else if align_center_x {
+        outer_rect.center().x - galley.size().x * 0.5
+    } else {
+        outer_rect.min.x
+    };
+    let ink_center_y = if let Some(font_id) = galley
+        .job
+        .sections
+        .first()
+        .map(|s| s.format.font_id.clone())
+    {
+        let text = galley.job.text.as_str();
+        let has_lower = text.chars().any(|c| c.is_lowercase());
+        let has_upper_or_digit = text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
+        let probe = if has_lower && !has_upper_or_digit { "x" } else { "Hx" };
+        let ref_g = ui.fonts(|f| f.layout_no_wrap(probe.to_owned(), font_id, Color32::WHITE));
+        if ref_g.mesh_bounds.is_positive() {
+            ref_g.mesh_bounds.center().y
+        } else if galley.mesh_bounds.is_positive() {
+            galley.mesh_bounds.center().y
+        } else {
+            galley.size().y * 0.5
+        }
+    } else if galley.mesh_bounds.is_positive() {
+        galley.mesh_bounds.center().y
+    } else {
+        galley.size().y * 0.5
+    };
+    let y = outer_rect.center().y - ink_center_y;
+    Pos2::new(snap_scalar_to_px(x, ppp), snap_scalar_to_px(y, ppp))
+}
+
+fn draw_optical_label_in_rect(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    text: &str,
+    font_id: FontId,
+    color: Color32,
+    align_right: bool,
+    align_center_x: bool,
+) -> egui::Response {
+    let galley = ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font_id, color));
+    let pos = optical_galley_pos(
+        ui,
+        rect,
+        &galley,
+        if align_right { Some(rect.max.x) } else { None },
+        align_center_x,
+    );
+    let resp = ui.interact(rect, ui.make_persistent_id(("opt_lbl", rect.min.x.to_bits(), rect.min.y.to_bits(), text)), Sense::hover());
+    ui.painter().galley(pos, galley, color);
+    resp
+}
+
+#[inline]
+fn wt_gradient_color_at(t: f32) -> Color32 {
+    let clamped = t.clamp(0.0, 1.0);
+    if clamped <= 0.5 {
+        lerp_color(LOGO_BLUE, LOGO_LAVENDER, clamped * 2.0)
+    } else {
+        lerp_color(LOGO_LAVENDER, LOGO_PINK, (clamped - 0.5) * 2.0)
+    }
+}
+
+/// Paints the 3-stop WT horizontal gradient (`LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK`) across `full_track`, clipped to `fill_rect` with crisp rounded caps.
+fn paint_horizontal_wt_gradient_bar(
+    painter: &egui::Painter,
+    full_track: Rect,
+    fill_rect: Rect,
+    rounding: f32,
+) {
+    if fill_rect.width() <= 0.5 || fill_rect.height() <= 0.5 || full_track.width() <= 0.5 {
+        return;
+    }
+    let r = rounding
+        .min(fill_rect.height() * 0.5)
+        .min(fill_rect.width() * 0.5)
+        .max(0.0);
+    let x0 = fill_rect.min.x;
+    let x1 = fill_rect.max.x;
+    let y0 = fill_rect.min.y;
+    let y1 = fill_rect.max.y;
+
+    let mut xs: Vec<f32> = Vec::with_capacity(20);
+    xs.push(x0);
+    if r > 0.25 {
+        for k in 1..=5 {
+            let a = (k as f32) / 6.0 * std::f32::consts::FRAC_PI_2;
+            xs.push(x0 + r * (1.0 - a.cos()));
+        }
+    }
+    let track_mid_x = full_track.center().x;
+    if track_mid_x > x0 + r + 0.5 && track_mid_x < x1 - r - 0.5 {
+        xs.push(track_mid_x);
+    }
+    if r > 0.25 {
+        for k in 1..=5 {
+            let a = (k as f32) / 6.0 * std::f32::consts::FRAC_PI_2;
+            xs.push(x1 - r * (1.0 - a.sin()));
+        }
+    }
+    xs.push(x1);
+    xs.sort_by(|a, b| a.total_cmp(b));
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    if xs.len() < 2 {
+        let col = wt_gradient_color_at((fill_rect.center().x - full_track.min.x) / full_track.width());
+        painter.rect_filled(fill_rect, Rounding::same(r), col);
+        return;
+    }
+
+    let mut mesh = egui::epaint::Mesh::default();
+    let mut prev_top = 0u32;
+    let mut prev_bot = 0u32;
+    for (idx, &x) in xs.iter().enumerate() {
+        let (ty, by) = if r > 0.0 && x < x0 + r {
+            let dx = (x0 + r) - x;
+            let dy = (r * r - dx * dx).max(0.0).sqrt();
+            (y0 + r - dy, y1 - r + dy)
+        } else if r > 0.0 && x > x1 - r {
+            let dx = x - (x1 - r);
+            let dy = (r * r - dx * dx).max(0.0).sqrt();
+            (y0 + r - dy, y1 - r + dy)
+        } else {
+            (y0, y1)
+        };
+        let t = ((x - full_track.min.x) / full_track.width()).clamp(0.0, 1.0);
+        let col = wt_gradient_color_at(t);
+        let vt = mesh.vertices.len() as u32;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: Pos2::new(x, ty),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        });
+        let vb = mesh.vertices.len() as u32;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: Pos2::new(x, by),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        });
+        if idx > 0 {
+            mesh.indices.extend_from_slice(&[prev_top, vt, prev_bot, prev_bot, vt, vb]);
+        }
+        prev_top = vt;
+        prev_bot = vb;
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Paints a smooth vertical fade-out gradient overlay at the bottom edge of a scrolling list.
+fn paint_bottom_fade_overlay(painter: &egui::Painter, rect: Rect, surface_bg: Color32) {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 {
+        return;
+    }
+    let top_col = Color32::from_rgba_unmultiplied(surface_bg.r(), surface_bg.g(), surface_bg.b(), 0);
+    let mid_col = Color32::from_rgba_unmultiplied(surface_bg.r(), surface_bg.g(), surface_bg.b(), 145);
+    let bot_col = Color32::from_rgba_unmultiplied(surface_bg.r(), surface_bg.g(), surface_bg.b(), 238);
+    let mid_y = rect.min.y + rect.height() * 0.55;
+    let mut mesh = egui::epaint::Mesh::default();
+    let add_row = |m: &mut egui::epaint::Mesh, y: f32, c: Color32| -> (u32, u32) {
+        let l = m.vertices.len() as u32;
+        m.vertices.push(egui::epaint::Vertex {
+            pos: Pos2::new(rect.min.x, y),
+            uv: egui::epaint::WHITE_UV,
+            color: c,
+        });
+        let r = m.vertices.len() as u32;
+        m.vertices.push(egui::epaint::Vertex {
+            pos: Pos2::new(rect.max.x, y),
+            uv: egui::epaint::WHITE_UV,
+            color: c,
+        });
+        (l, r)
+    };
+    let (l0, r0) = add_row(&mut mesh, rect.min.y, top_col);
+    let (l1, r1) = add_row(&mut mesh, mid_y, mid_col);
+    let (l2, r2) = add_row(&mut mesh, rect.max.y, bot_col);
+    mesh.indices.extend_from_slice(&[l0, r0, l1, l1, r0, r1, l1, r1, l2, l2, r1, r2]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// Renders an outline button whose states, accent outlines, and foreground colours match z-controller across both themes.
 #[allow(clippy::too_many_arguments)]
 fn draw_z_button(
@@ -891,10 +1105,7 @@ fn draw_z_button(
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
-    let text_pos = Pos2::new(
-        (snapped.center().x - galley.size().x * 0.5).round(),
-        (snapped.center().y - galley.size().y * 0.5).round(),
-    );
+    let text_pos = optical_galley_pos(ui, snapped, &galley, None, true);
     ui.painter().galley(text_pos, galley, text_color);
     resp
 }
@@ -1051,21 +1262,23 @@ fn paint_chip(ui: &mut egui::Ui, label: &str, style: ChipStyle, container_bg: Co
     } else {
         style.fill
     };
-    draw_crisp_frame(
-        ui,
+    let font_id = FontId::new(10.5, FontFamily::Proportional);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, style.text));
+    let desired_w = (galley.size().x + 14.0).max(20.0).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, BADGE_PILL_H), Sense::hover());
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(
+        ui.painter(),
+        rect,
+        RADIUS_BADGE_PILL,
         fill,
         style.stroke,
-        RADIUS_BADGE,
-        Margin::symmetric(5.0, 1.0),
-        |ui| {
-            ui.label(
-                RichText::new(label)
-                    .size(10.5)
-                    .color(style.text),
-            );
-        },
-    )
-    .response
+        1.0,
+        ppp,
+    );
+    let text_pos = optical_galley_pos(ui, snapped, &galley, None, true);
+    ui.painter().galley(text_pos, galley, style.text);
+    resp
 }
 
 fn paint_zone_chip(
@@ -1082,26 +1295,34 @@ fn paint_zone_chip(
         ZoneKind::Red => (pal.pill_red_fill, pal.status_red, pal.status_red, STATUS_RED),
         ZoneKind::Body => unreachable!(),
     };
-    draw_crisp_frame(
-        ui,
+    let font_id = FontId::new(10.5, FontFamily::Proportional);
+    let galley = ui.fonts(|f| f.layout_no_wrap(zone.short_label().to_owned(), font_id, text_col));
+    let dot_d = 5.0_f32;
+    let dot_gap = 4.0_f32;
+    let h_pad = 7.0_f32;
+    let desired_w = (h_pad * 2.0 + dot_d + dot_gap + galley.size().x).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, BADGE_PILL_H), Sense::hover());
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(
+        ui.painter(),
+        rect,
+        RADIUS_BADGE_PILL,
         fill,
         stroke,
-        RADIUS_BADGE,
-        Margin::symmetric(5.0, 1.0),
-        |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
-                ui.painter().circle_filled(dot_r.center(), 2.5, dot_col);
-                ui.label(
-                    RichText::new(zone.short_label())
-                        .size(10.5)
-                        .color(text_col),
-                );
-            });
-        },
-    )
-    .response
+        1.0,
+        ppp,
+    );
+    let dot_cx = snap_scalar_to_px(snapped.min.x + h_pad + dot_d * 0.5, ppp);
+    let dot_cy = snap_scalar_to_px(snapped.center().y, ppp);
+    ui.painter()
+        .circle_filled(Pos2::new(dot_cx, dot_cy), dot_d * 0.5, dot_col);
+    let label_box = Rect::from_min_max(
+        Pos2::new(snapped.min.x + h_pad + dot_d + dot_gap, snapped.min.y),
+        snapped.max,
+    );
+    let text_pos = optical_galley_pos(ui, label_box, &galley, None, false);
+    ui.painter().galley(text_pos, galley, text_col);
+    resp
 }
 
 fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
@@ -1145,7 +1366,7 @@ fn confidence_chip_style(conf: DependencyConfidence, pal: &ThemePalette) -> Chip
         DependencyConfidence::Proven => ChipStyle {
             fill: pal.pill_blue_fill,
             stroke: pal.accent_line,
-            text: pal.text,
+            text: pal.proven_text,
         },
         DependencyConfidence::Inferred => ChipStyle {
             fill: Color32::TRANSPARENT,
@@ -1155,7 +1376,7 @@ fn confidence_chip_style(conf: DependencyConfidence, pal: &ThemePalette) -> Chip
     }
 }
 
-/// Truncates a string cleanly on a word boundary ending in `"…"` so it never breaks mid-word at `max_w`.
+/// Truncates a string cleanly on a segment/word boundary ending in `"…"` so it never splits inside a filename or word at `max_w`.
 fn truncate_word_boundary_px(
     ui: &egui::Ui,
     text: &str,
@@ -1177,9 +1398,11 @@ fn truncate_word_boundary_px(
     let mut best_end: Option<usize> = None;
     let mut prev_sep = true;
     for (idx, ch) in text.char_indices() {
-        let is_sep = ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '|');
+        let is_sep = ch.is_whitespace() || matches!(ch, '\\' | '/' | '.' | ',' | ';' | ')' | '|');
         if is_sep && !prev_sep && idx > 0 {
-            let trimmed = text[..idx].trim_end();
+            let trimmed = text[..idx].trim_end_matches(|c: char| {
+                c.is_whitespace() || matches!(c, ',' | ';' | ':' | '+')
+            });
             if !trimmed.is_empty() {
                 let cand = format!("{trimmed}…");
                 let w = ui.fonts(|f| {
@@ -1188,7 +1411,7 @@ fn truncate_word_boundary_px(
                         .x
                 });
                 if w <= max_w {
-                    best_end = Some(idx);
+                    best_end = Some(trimmed.len());
                 } else {
                     break;
                 }
@@ -1198,10 +1421,10 @@ fn truncate_word_boundary_px(
     }
 
     if let Some(end_idx) = best_end {
-        return (format!("{}…", text[..end_idx].trim_end()), true);
+        return (format!("{}…", &text[..end_idx]), true);
     }
 
-    // Fallback for a single unspaced token wider than `max_w`.
+    // Fallback for a single unsegmented token wider than `max_w`.
     let mut char_end = 0usize;
     for (idx, ch) in text.char_indices() {
         let next_idx = idx + ch.len_utf8();
@@ -1521,6 +1744,7 @@ struct MainTableColumns {
     chevron: ColSpan,
     name: ColSpan,
     publisher: ColSpan,
+    category: ColSpan,
     delta: ColSpan,
     size: ColSpan,
 }
@@ -1530,21 +1754,24 @@ impl MainTableColumns {
         let gap = SPACE_12;
         let chev_w = 16.0;
         let chev_gap = SPACE_8;
-        let pub_w = 208.0;
+        let pub_w = 152.0;
+        let cat_w = 128.0;
         let delta_w = DELTA_COL_W;
         let size_w = SIZE_COL_W;
-        let fixed_w = chev_w + chev_gap + pub_w + delta_w + size_w + gap * 3.0;
+        let fixed_w = chev_w + chev_gap + pub_w + cat_w + delta_w + size_w + gap * 4.0;
         let name_w = (row_w - fixed_w).max(120.0);
 
         let chevron = ColSpan::new(origin_x, chev_w);
         let name = ColSpan::new(chevron.max_x + chev_gap, name_w);
         let publisher = ColSpan::new(name.max_x + gap, pub_w);
-        let delta = ColSpan::new(publisher.max_x + gap, delta_w);
+        let category = ColSpan::new(publisher.max_x + gap, cat_w);
+        let delta = ColSpan::new(category.max_x + gap, delta_w);
         let size = ColSpan::new(delta.max_x + gap, (origin_x + row_w - (delta.max_x + gap)).max(size_w));
         Self {
             chevron,
             name,
             publisher,
+            category,
             delta,
             size,
         }
@@ -1561,7 +1788,7 @@ struct LocationsTableColumns {
 impl LocationsTableColumns {
     fn compute(origin_x: f32, sub_w: f32) -> Self {
         let gap = SPACE_12;
-        let zone_w = 74.0;
+        let zone_w = 78.0;
         let basis_w = 170.0;
         let size_w = SIZE_COL_W;
         let fixed_w = zone_w + basis_w + size_w + gap * 3.0;
@@ -1592,7 +1819,7 @@ impl DependenciesTableColumns {
     fn compute(origin_x: f32, sub_w: f32) -> Self {
         let gap = SPACE_12;
         let kind_w = 148.0;
-        let conf_w = 152.0;
+        let conf_w = 156.0;
         let used_w = 112.0;
         let size_w = SIZE_COL_W;
         let fixed_w = kind_w + conf_w + used_w + size_w + gap * 4.0;
@@ -1645,9 +1872,7 @@ fn draw_sortable_col_header(
 
     let fg = if resp.is_pointer_button_down_on() {
         pal.accent_line
-    } else if is_active {
-        pal.text
-    } else if hovered {
+    } else if is_active || hovered {
         pal.text
     } else {
         pal.muted
@@ -1657,17 +1882,19 @@ fn draw_sortable_col_header(
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, fg));
     let arrow_w = if is_active { 12.0 } else { 0.0 };
     let total_w = galley.size().x + arrow_w;
+    let ppp = ui.ctx().pixels_per_point();
     let start_x = if right_aligned {
         (cell_rect.max.x - total_w).max(cell_rect.min.x)
     } else {
         cell_rect.min.x
     };
-    let text_pos = Pos2::new(start_x.round(), (cell_rect.center().y - galley.size().y * 0.5).round());
+    let align_rect = Rect::from_min_max(Pos2::new(start_x, cell_rect.min.y), cell_rect.max);
+    let text_pos = optical_galley_pos(ui, align_rect, &galley, None, false);
     ui.painter().galley(text_pos, galley, fg);
     if is_active {
         let arrow_c = Pos2::new(
-            (start_x + total_w - 4.0).round(),
-            cell_rect.center().y.round(),
+            snap_scalar_to_px(start_x + total_w - 4.0, ppp),
+            snap_scalar_to_px(cell_rect.center().y, ppp),
         );
         draw_sort_arrow(ui.painter(), arrow_c, active_dir == SortDirection::Desc, pal.accent_line);
     }
@@ -1675,6 +1902,12 @@ fn draw_sortable_col_header(
     let tip = match mode {
         AppSortMode::Size => "Sort by total storage footprint (click active column to flip desc/asc)",
         AppSortMode::Name => "Sort alphabetically by app name (click active column to flip A-Z / Z-A)",
+        AppSortMode::Publisher => {
+            "Sort alphabetically by publisher (click active column to flip A-Z / Z-A; empty publishers grouped separately)"
+        }
+        AppSortMode::Category => {
+            "Sort by app category (click active column to flip asc/desc; ties ordered by size)"
+        }
         AppSortMode::Growth => {
             "Sort by growth delta vs previous scan (click active column to flip desc/asc; no-baseline apps follow at bottom)"
         }
@@ -1695,12 +1928,13 @@ fn draw_static_col_header(
     let font_id = FontId::new(font_size, FontFamily::Proportional);
     let fg = pal.subtle_text;
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, fg));
-    let x = if right_aligned {
-        (cell_rect.max.x - galley.size().x).max(cell_rect.min.x)
-    } else {
-        cell_rect.min.x
-    };
-    let text_pos = Pos2::new(x.round(), (cell_rect.center().y - galley.size().y * 0.5).round());
+    let text_pos = optical_galley_pos(
+        ui,
+        cell_rect,
+        &galley,
+        if right_aligned { Some(cell_rect.max.x) } else { None },
+        false,
+    );
     ui.painter().galley(text_pos, galley, fg);
 }
 
@@ -1726,10 +1960,7 @@ fn draw_filter_radio_chip(
     };
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
-    let text_pos = Pos2::new(
-        (snapped.center().x - galley.size().x * 0.5).round(),
-        (snapped.center().y - galley.size().y * 0.5).round(),
-    );
+    let text_pos = optical_galley_pos(ui, snapped, &galley, None, true);
     ui.painter().galley(text_pos, galley, draw_fg);
     resp.clicked()
 }
@@ -1793,11 +2024,23 @@ fn ensure_report_and_filter_caches(
             a.total_tip = format!("{} · {:.2}% share", a.total_tip, share_pct);
         }
 
-        let rev_counts = rep
+        let rev_counts: HashMap<String, usize> = rep
             .reverse_dependencies
             .iter()
             .map(|r| (r.target_id.clone(), r.dependent_count))
             .collect();
+        let mut rev_by_app_token: HashMap<String, (String, usize)> =
+            HashMap::with_capacity(rep.reverse_dependencies.len());
+        for r in &rep.reverse_dependencies {
+            if r.dependent_count > 0 {
+                let tok = normalize_app_token(&r.target_name);
+                if !tok.is_empty() {
+                    rev_by_app_token
+                        .entry(tok)
+                        .or_insert_with(|| (r.target_id.clone(), r.dependent_count));
+                }
+            }
+        }
         let sys_reconcile = rep
             .windows_system
             .iter()
@@ -1849,6 +2092,7 @@ fn ensure_report_and_filter_caches(
                 format_exact_bytes(total_attributed_bytes)
             ),
             rev_counts,
+            rev_by_app_token,
             sys_reconcile,
         });
     }
@@ -1899,6 +2143,8 @@ fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
             + (n_deps.saturating_sub(1) as f32) * 2.0
     };
     3.0 + COLLAPSED_ROW_OUTER_H
+        + SPACE_4
+        + 18.0
         + SPACE_4
         + 18.0
         + SUB_HEADER_H
@@ -2156,7 +2402,7 @@ pub fn draw_app_ui(
                                             },
                                         );
 
-                                        // Line 2: Chunky 7px rounded capacity bar (z-controller battery-bar geometry: STATUS_RED if >= 85% full, else healthy token)
+                                        // Line 2: Chunky 7px rounded capacity bar in signature 3-stop WT horizontal gradient (red only if drive unreachable/0 total)
                                         let bar_w = inner_w.floor().max(80.0);
                                         let (bar_rect, bar_resp) = ui.allocate_exact_size(
                                             Vec2::new(bar_w, 7.0),
@@ -2174,29 +2420,29 @@ pub fn draw_app_ui(
                                         let inset = 1.0 / ppp.max(0.5);
                                         let inner_track = snapped_bar.shrink(inset);
                                         let inner_px = (inner_track.width() * ppp).round();
-                                        let fill_px = if drv.used_bytes == 0 {
+                                        let fill_px = if drv.total_bytes == 0 || drv.used_bytes == 0 {
                                             0.0
                                         } else {
                                             ((inner_px as f64) * ratio)
                                                 .round()
                                                 .clamp(3.0, inner_px as f64) as f32
                                         };
-                                        if fill_px > 0.0 && inner_track.height() > 0.0 {
+                                        if drv.total_bytes == 0 && inner_track.width() > 4.0 {
+                                            ui.painter().rect_filled(
+                                                inner_track,
+                                                Rounding::same(2.5),
+                                                STATUS_RED,
+                                            );
+                                        } else if fill_px > 0.0 && inner_track.height() > 0.0 {
                                             let fill_rect = Rect::from_min_size(
                                                 inner_track.min,
                                                 Vec2::new(fill_px / ppp.max(0.5), inner_track.height()),
                                             );
-                                            let bar_col = if ratio >= 0.85 {
-                                                STATUS_RED
-                                            } else if drv.full_walk_enabled {
-                                                pal.accent_line
-                                            } else {
-                                                LOGO_LAVENDER
-                                            };
-                                            ui.painter().rect_filled(
+                                            paint_horizontal_wt_gradient_bar(
+                                                ui.painter(),
+                                                inner_track,
                                                 fill_rect,
-                                                Rounding::same(2.5),
-                                                bar_col,
+                                                2.5,
                                             );
                                         }
                                         let _ = bar_resp.on_hover_text(format!(
@@ -2239,8 +2485,8 @@ pub fn draw_app_ui(
                             ui,
                             "main_app_filter",
                             &mut ui_state.search_query,
-                            260.0,
-                            "Search app name, publisher, or path...",
+                            272.0,
+                            "Search app, publisher, category, or path...",
                             pal.header_input_bg,
                             &pal,
                         );
@@ -2346,26 +2592,95 @@ pub fn draw_app_ui(
 
     match ui_state.active_view {
         ActiveView::Main => {
-            // Pinned Bottom Panel rendered BEFORE CentralPanel so only CentralPanel app list scrolls and bottom groups never clip.
+            // Collapsible & drag-resizable Pinned Bottom Panel rendered BEFORE CentralPanel so only CentralPanel scrolls.
             if let Some(rep) = report {
-                egui::TopBottomPanel::bottom("pinned_groups_panel")
+                const LEDGER_MIN_H: f32 = 156.0;
+                let max_ledger_h = (ctx.screen_rect().height() * 0.50).max(LEDGER_MIN_H + 24.0);
+                let mut panel = egui::TopBottomPanel::bottom("pinned_groups_panel")
                     .show_separator_line(false)
+                    .resizable(false)
                     .frame(
                         egui::Frame::none()
                             .fill(pal.panel_alt)
                             .stroke(Stroke::NONE)
                             .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
-                    )
-                    .show(ctx, |ui| {
-                        let sr = ctx.screen_rect();
-                        let top_y = (ui.max_rect().top() - SPACE_8).round();
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(Pos2::new(sr.left(), top_y), Vec2::new(sr.width(), 1.0)),
-                            Rounding::ZERO,
-                            pal.border,
+                    );
+                if !ui_state.ledger_collapsed {
+                    if let Some(h) = ui_state.ledger_height_px {
+                        panel = panel.exact_height(h.clamp(LEDGER_MIN_H, max_ledger_h));
+                    }
+                }
+                panel.show(ctx, |ui| {
+                    let sr = ctx.screen_rect();
+                    let top_y = (ui.max_rect().top() - SPACE_8).round();
+                    let panel_outer_h = ui.max_rect().height() + SPACE_16;
+                    let mut grip_active = false;
+                    if !ui_state.ledger_collapsed {
+                        let grip_rect = Rect::from_min_max(
+                            Pos2::new(sr.left(), top_y - 2.0),
+                            Pos2::new(sr.right(), top_y + 4.0),
                         );
-                        draw_pinned_bottom_groups(ui, ui_state, rep, &pal);
-                    });
+                        let grip_resp = ui.interact(
+                            grip_rect,
+                            ui.make_persistent_id("pinned_ledger_top_resize_grip"),
+                            Sense::click_and_drag(),
+                        );
+                        grip_active = grip_resp.hovered() || grip_resp.dragged();
+                        if grip_active {
+                            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
+                        if grip_resp.drag_started() {
+                            ui_state.ledger_drag_start_h =
+                                Some(ui_state.ledger_height_px.unwrap_or(panel_outer_h));
+                        }
+                        if grip_resp.dragged() {
+                            let cur = ui_state
+                                .ledger_height_px
+                                .unwrap_or_else(|| ui_state.ledger_drag_start_h.unwrap_or(panel_outer_h));
+                            let next_h = (cur - grip_resp.drag_delta().y).clamp(LEDGER_MIN_H, max_ledger_h);
+                            ui_state.ledger_height_px = Some(next_h);
+                        }
+                        if grip_resp.drag_stopped() {
+                            ui_state.ledger_drag_start_h = None;
+                            emit(UiAction::UpdateLedgerLayout {
+                                collapsed: ui_state.ledger_collapsed,
+                                height_px: ui_state.ledger_height_px,
+                            });
+                        }
+                    }
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(Pos2::new(sr.left(), top_y), Vec2::new(sr.width(), 1.0)),
+                        Rounding::ZERO,
+                        if grip_active { pal.accent_line } else { pal.border },
+                    );
+                    if !ui_state.ledger_collapsed {
+                        let grip_pill = Rect::from_center_size(
+                            Pos2::new(sr.center().x, top_y + 2.0),
+                            Vec2::new(36.0, 2.0),
+                        );
+                        ui.painter().rect_filled(
+                            grip_pill,
+                            Rounding::same(1.0),
+                            if grip_active {
+                                pal.accent_line
+                            } else {
+                                lerp_color(pal.border, pal.muted, 0.35)
+                            },
+                        );
+                    }
+                    let body_budget_h = if !ui_state.ledger_collapsed {
+                        ui_state.ledger_height_px.map(|h| {
+                            let sys_lines = ui_state
+                                .cached_report
+                                .as_ref()
+                                .map_or(1, |cr| cr.sys_reconcile.len().max(1)) as f32;
+                            (h - (SPACE_16 + 22.0 + sys_lines * 24.0 + SPACE_4 * 2.0)).max(88.0)
+                        })
+                    } else {
+                        None
+                    };
+                    draw_pinned_bottom_groups(ui, ui_state, rep, &pal, body_budget_h, emit);
+                });
             }
 
             egui::CentralPanel::default()
@@ -2487,14 +2802,32 @@ fn draw_main_app_list(
     ) {
         sort_clicked = Some(AppSortMode::Name);
     }
-    draw_static_col_header(
+    if draw_sortable_col_header(
         ui,
         cols.publisher.rect(hdr_y0, hdr_y1),
+        "main_pub",
         "Publisher",
-        11.0,
+        AppSortMode::Publisher,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
         false,
         pal,
-    );
+    ) {
+        sort_clicked = Some(AppSortMode::Publisher);
+    }
+    if draw_sortable_col_header(
+        ui,
+        cols.category.rect(hdr_y0, hdr_y1),
+        "main_cat",
+        "Category",
+        AppSortMode::Category,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
+        false,
+        pal,
+    ) {
+        sort_clicked = Some(AppSortMode::Category);
+    }
     if draw_sortable_col_header(
         ui,
         cols.delta.rect(hdr_y0, hdr_y1),
@@ -2568,6 +2901,7 @@ fn draw_main_app_list(
     let cached_rim = &mut ui_state.cached_rim;
     let truncate_cache = &mut ui_state.truncate_cache;
     let first_row_size_rect = &mut ui_state.first_row_size_rect;
+    let mut show_bottom_fade = false;
 
     draw_synced_scroll_area_viewport(
         ui,
@@ -2579,6 +2913,7 @@ fn draw_main_app_list(
         |ui, viewport| {
             ui.set_width(panel_w);
             ui.spacing_mut().item_spacing.y = 0.0;
+            show_bottom_fade = shown > 0 && viewport.max.y + 1.5 < total_virtual_h;
 
             let body_clip = Rect::from_min_max(
                 Pos2::new(panel_left + inset, ui.clip_rect().min.y),
@@ -2791,14 +3126,36 @@ fn draw_main_app_list(
                                 );
                                 p_ui.add(
                                     egui::Label::new(
-                                        RichText::new(first_pub).font(pub_font).color(pal.subtle_text),
+                                    RichText::new(first_pub).font(pub_font).color(pal.subtle_text),
                                     )
                                     .truncate()
                                     .selectable(false),
                                 );
                             }
 
-                            // 4. Growth delta (monospace Regular numerals for +/- deltas)
+                            // 4. Category (quiet label; muted for assigned categories, subtle for Uncategorized)
+                            {
+                                let cat_rect = cols.category.rect(y0, y1);
+                                let cat_font = FontId::new(11.0, FontFamily::Proportional);
+                                let cat_col = if app.category == y_core::model::AppCategory::Uncategorized {
+                                    pal.subtle_text
+                                } else {
+                                    pal.muted
+                                };
+                                let (cat_text, _) =
+                                    truncate_word_boundary_px(ui, app.category.label(), &cat_font, cat_rect.width());
+                                draw_optical_label_in_rect(
+                                    ui,
+                                    cat_rect,
+                                    &cat_text,
+                                    cat_font,
+                                    cat_col,
+                                    false,
+                                    false,
+                                );
+                            }
+
+                            // 5. Growth delta (monospace Regular numerals for +/- deltas)
                             let delta_info = cached_report
                                 .as_ref()
                                 .and_then(|cr| cr.apps[app_idx].delta_display.clone())
@@ -2926,6 +3283,13 @@ fn draw_main_app_list(
                                         });
                                 } else if cols.delta.rect(y0, y1).contains(pos) {
                                     cell_tooltip = delta_info.map(|(_, _, tip)| tip);
+                                } else if cols.category.rect(y0, y1).contains(pos) {
+                                    let basis_lbl = if app.category_basis.is_empty() {
+                                        "default".to_string()
+                                    } else {
+                                        app.category_basis.clone()
+                                    };
+                                    cell_tooltip = Some(format!("{} — {}", app.category.label(), basis_lbl));
                                 } else if cols.publisher.rect(y0, y1).contains(pos) {
                                     cell_tooltip = truncated_pub_tip;
                                 } else if cols.name.rect(y0, y1).contains(pos) {
@@ -2950,6 +3314,90 @@ fn draw_main_app_list(
                                 let sub_w = (cols.size.max_x - sub_x0).max(200.0);
                                 let loc_cols = LocationsTableColumns::compute(sub_x0, sub_w);
                                 let dep_cols = DependenciesTableColumns::compute(sub_x0, sub_w);
+
+                                // Expanded header strip: Category pill + classification rule basis (+ reverse-dep trigger when this app is a dependency)
+                                ui.add_space(SPACE_4);
+                                let (cat_row_rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(panel_w, 18.0),
+                                    Sense::hover(),
+                                );
+                                let mut cat_ui = table_cell_ui(
+                                    ui,
+                                    Rect::from_min_max(
+                                        Pos2::new(sub_x0, cat_row_rect.min.y),
+                                        Pos2::new(cols.size.max_x, cat_row_rect.max.y),
+                                    ),
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                cat_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                cat_ui.label(
+                                    RichText::new("Category")
+                                        .size(11.0)
+                                        .color(pal.muted),
+                                );
+                                paint_chip(
+                                    &mut cat_ui,
+                                    app.category.label(),
+                                    ChipStyle {
+                                        fill: Color32::TRANSPARENT,
+                                        stroke: pal.border,
+                                        text: pal.text,
+                                    },
+                                    pal.panel_alt,
+                                );
+                                let rev_match = cached_report.as_ref().and_then(|cr| {
+                                    cr.rev_by_app_token
+                                        .get(&normalize_app_token(&app.display_name))
+                                        .cloned()
+                                });
+                                let mut used_btn_w = 0.0_f32;
+                                if let Some((ref rev_id, rev_cnt)) = rev_match {
+                                    if rev_cnt > 0 {
+                                        let lbl = if rev_cnt == 1 {
+                                            "used by 1 app >".to_string()
+                                        } else {
+                                            format!("used by {rev_cnt} apps >")
+                                        };
+                                        let is_open =
+                                            open_reverse_dep_id.as_deref() == Some(rev_id.as_str());
+                                        let btn_resp = draw_z_button(
+                                            &mut cat_ui,
+                                            &lbl,
+                                            Vec2::new(0.0, 18.0),
+                                            10.5,
+                                            4.0,
+                                            true,
+                                            is_open,
+                                            ButtonVariant::SecondaryOutline,
+                                            pal,
+                                        );
+                                        used_btn_w = btn_resp.rect.width() + SPACE_8;
+                                        if btn_resp
+                                            .on_hover_text("Show apps depending on this component")
+                                            .clicked()
+                                        {
+                                            *open_reverse_dep_id = if is_open {
+                                                None
+                                            } else {
+                                                Some(rev_id.clone())
+                                            };
+                                        }
+                                    }
+                                }
+                                let basis_txt = if app.category_basis.is_empty() {
+                                    "default"
+                                } else {
+                                    app.category_basis.as_str()
+                                };
+                                let cat_basis_max_w = (sub_w - 190.0 - used_btn_w).max(80.0);
+                                draw_word_capped_text_cached(
+                                    &mut cat_ui,
+                                    basis_txt,
+                                    FontId::new(10.5, FontFamily::Proportional),
+                                    pal.subtle_text,
+                                    cat_basis_max_w,
+                                    truncate_cache,
+                                );
 
                                 // Sub-table 1: Locations (Zone · Path · Basis · Size)
                                 ui.add_space(SPACE_4);
@@ -3385,7 +3833,7 @@ fn draw_main_app_list(
                                                     &lbl,
                                                     Vec2::new(0.0, 18.0),
                                                     10.5,
-                                                    RADIUS_PILL,
+                                                    4.0,
                                                     true,
                                                     is_open_rev,
                                                     ButtonVariant::SecondaryOutline,
@@ -3553,6 +4001,19 @@ fn draw_main_app_list(
                 ),
             );
         }
+        if show_bottom_fade && inner_panel.height() > TABLE_HEADER_H + 30.0 {
+            let fade_rect = Rect::from_min_max(
+                Pos2::new(
+                    inner_panel.min.x,
+                    (inner_panel.max.y - 22.0).max(hdr_y1 + 1.0),
+                ),
+                Pos2::new(
+                    (inner_panel.max.x - 10.0).max(inner_panel.min.x),
+                    inner_panel.max.y,
+                ),
+            );
+            paint_bottom_fade_overlay(ui.painter(), fade_rect, pal.panel);
+        }
     }
 }
 
@@ -3678,7 +4139,7 @@ fn draw_reverse_dependency_overlay(
                                 ChipStyle {
                                     fill: pal.pill_blue_fill,
                                     stroke: pal.accent_line,
-                                    text: pal.text,
+                                    text: pal.proven_text,
                                 },
                                 pal.panel,
                             );
@@ -3783,19 +4244,126 @@ fn draw_pinned_bottom_groups(
     ui_state: &mut StorageUiState,
     rep: &ScanReport,
     pal: &ThemePalette,
+    body_budget_h: Option<f32>,
+    emit: &mut dyn FnMut(UiAction),
 ) {
     ui.spacing_mut().item_spacing.y = SPACE_4;
     let aligned_w = (ui.available_width() - SCROLL_GUTTER_W).max(200.0);
-    ui.label(
-        RichText::new("Pinned storage ledger")
-            .size(10.5)
-            .color(pal.subtle_text),
-    );
+
+    if ui_state.ledger_collapsed {
+        let first_reconcile = ui_state
+            .cached_report
+            .as_ref()
+            .and_then(|cr| cr.sys_reconcile.first())
+            .map(|r| (r.2.clone(), r.3));
+        let collapsed_summary = format!(
+            "Win/sys {}  ·  Your files {}  ·  Shared caches {}  ·  Unattributed {}",
+            format_size_2dec(rep.windows_system_total_bytes),
+            format_size_2dec(rep.your_files_total_bytes),
+            format_size_2dec(rep.shared_caches_total_bytes),
+            format_size_2dec(rep.unattributed_total_bytes),
+        );
+        let row_resp = draw_split_row(
+            ui,
+            22.0,
+            104.0,
+            Sense::click(),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_8;
+                draw_chevron(ui, false, pal.muted);
+                ui.label(
+                    RichText::new("Pinned storage ledger")
+                        .size(11.0)
+                        .color(pal.text),
+                );
+                draw_truncated_text(
+                    ui,
+                    &collapsed_summary,
+                    FontId::new(10.5, FontFamily::Proportional),
+                    pal.muted,
+                    false,
+                );
+            },
+            |ui| {
+                if let Some((exact, diff)) = &first_reconcile {
+                    if *diff == 0 {
+                        ui.add_space(SPACE_8);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("diff 0 B")
+                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                    .color(pal.status_green),
+                            )
+                            .selectable(false),
+                        )
+                        .on_hover_text(exact);
+                        let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
+                    } else {
+                        paint_chip(
+                            ui,
+                            &format!("diff {diff} B"),
+                            ChipStyle {
+                                fill: pal.pill_red_fill,
+                                stroke: pal.status_red,
+                                text: pal.status_red,
+                            },
+                            pal.panel_alt,
+                        );
+                    }
+                }
+            },
+        );
+        let hovered = row_resp.hovered();
+        let clicked = row_resp.clicked();
+        let _ = row_resp.on_hover_text("Click to expand Pinned storage ledger");
+        if hovered {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if clicked {
+            ui_state.ledger_collapsed = false;
+            emit(UiAction::UpdateLedgerLayout {
+                collapsed: false,
+                height_px: ui_state.ledger_height_px,
+            });
+        }
+        return;
+    }
+
+    let (hdr_rect, hdr_resp) = ui.allocate_exact_size(Vec2::new(aligned_w, 18.0), Sense::click());
+    if hdr_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    {
+        let mut h_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(hdr_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        h_ui.spacing_mut().item_spacing.x = SPACE_4;
+        draw_chevron(&mut h_ui, true, if hdr_resp.hovered() { pal.text } else { pal.muted });
+        h_ui.label(
+            RichText::new("Pinned storage ledger")
+                .size(10.5)
+                .color(if hdr_resp.hovered() { pal.text } else { pal.subtle_text }),
+        );
+    }
+    let hdr_clicked = hdr_resp.clicked();
+    let _ = hdr_resp.on_hover_text("Click to collapse Pinned storage ledger; drag top border to resize");
+    if hdr_clicked {
+        ui_state.ledger_collapsed = true;
+        emit(UiAction::UpdateLedgerLayout {
+            collapsed: true,
+            height_px: ui_state.ledger_height_px,
+        });
+        return;
+    }
 
     let any_expanded = ui_state.expand_windows_system
         || ui_state.expand_shared_caches
         || ui_state.expand_your_files
         || ui_state.expand_unattributed;
+    let unattrib_tick = lerp_color(pal.border, pal.muted, 0.55);
 
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -3814,7 +4382,7 @@ fn draw_pinned_bottom_groups(
                     "Windows & system",
                     rep.windows_system_total_bytes,
                     "ESTIMATE · system remainder + pagefile/hiberfil",
-                    LOGO_LAVENDER,
+                    pal.muted,
                     &mut ui_state.expand_windows_system,
                     true,
                     pal,
@@ -3839,7 +4407,7 @@ fn draw_pinned_bottom_groups(
                     "Your files",
                     rep.your_files_total_bytes,
                     "Personal shell folders · unzoned · read-only",
-                    pal.accent_line,
+                    pal.muted,
                     &mut ui_state.expand_your_files,
                     true,
                     pal,
@@ -3877,7 +4445,7 @@ fn draw_pinned_bottom_groups(
                     "Unattributed",
                     rep.unattributed_total_bytes,
                     &format!("{} folders with no verified app owner", rep.unattributed.len()),
-                    LOGO_PINK,
+                    unattrib_tick,
                     &mut ui_state.expand_unattributed,
                     false,
                     pal,
@@ -3901,12 +4469,12 @@ fn draw_pinned_bottom_groups(
         );
     };
 
-    if any_expanded {
+    if any_expanded || body_budget_h.is_some() {
         draw_synced_scroll_area(
             ui,
             "pinned_groups_scroll",
-            Some(152.0),
-            [false, true],
+            Some(body_budget_h.unwrap_or(152.0)),
+            [false, body_budget_h.is_none()],
             pal,
             pal.panel_alt,
             |ui| {
@@ -4247,7 +4815,7 @@ fn draw_reverse_group_header(
                     ChipStyle {
                         fill: pal.pill_blue_fill,
                         stroke: pal.accent_line,
-                        text: pal.text,
+                        text: pal.proven_text,
                     },
                     pal.panel,
                 );
@@ -4558,6 +5126,8 @@ mod tests {
                 }],
                 display_icon: None,
                 icon_rgba: None,
+                category: y_core::model::AppCategory::default(),
+                category_basis: String::new(),
             }],
             shared_caches: vec![],
             shared_caches_total_bytes: 0,
@@ -4666,8 +5236,42 @@ mod tests {
         assert!(long_basis.starts_with(body));
         let next_char = long_basis[body.len()..].chars().next().unwrap();
         assert!(
-            next_char.is_whitespace() || matches!(next_char, ',' | ';' | ')' | '|'),
-            "expected word boundary after {body:?}, next char was {next_char:?}"
+            next_char.is_whitespace()
+                || matches!(next_char, '\\' | '/' | '.' | ',' | ';' | ')' | '|' | ':' | '+'),
+            "expected segment boundary after {body:?}, next char was {next_char:?}"
+        );
+    }
+
+    #[test]
+    fn segment_boundary_truncation_splits_dotted_filenames_and_paths() {
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let sample = "fingerprint: eaanticheat.gameservicelauncher.exe + C:\\Program Files\\Epic Games\\Epic Online Services\\EpicOnlineServicesHost.exe";
+        let font = FontId::new(10.5, FontFamily::Proportional);
+        let mut capped_out = String::new();
+        let mut truncated_flag = false;
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0))),
+                ..Default::default()
+            },
+            |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    let (capped, trunc) = truncate_word_boundary_px(ui, sample, &font, 230.0);
+                    capped_out = capped;
+                    truncated_flag = trunc;
+                });
+            },
+        );
+        assert!(truncated_flag);
+        assert!(capped_out.ends_with('…'));
+        assert!(!capped_out.ends_with(",…") && !capped_out.ends_with("+…"));
+        let body = capped_out.trim_end_matches('…');
+        assert!(sample.starts_with(body));
+        let next_char = sample[body.len()..].chars().next().unwrap();
+        assert!(
+            next_char.is_whitespace() || matches!(next_char, '\\' | '/' | '.' | ',' | ';' | ')' | '|' | '+'),
+            "expected clean segment boundary after {body:?}, next char was {next_char:?}"
         );
     }
 
@@ -4725,6 +5329,8 @@ mod tests {
                 dependencies: deps,
                 display_icon: None,
                 icon_rgba: None,
+                category: y_core::model::AppCategory::default(),
+                category_basis: String::new(),
             });
         }
         let expanded_estimate = estimate_expanded_row_height(&apps[0]);

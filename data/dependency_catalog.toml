@@ -75,7 +75,18 @@ name = "Epic Games Launcher"
 kind = "PlatformLauncher"
 shared = true
 registry_matches = ["epic games launcher"]
-service_names = ["EpicOnlineServices", "EpicGamesUpdater"]
+service_names = ["EpicGamesUpdater"]
+presence_paths = [
+  "C:\\ProgramData\\Epic\\EpicGamesLauncher",
+]
+
+[[targets]]
+id = "epic-online-services"
+name = "Epic Online Services"
+kind = "AntiCheatServiceDriver"
+shared = true
+registry_matches = ["epic online services"]
+service_names = ["EpicOnlineServices"]
 presence_paths = [
   "C:\\Program Files (x86)\\Epic Games\\Epic Online Services",
 ]
@@ -244,8 +255,13 @@ files = [
 ]
 
 [[fingerprints]]
-target_id = "epic-games"
-files = ["eossdk-win64-shipping.dll", "eossdk-win32-shipping.dll"]
+target_id = "epic-online-services"
+files = [
+  "eossdk-win64-shipping.dll",
+  "eossdk-win32-shipping.dll",
+  "epiconlineservicesinstaller.exe",
+  "eosbootstrapper.exe",
+]
 
 [[fingerprints]]
 target_id = "gog-galaxy"
@@ -307,3 +323,11 @@ publisher_matches = ["electronic arts", "ea canada"]
 install_path_contains = "steamapps"
 target_id = "ea-app"
 reason = "EA Steam release bridges via EA App"
+
+# Official Epic Games docs: Epic Games Launcher installs & depends on the Epic Online Services companion service and EOS overlay
+# Source: https://dev.epicgames.com/docs/epic-online-services/eos-platform-interface/eos-platform-overview
+[[app_rules]]
+app_matches = ["epic games launcher"]
+publisher_matches = ["epic games"]
+target_id = "epic-online-services"
+reason = "Epic Games Launcher bundles and runs Epic Online Services (source: dev.epicgames.com/docs/epic-online-services)"

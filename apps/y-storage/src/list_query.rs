@@ -57,6 +57,9 @@ pub fn app_matches_search(app: &AttributedApp, search_query: &str) -> bool {
     if pub_hit {
         return true;
     }
+    if app.category.label().to_ascii_lowercase().contains(&q) {
+        return true;
+    }
     app.items
         .iter()
         .any(|it| it.path.to_ascii_lowercase().contains(&q))
@@ -103,6 +106,54 @@ pub fn compare_apps(
                 .then_with(|| a.display_name.cmp(&b.display_name))
                 .then_with(|| b.total_bytes.cmp(&a.total_bytes))
         }
+        AppSortMode::Publisher => {
+            let pa = a
+                .publishers
+                .first()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let pb = b
+                .publishers
+                .first()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let primary = match (pa, pb) {
+                (Some(sa), Some(sb)) => {
+                    let la = sa.to_lowercase();
+                    let lb = sb.to_lowercase();
+                    match dir {
+                        SortDirection::Asc => la.cmp(&lb),
+                        SortDirection::Desc => lb.cmp(&la),
+                    }
+                }
+                // Publisher-less apps group at end in A-Z and at start in Z-A.
+                (Some(_), None) => match dir {
+                    SortDirection::Asc => Ordering::Less,
+                    SortDirection::Desc => Ordering::Greater,
+                },
+                (None, Some(_)) => match dir {
+                    SortDirection::Asc => Ordering::Greater,
+                    SortDirection::Desc => Ordering::Less,
+                },
+                (None, None) => Ordering::Equal,
+            };
+            primary
+                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+                .then_with(|| a.display_name.cmp(&b.display_name))
+                .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+        }
+        AppSortMode::Category => {
+            let ca = a.category.label().to_lowercase();
+            let cb = b.category.label().to_lowercase();
+            let primary = match dir {
+                SortDirection::Asc => ca.cmp(&cb),
+                SortDirection::Desc => cb.cmp(&ca),
+            };
+            primary
+                .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+                .then_with(|| a.display_name.cmp(&b.display_name))
+        }
         AppSortMode::Growth => match (growth_delta_bytes(a.growth), growth_delta_bytes(b.growth)) {
             (Some(da), Some(db)) => {
                 let primary = match dir {
@@ -148,7 +199,7 @@ pub fn filter_and_sort_apps<'a>(
 mod tests {
     use super::*;
     use y_core::config::AppConfig;
-    use y_core::model::{BreakdownItem, NoTouchCategory, ZoneKind};
+    use y_core::model::{AppCategory, BreakdownItem, NoTouchCategory, ZoneKind};
 
     fn make_app(
         id: &str,
@@ -187,6 +238,8 @@ mod tests {
             dependencies: Vec::new(),
             display_icon: None,
             icon_rgba: None,
+            category: AppCategory::default(),
+            category_basis: String::new(),
         }
     }
 
@@ -556,7 +609,62 @@ mod tests {
         assert_eq!(legacy_cfg.sort_direction, SortDirection::Desc);
         assert_eq!(legacy_cfg.filter_chip, AppFilterChip::All);
         assert_eq!(legacy_cfg.search_query, "");
+        assert!(!legacy_cfg.ledger_collapsed);
+        assert_eq!(legacy_cfg.ledger_height_px, None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publisher_sort_orders_tie_breaks_by_name_and_groups_empty_publishers() {
+        let apps = vec![
+            make_app("reg:no1", "Zebra Tool", "", 100, GrowthDelta::Changed(0), None, vec![AttributionBasis::ExactName], &['C']),
+            make_app("reg:no2", "Alpha Tool", "   ", 500, GrowthDelta::Changed(0), None, vec![AttributionBasis::ExactName], &['C']),
+            make_app("reg:b1", "Beta App", "BetaPub", 200, GrowthDelta::Changed(0), None, vec![AttributionBasis::ExactName], &['C']),
+            make_app("reg:a2", "Zoo App", "acme inc", 100, GrowthDelta::Changed(0), None, vec![AttributionBasis::ExactName], &['C']),
+            make_app("reg:a1", "Ant App", "Acme Inc", 50, GrowthDelta::Changed(0), None, vec![AttributionBasis::ExactName], &['C']),
+        ];
+
+        // A->Z: Acme (Ant before Zoo), BetaPub (Beta), then publisher-less at end (Alpha before Zebra)
+        let asc: Vec<&str> = filter_and_sort_apps(&apps, AppSortMode::Publisher, SortDirection::Asc, AppFilterChip::All, "", 'C')
+            .into_iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(asc, vec!["reg:a1", "reg:a2", "reg:b1", "reg:no2", "reg:no1"]);
+
+        // Z->A: publisher-less at start (Alpha before Zebra tie-broken A-Z), then BetaPub, then Acme (Ant before Zoo)
+        let desc: Vec<&str> = filter_and_sort_apps(&apps, AppSortMode::Publisher, SortDirection::Desc, AppFilterChip::All, "", 'C')
+            .into_iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(desc, vec!["reg:no2", "reg:no1", "reg:b1", "reg:a1", "reg:a2"]);
+    }
+
+    #[test]
+    fn category_sort_and_search_group_by_category_then_size_desc_then_name() {
+        let mut c = make_app("reg:fifa", "EA SPORTS FIFA 23", "EA", 50_000, GrowthDelta::Changed(0), None, vec![AttributionBasis::InstallLocation], &['D']);
+        c.category = AppCategory::Games;
+        let mut d = make_app("reg:unity", "Unity", "Unity", 1_000, GrowthDelta::Changed(0), None, vec![AttributionBasis::InstallLocation], &['C']);
+        d.category = AppCategory::Development;
+        let mut b = make_app("reg:edge", "Microsoft Edge", "Microsoft", 900, GrowthDelta::Changed(0), None, vec![AttributionBasis::InstallLocation], &['C']);
+        b.category = AppCategory::Browsers;
+        let mut a = make_app("reg:chrome", "Google Chrome", "Google", 400, GrowthDelta::Changed(0), None, vec![AttributionBasis::InstallLocation], &['C']);
+        a.category = AppCategory::Browsers;
+
+        // Input mirrors a real ScanReport sorted descending by total_bytes.
+        let apps = vec![c, d, b, a];
+        let asc: Vec<&str> = filter_and_sort_apps(&apps, AppSortMode::Category, SortDirection::Asc, AppFilterChip::All, "", 'C')
+            .into_iter()
+            .map(|x| x.id.as_str())
+            .collect();
+        // Browsers (Edge 900 before Chrome 400), Development, Games
+        assert_eq!(asc, vec!["reg:edge", "reg:chrome", "reg:unity", "reg:fifa"]);
+
+        // Search filter matches category labels cleanly
+        let filtered: Vec<&str> = filter_and_sort_apps(&apps, AppSortMode::Size, SortDirection::Desc, AppFilterChip::All, "browsers", 'C')
+            .into_iter()
+            .map(|x| x.id.as_str())
+            .collect();
+        assert_eq!(filtered, vec!["reg:edge", "reg:chrome"]);
     }
 }

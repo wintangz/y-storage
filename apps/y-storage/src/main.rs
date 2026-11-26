@@ -54,6 +54,8 @@ fn main() {
     let mut screenshot_sort_dir: Option<SortDirection> = None;
     let mut screenshot_filter = AppFilterChip::All;
     let mut screenshot_search = String::new();
+    let mut screenshot_ledger_collapsed: Option<bool> = None;
+    let mut screenshot_ledger_height: Option<f32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -109,6 +111,8 @@ fn main() {
                 if i + 1 < args.len() {
                     screenshot_sort = match args[i + 1].to_ascii_lowercase().as_str() {
                         "name" => AppSortMode::Name,
+                        "publisher" => AppSortMode::Publisher,
+                        "category" => AppSortMode::Category,
                         "growth" => AppSortMode::Growth,
                         _ => AppSortMode::Size,
                     };
@@ -143,6 +147,15 @@ fn main() {
                     i += 1;
                 }
             }
+            "--ledger-collapsed" => {
+                screenshot_ledger_collapsed = Some(true);
+            }
+            "--ledger-height" => {
+                if i + 1 < args.len() {
+                    screenshot_ledger_height = args[i + 1].parse::<f32>().ok();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -164,6 +177,8 @@ fn main() {
             sort_dir,
             screenshot_filter,
             &screenshot_search,
+            screenshot_ledger_collapsed,
+            screenshot_ledger_height,
         ) {
             eprintln!("render screenshot failed: {err}");
             std::process::exit(1);
@@ -243,8 +258,10 @@ fn run_cli_scan(out_path: &PathBuf, ephemeral: bool) {
     std::fs::write(out_path, json).expect("write CLI scan JSON");
 }
 
-fn render_screenshot(
-    out_path: &PathBuf,
+fn render_screenshot_frame(
+    report: &y_core::model::ScanReport,
+    config: &AppConfig,
+    sys_win: &str,
     view: &str,
     theme: ThemeMode,
     dpi: u32,
@@ -252,25 +269,25 @@ fn render_screenshot(
     sort_direction: SortDirection,
     filter_chip: AppFilterChip,
     search_query: &str,
-) -> Result<(), String> {
-    let drives = enumerate_fixed_drives();
-    let sys_win = get_windows_directory();
-    let mut config = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
-    config.theme_mode = theme;
-
-    let mut report = load_last_scan(&default_last_scan_path())
-        .unwrap_or_else(|| execute_scan_with_progress(&config, None, None));
-    if !report.apps.is_empty() && report.apps.iter().all(|a| a.icon_rgba.is_none()) {
-        y_platform_windows::icons::populate_report_icons(&mut report);
-    }
+    ledger_collapsed: Option<bool>,
+    ledger_height_px: Option<f32>,
+) -> (usize, usize, Vec<u32>) {
+    let mut cfg = config.clone();
+    cfg.theme_mode = theme;
 
     let mut ui_state = StorageUiState::default();
     ui_state.sort_mode = sort_mode;
     ui_state.sort_direction = sort_direction;
     ui_state.filter_chip = filter_chip;
     ui_state.search_query = search_query.to_string();
+    if let Some(c) = ledger_collapsed {
+        ui_state.ledger_collapsed = c;
+    }
+    if let Some(h) = ledger_height_px {
+        ui_state.ledger_height_px = Some(h);
+    }
+
     let hover_size_mode = view == "hover-size";
-    let header_zoom_mode = view == "header-buttons-zoom";
     match view {
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
@@ -283,6 +300,24 @@ fn render_screenshot(
             } else if let Some(first) = report.apps.first() {
                 ui_state.expanded_apps.insert(first.id.clone());
             }
+        }
+        "expanded-epic" => {
+            ui_state.active_view = ActiveView::Main;
+            if ui_state.search_query.is_empty() {
+                ui_state.search_query = "Epic".to_string();
+            }
+            for app in &report.apps {
+                let lower = app.display_name.to_ascii_lowercase();
+                if lower.contains("epic games launcher") || lower.contains("epic online services") {
+                    ui_state.expanded_apps.insert(app.id.clone());
+                }
+            }
+        }
+        "ledger-resized" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_shared_caches = true;
+            ui_state.ledger_height_px = Some(268.0);
         }
         "reverse-ea-app" => {
             ui_state.active_view = ActiveView::Main;
@@ -323,7 +358,6 @@ fn render_screenshot(
         ThemeMode::Light => 0x00EE_F4FA,
     };
 
-    // Run 3+ passes so ScrollAreas, panel heights, and hover tooltip delays settle crisply.
     let steps = if hover_size_mode { 4 } else { 3 };
     for step in 0..steps {
         let mut events = Vec::new();
@@ -360,11 +394,11 @@ fn render_screenshot(
             draw_app_ui(
                 c,
                 &mut ui_state,
-                &config,
-                Some(&report),
+                &cfg,
+                Some(report),
                 false,
                 None,
-                &sys_win,
+                sys_win,
                 &mut |_| {},
             );
             if hover_size_mode && step + 1 == steps {
@@ -402,28 +436,153 @@ fn render_screenshot(
             );
         }
     }
+    (phys_w, phys_h, painter.backbuffer_pixels().to_vec())
+}
 
-    if header_zoom_mode {
-        let crop_x0 = (756.0 * ppp).round() as usize;
-        let crop_y0 = 0usize;
-        let crop_w = phys_w.saturating_sub(crop_x0).max(1);
-        let crop_h = ((52.0 * ppp).round() as usize).clamp(1, phys_h);
-        let scale = 3usize;
-        let out_w = crop_w * scale;
-        let out_h = crop_h * scale;
-        let src = painter.backbuffer_pixels();
-        let mut zoomed = vec![0u32; out_w * out_h];
-        for y in 0..crop_h {
-            for x in 0..crop_w {
-                let px = src[(crop_y0 + y) * phys_w + (crop_x0 + x)];
-                for dy in 0..scale {
-                    let row = (y * scale + dy) * out_w + (x * scale);
-                    zoomed[row..row + scale].fill(px);
-                }
+fn upscale_crop_nn(
+    src: &[u32],
+    src_w: usize,
+    cx0: usize,
+    cy0: usize,
+    cw: usize,
+    ch: usize,
+    scale: usize,
+) -> (usize, usize, Vec<u32>) {
+    let out_w = cw * scale;
+    let out_h = ch * scale;
+    let mut out = vec![0u32; out_w * out_h];
+    for y in 0..ch {
+        for x in 0..cw {
+            let px = src[(cy0 + y) * src_w + (cx0 + x)];
+            for dy in 0..scale {
+                let row = (y * scale + dy) * out_w + (x * scale);
+                out[row..row + scale].fill(px);
             }
         }
+    }
+    (out_w, out_h, out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_screenshot(
+    out_path: &PathBuf,
+    view: &str,
+    theme: ThemeMode,
+    dpi: u32,
+    sort_mode: AppSortMode,
+    sort_direction: SortDirection,
+    filter_chip: AppFilterChip,
+    search_query: &str,
+    ledger_collapsed: Option<bool>,
+    ledger_height_px: Option<f32>,
+) -> Result<(), String> {
+    let drives = enumerate_fixed_drives();
+    let sys_win = get_windows_directory();
+    let config = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
+
+    let mut report = load_last_scan(&default_last_scan_path())
+        .unwrap_or_else(|| execute_scan_with_progress(&config, None, None));
+    if !report.apps.is_empty() && report.apps.iter().all(|a| a.icon_rgba.is_none()) {
+        y_platform_windows::icons::populate_report_icons(&mut report);
+    }
+    if !report.apps.is_empty() && report.apps.iter().all(|a| a.category_basis.is_empty()) {
+        y_core::categories::classify_report_apps(
+            &mut report,
+            y_platform_windows::paths::has_game_manifest_dir,
+        );
+    }
+
+    if view == "centering-zoom-200" {
+        // Composite 200% zoomed optical centering proof: 100% Dark + 125% Light header buttons & badge rows.
+        let (dw, _dh, d_px) = render_screenshot_frame(
+            &report,
+            &config,
+            &sys_win,
+            "expanded-fifa23",
+            ThemeMode::Dark,
+            96,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            Some(false),
+            None,
+        );
+        let (lw, _lh, l_px) = render_screenshot_frame(
+            &report,
+            &config,
+            &sys_win,
+            "expanded-fifa23",
+            ThemeMode::Light,
+            120,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            Some(false),
+            None,
+        );
+
+        // Extract top-right header buttons & expanded badge row (Dependencies proven/shared/used-by strip).
+        let (d_hdr_w, d_hdr_h, d_hdr) = upscale_crop_nn(&d_px, dw, 756, 8, 256, 40, 2);
+        let (d_badge_w, d_badge_h, d_badge) = upscale_crop_nn(&d_px, dw, 58, 336, 860, 128, 2);
+        let l_hx0 = (756.0_f32 * 1.25).round() as usize;
+        let l_hw = (256.0_f32 * 1.25).round() as usize;
+        let l_hy0 = (8.0_f32 * 1.25).round() as usize;
+        let l_hh = (40.0_f32 * 1.25).round() as usize;
+        let (l_hdr_w, l_hdr_h, l_hdr) = upscale_crop_nn(&l_px, lw, l_hx0, l_hy0, l_hw, l_hh, 2);
+        let l_bx0 = (58.0_f32 * 1.25).round() as usize;
+        let l_bw = (860.0_f32 * 1.25).round() as usize;
+        let l_by0 = (336.0_f32 * 1.25).round() as usize;
+        let l_bh = (128.0_f32 * 1.25).round() as usize;
+        let (l_badge_w, l_badge_h, l_badge) = upscale_crop_nn(&l_px, lw, l_bx0, l_by0, l_bw, l_bh, 2);
+
+        let pad = 16usize;
+        let total_w = d_badge_w.max(l_badge_w).max(d_hdr_w + l_hdr_w + pad) + pad * 2;
+        let total_h = pad + d_hdr_h.max(l_hdr_h) + pad + d_badge_h + pad + l_badge_h + pad;
+        let mut canvas = vec![0x0014_141F_u32; total_w * total_h];
+
+        let mut blit = |src: &[u32], sw: usize, sh: usize, dx: usize, dy: usize| {
+            for r in 0..sh {
+                let dst_off = (dy + r) * total_w + dx;
+                let src_off = r * sw;
+                canvas[dst_off..dst_off + sw].copy_from_slice(&src[src_off..src_off + sw]);
+            }
+        };
+        let row1_y = pad;
+        blit(&d_hdr, d_hdr_w, d_hdr_h, pad, row1_y);
+        blit(&l_hdr, l_hdr_w, l_hdr_h, pad + d_hdr_w + pad, row1_y);
+        let row2_y = row1_y + d_hdr_h.max(l_hdr_h) + pad;
+        blit(&d_badge, d_badge_w, d_badge_h, pad, row2_y);
+        let row3_y = row2_y + d_badge_h + pad;
+        blit(&l_badge, l_badge_w, l_badge_h, pad, row3_y);
+
+        return save_bgra_u32_as_png(out_path, total_w, total_h, &canvas);
+    }
+
+    let ppp = dpi_to_ppp(dpi);
+    let (phys_w, phys_h, fb) = render_screenshot_frame(
+        &report,
+        &config,
+        &sys_win,
+        view,
+        theme,
+        dpi,
+        sort_mode,
+        sort_direction,
+        filter_chip,
+        search_query,
+        ledger_collapsed,
+        ledger_height_px,
+    );
+
+    if view == "header-buttons-zoom" {
+        let crop_x0 = (756.0 * ppp).round() as usize;
+        let crop_w = phys_w.saturating_sub(crop_x0).max(1);
+        let crop_h = ((52.0 * ppp).round() as usize).clamp(1, phys_h);
+        let (out_w, out_h, zoomed) = upscale_crop_nn(&fb, phys_w, crop_x0, 0, crop_w, crop_h, 3);
         return save_bgra_u32_as_png(out_path, out_w, out_h, &zoomed);
     }
 
-    save_bgra_u32_as_png(out_path, phys_w, phys_h, painter.backbuffer_pixels())
+    save_bgra_u32_as_png(out_path, phys_w, phys_h, &fb)
 }

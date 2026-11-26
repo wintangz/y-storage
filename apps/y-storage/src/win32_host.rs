@@ -113,8 +113,19 @@ impl AppController {
         let cache = FolderSizeCache::load_or_default(&cache_path);
         let mut report = load_last_scan(&last_scan_path);
         if let Some(ref mut rep) = report {
+            let mut updated = false;
             if !rep.apps.is_empty() && rep.apps.iter().all(|a| a.icon_rgba.is_none()) {
                 y_platform_windows::icons::populate_report_icons(rep);
+                updated = true;
+            }
+            if !rep.apps.is_empty() && rep.apps.iter().all(|a| a.category_basis.is_empty()) {
+                y_core::categories::classify_report_apps(
+                    rep,
+                    y_platform_windows::paths::has_game_manifest_dir,
+                );
+                updated = true;
+            }
+            if updated {
                 let _ = save_last_scan_atomic(&last_scan_path, rep);
             }
         }
@@ -782,6 +793,19 @@ unsafe extern "system" fn wnd_proc(
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
+                        UiAction::UpdateLedgerLayout {
+                            collapsed,
+                            height_px,
+                        } => {
+                            let mut g = st.controller.lock().unwrap();
+                            g.config.ledger_collapsed = collapsed;
+                            g.config.ledger_height_px = height_px;
+                            if !st.smoke_mode {
+                                let _ = g.config.save_atomic(&g.config_path);
+                            }
+                            st.needs_redraw = true;
+                            unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
+                        }
                         UiAction::SaveConfig(mut new_cfg) => {
                             let mut g = st.controller.lock().unwrap();
                             new_cfg.theme_mode = g.config.theme_mode;
@@ -790,6 +814,8 @@ unsafe extern "system" fn wnd_proc(
                             new_cfg.sort_direction = g.config.sort_direction;
                             new_cfg.filter_chip = g.config.filter_chip;
                             new_cfg.search_query = g.config.search_query.clone();
+                            new_cfg.ledger_collapsed = g.config.ledger_collapsed;
+                            new_cfg.ledger_height_px = g.config.ledger_height_px;
                             g.config = new_cfg;
                             let _ = g.config.save_atomic(&g.config_path);
                             st.needs_redraw = true;

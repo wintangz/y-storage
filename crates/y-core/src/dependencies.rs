@@ -177,6 +177,7 @@ pub struct WindowsServiceEntry {
 pub struct AppBinaryEvidence {
     pub imported_dlls: Vec<String>,
     pub file_names_lower: Vec<String>,
+    pub companion_dir_tokens: Vec<String>,
     pub has_deps_json: bool,
     pub deps_json_files: Vec<String>,
     pub manifest_targets: Vec<(String, String)>, // (target_id, basis)
@@ -313,6 +314,18 @@ fn is_self_dependency(app_name: &str, target_name: &str) -> bool {
     !a.is_empty() && !t.is_empty() && (a == t || a.starts_with(&format!("{t} ")))
 }
 
+fn normalize_vendor_key(raw: &str) -> String {
+    let mut s = raw.trim().to_ascii_lowercase();
+    for pat in [", inc.", " inc.", ", inc", " inc", ", llc", " llc", ", ltd.", " ltd.", " ltd", " corporation", " corp.", " corp", " aps", " gmbh"] {
+        if let Some(stripped) = s.strip_suffix(pat) {
+            s = stripped.trim().to_string();
+        }
+    }
+    s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ' ')
+        .trim()
+        .to_string()
+}
+
 fn build_target_dep(
     status: &ResolvedTargetStatus,
     confidence: DependencyConfidence,
@@ -397,6 +410,29 @@ pub fn analyze_report_dependencies(
         .iter()
         .map(|s| (s.service_name.to_ascii_lowercase(), s))
         .collect();
+
+    // Index normalized publisher keys of installed apps matching each catalog target for companion kinship checks.
+    let mut target_sibling_vendors: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (tid, st) in target_statuses {
+        let mut vendors = BTreeSet::new();
+        for a in &report.apps {
+            let dn = a.display_name.to_ascii_lowercase();
+            if st
+                .target
+                .registry_matches
+                .iter()
+                .any(|m| contains_token_boundary(&dn, &m.to_ascii_lowercase()))
+            {
+                for p in &a.publishers {
+                    let v = normalize_vendor_key(p);
+                    if v.len() >= 3 {
+                        vendors.insert(v);
+                    }
+                }
+            }
+        }
+        target_sibling_vendors.insert(tid.clone(), vendors);
+    }
 
     for app in &mut report.apps {
         let mut deps_map: BTreeMap<String, PendingDep> = BTreeMap::new();
@@ -520,6 +556,140 @@ pub fn analyze_report_dependencies(
                         imported_by_binary: false,
                     },
                 );
+            }
+        }
+
+        // Source (2b): Companion Windows service + install-folder/publisher kinship (PROVEN).
+        if app.no_touch.is_none()
+            && !app
+                .bases
+                .contains(&crate::model::AttributionBasis::StandaloneFolder)
+        {
+            let app_vendors: BTreeSet<String> = app
+                .publishers
+                .iter()
+                .map(|p| normalize_vendor_key(p))
+                .filter(|v| v.len() >= 3)
+                .collect();
+            let app_is_launcher = app.display_name.to_ascii_lowercase().contains("launcher")
+                || target_statuses.iter().any(|(_, s)| {
+                    s.target.kind == DependencyKind::PlatformLauncher
+                        && is_self_dependency(&app.display_name, &s.target.name)
+                });
+            let mut item_tokens_lower: Vec<String> = app
+                .items
+                .iter()
+                .map(|it| it.path.to_ascii_lowercase())
+                .collect();
+            if let Some(ev) = app_ev {
+                item_tokens_lower.extend(ev.companion_dir_tokens.iter().cloned());
+            }
+
+            for (tid, st) in target_statuses {
+                if is_self_dependency(&app.display_name, &st.target.name) {
+                    continue;
+                }
+                let registered_svcs: Vec<&WindowsServiceEntry> = st
+                    .target
+                    .service_names
+                    .iter()
+                    .filter_map(|sn| svc_by_name.get(&sn.to_ascii_lowercase()).copied())
+                    .collect();
+                if registered_svcs.is_empty() {
+                    continue;
+                }
+
+                let target_compact = normalize_app_token(&st.target.name).replace(' ', "");
+                let folder_kinship = (!target_compact.is_empty()
+                    && item_tokens_lower
+                        .iter()
+                        .any(|tok| tok.replace(' ', "").contains(&target_compact)))
+                    || (tid == "epic-online-services"
+                        && item_tokens_lower.iter().any(|tok| tok.contains("eosoverlay")))
+                    || registered_svcs.iter().any(|svc| {
+                        let sk = svc.service_name.to_ascii_lowercase();
+                        sk.len() >= 6 && item_tokens_lower.iter().any(|tok| tok.contains(&sk))
+                    });
+
+                let same_pub_launcher_kinship = app_is_launcher
+                    && target_sibling_vendors
+                        .get(tid)
+                        .is_some_and(|tv| app_vendors.iter().any(|v| tv.contains(v)));
+
+                if folder_kinship || same_pub_launcher_kinship {
+                    let svc = registered_svcs[0];
+                    let mut basis_parts = vec![format!("service: {}", svc.service_name)];
+                    if folder_kinship {
+                        basis_parts.push("companion folder kinship".to_string());
+                    }
+                    if same_pub_launcher_kinship {
+                        basis_parts.push("same-publisher companion service".to_string());
+                    }
+                    upsert_dep(
+                        &mut deps_map,
+                        build_target_dep(
+                            st,
+                            DependencyConfidence::Proven,
+                            basis_parts.join(" + "),
+                            false,
+                        ),
+                    );
+                }
+            }
+
+            // Source (2c): Split-install own registered service (e.g., MSI cache on C:, service exe on Y:).
+            let app_compact = normalize_app_token(&app.display_name).replace(' ', "");
+            if app_compact.len() >= 5 {
+                for svc in services {
+                    if svc.normalized_image_path.is_empty()
+                        || svc
+                            .normalized_image_path
+                            .to_ascii_lowercase()
+                            .contains("\\windows\\")
+                    {
+                        continue;
+                    }
+                    let svc_compact = normalize_app_token(&svc.service_name).replace(' ', "");
+                    if svc_compact == app_compact {
+                        let svc_tid = svc_to_target
+                            .get(&svc.service_name.to_ascii_lowercase())
+                            .cloned()
+                            .unwrap_or_else(|| format!("svc:{}", svc.service_name.to_ascii_lowercase()));
+                        if let Some(st) = target_statuses.get(&svc_tid) {
+                            if !is_self_dependency(&app.display_name, &st.target.name) {
+                                upsert_dep(
+                                    &mut deps_map,
+                                    build_target_dep(
+                                        st,
+                                        DependencyConfidence::Proven,
+                                        format!("service: {}", svc.service_name),
+                                        false,
+                                    ),
+                                );
+                            }
+                        } else if !deps_map.contains_key(&svc_tid) {
+                            let kind_lbl = if svc.service_type <= 8 { "driver" } else { "service" };
+                            upsert_dep(
+                                &mut deps_map,
+                                PendingDep {
+                                    target_id: svc_tid,
+                                    target_name: if svc.display_name.is_empty() {
+                                        svc.service_name.clone()
+                                    } else {
+                                        format!("{} ({})", svc.display_name, svc.service_name)
+                                    },
+                                    kind: DependencyKind::AntiCheatServiceDriver,
+                                    present: true,
+                                    own_size_bytes: None,
+                                    shared: false,
+                                    confidence: DependencyConfidence::Proven,
+                                    bases: vec![format!("{kind_lbl}: {}", svc.service_name)],
+                                    imported_by_binary: false,
+                                },
+                            );
+                        }
+                    }
+                }
             }
         }
 

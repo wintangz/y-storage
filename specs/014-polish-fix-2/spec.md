@@ -1,0 +1,16 @@
+# Feature Specification: `polish-fix-2`
+
+**Feature Branch**: `main` (building on `6e3c9ad`)
+**Created**: 2026-11-26
+**Status**: Active
+**Input**: Owner hands-on review identifying Epic/EOS dependency miss, optical vertical centering defects, sharp badge corners, colour-discipline fixes (drive bars, scrollbar contrast, Light-mode `proven` chip, semantic ledger ticks), collapsible/resizable pinned storage ledger with bottom fade, segment-boundary basis truncation, Publisher sort, and data-driven App Categories + Category sort.
+
+## Requirements
+- **FIX 1 — Epic / EOS Dependency Detection**: Decouple `epic-online-services` from `epic-games`, deepen structured binary/installer directory traversal (`launcher`, `portal`, `engine`, `binaries`, `win64`, `win32`, `extras`, `eos`, `eosbootstrapper`), inspect companion directory tokens (`EOSOverlay`, `EpicOnlineServices`), add companion-service + install-tree kinship + split-install own-service detection rules in `dependencies.rs`, add curated `Epic Games Launcher -> Epic Online Services` catalog rule citing `dev.epicgames.com/docs/epic-online-services`, and run a sanity sweep across empty-dependency sibling/service apps. Preserve `FIFA 23 = 51,372,195,955 B`, `dependencies.len() == 7`, and zero dependency total inflation.
+- **FIX 2 — Optical Vertical Text Centering**: Measure and cache optical vertical glyph centers (`cap_center_y` / `lower_center_y`) pixel-snapped at 100% & 125% scaling across badges, buttons, filter pills, headers, table cells, pinned ledger, and drive pods; prove with `200%` zoomed crop.
+- **FIX 3 — Pill Badges**: Render all status/zone/confidence/qualifier badges as full pills (`radius = 0.5 * height`); keep action button (`6.0px`) and card (`8.0px`) radii. Update `DESIGN.md` `§4.2` & `§7`.
+- **FIX 4 — Colour Discipline**: Unified WT gradient drive bars (`LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK` across full track; document in `DESIGN.md`), minimum-contrast Dark & Light scrollbar thumbs, Light-mode outline+tint `proven` chip (no solid dark fill), and semantic ledger ticks (`neutral` Windows & Your files, `STATUS_GREEN` Shared caches, `muted neutral` Unattributed).
+- **FIX 5 — Collapsible & Resizable Pinned Ledger + Soft Bottom Fade**: Top-edge vertical drag handle (`156px .. 50%` window height), `"Pinned storage ledger"` chevron collapse toggle folding to inline muted summary + `● diff 0 B`, config persistence across launches (default: expanded, default height), and `22px` bottom gradient fade on `main_app_scroll` when overflowing.
+- **FIX 6 — Segment-Boundary Basis Truncation**: Cut at last separator (` `, `\`, `/`, `.`, `,`, `;`, `)`, `|`) at/before width limit, keeping full text on hover.
+- **FIX 7 — Publisher Sort**: Clickable `Publisher` column header sorting `A→Z` / `Z→A` with app-name tie-break and publisher-less placement (end in `A→Z`, start in `Z→A`).
+- **FIX 8 — App Categories + Category Sort**: Data-driven 10-category classifier in `data/app_categories.toml` (`mapping` > `hard signal` > `keyword rule` > `Uncategorized`), `Category` column between `Publisher` and `Growth delta` with clickable sort (`category A→Z/Z→A`, `total_bytes desc`, `name asc`), category filter matching in search, expanded-drawer `Category` + basis line, `DESIGN.md §11` documentation, and coverage report.

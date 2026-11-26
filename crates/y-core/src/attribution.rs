@@ -427,6 +427,8 @@ pub fn attribute_scan(
                 dependencies: Vec::new(),
                 display_icon: b.app.display_icon,
                 icon_rgba: None,
+                category: crate::model::AppCategory::default(),
+                category_basis: String::new(),
             }
         })
         .collect();

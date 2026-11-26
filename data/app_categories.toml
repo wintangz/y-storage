@@ -1,0 +1,369 @@
+# Authored App Categories Catalog for y-storage (`polish-fix-2`)
+# Precedence: (a) authored [[mappings]] -> (b) hard filesystem/no-touch signals -> (c) [[rules]] keywords -> Uncategorized.
+# Opaque or ambiguous entries are intentionally omitted so they appear openly as "Uncategorized".
+
+[[mappings]]
+category = "Games"
+app_matches = ["ea sports™ fifa 23", "fifa 23"]
+reason = "Electronic Arts PC sports game title"
+
+[[mappings]]
+category = "Games"
+app_matches = ["genshin impact"]
+reason = "HoYoverse action RPG client & game data"
+
+[[mappings]]
+category = "Games"
+app_matches = ["cities: skylines ii"]
+reason = "Colossal Order city-builder simulation game"
+
+[[mappings]]
+category = "Games"
+app_matches = ["the isle"]
+reason = "Multiplayer dinosaur survival game (Steam)"
+
+[[mappings]]
+category = "Games"
+app_matches = ["cpm 2"]
+reason = "Car Parking Multiplayer 2 game title (Steam)"
+
+[[mappings]]
+category = "Games"
+app_matches = ["slay the spire 2"]
+reason = "Mega Crit roguelike deckbuilder game (Steam)"
+
+[[mappings]]
+category = "Games"
+app_matches = ["my dream setup"]
+reason = "Campfire Studio simulation game (Steam)"
+
+[[mappings]]
+category = "Games"
+app_matches = ["microsoftsolitairecollection"]
+reason = "Microsoft Casual Games solitaire collection"
+
+[[mappings]]
+category = "Games"
+app_matches = ["minecraft"]
+reason = "Mojang / Microsoft sandbox game package"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["epic games launcher"]
+reason = "Epic Games storefront and game launcher"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["ea app"]
+reason = "Electronic Arts PC game launcher & storefront"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["rockstar games launcher"]
+reason = "Rockstar Games PC launcher client"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["riot client"]
+reason = "Riot Games unified game launcher"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["steam"]
+reason = "Valve Steam PC gaming client"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["gog galaxy"]
+reason = "GOG Galaxy PC game client"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["battle.net"]
+reason = "Blizzard Entertainment Battle.net client"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["microsoft.gamingapp"]
+reason = "Microsoft Xbox PC app launcher"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["microsoft.xboxapp"]
+reason = "Microsoft Xbox companion launcher"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["microsoft.windowsstore"]
+reason = "Microsoft Store app storefront"
+
+[[mappings]]
+category = "Platforms & Launchers"
+app_matches = ["vanillartxapp"]
+reason = "Vanilla RTX Minecraft launcher / mod manager"
+
+[[mappings]]
+category = "Browsers"
+app_matches = ["microsoft edge"]
+reason = "Microsoft Chromium web browser"
+
+[[mappings]]
+category = "Browsers"
+app_matches = ["google chrome"]
+reason = "Google Chrome web browser"
+
+[[mappings]]
+category = "Communication"
+app_matches = ["discord"]
+reason = "Voice, video, and text chat platform"
+
+[[mappings]]
+category = "Communication"
+app_matches = ["zalo"]
+reason = "VNG messaging and calling client"
+
+[[mappings]]
+category = "Communication"
+app_matches = ["msteams", "microsoftteams"]
+reason = "Microsoft Teams messaging and video collaboration"
+
+[[mappings]]
+category = "Communication"
+app_matches = ["microsoft.skypeapp"]
+reason = "Microsoft Skype communication client"
+
+[[mappings]]
+category = "Communication"
+app_matches = ["microsoft.outlookforwindows", "windowscommunicationsapps"]
+reason = "Microsoft Mail / Outlook client"
+
+[[mappings]]
+category = "Development"
+app_matches = ["unity 6000", "unity hub"]
+reason = "Unity game engine editor & project hub"
+
+[[mappings]]
+category = "Development"
+app_matches = ["visual studio community", "microsoft visual studio installer"]
+reason = "Microsoft Visual Studio IDE & installer"
+
+[[mappings]]
+category = "Development"
+app_matches = ["visual studio code"]
+reason = "Visual Studio Code source editor"
+
+[[mappings]]
+category = "Development"
+app_matches = ["ollama"]
+reason = "Local LLM runner & model store"
+
+[[mappings]]
+category = "Development"
+app_matches = ["flutter"]
+reason = "Google Flutter cross-platform SDK"
+
+[[mappings]]
+category = "Development"
+app_matches = ["playwright"]
+reason = "Playwright browser automation & Chromium cache"
+
+[[mappings]]
+category = "Development"
+app_matches = ["tabnine"]
+reason = "Tabnine AI code-completion engine"
+
+[[mappings]]
+category = "Development"
+app_matches = ["github copilot cli"]
+reason = "GitHub Copilot command-line coding assistant"
+
+[[mappings]]
+category = "Development"
+app_matches = ["postman"]
+reason = "Postman API development & testing client"
+
+[[mappings]]
+category = "Development"
+app_matches = ["python launcher", "node.js", "java 8 update"]
+reason = "Programming language runtime / toolchain"
+
+[[mappings]]
+category = "Development"
+app_matches = ["gitkraken cli"]
+reason = "GitKraken developer Git CLI"
+
+[[mappings]]
+category = "Development"
+app_matches = ["iis 10.0 express"]
+reason = "Microsoft IIS Express local web development server"
+
+[[mappings]]
+category = "Development"
+app_matches = [".gemini", ".continue"]
+reason = "Local AI coding agent workspace / config directory"
+
+[[mappings]]
+category = "Development"
+app_matches = ["tiled"]
+reason = "Tiled 2D tile-map game level editor"
+
+[[mappings]]
+category = "Development"
+app_matches = ["autohotkey"]
+reason = "Windows desktop scripting language & runtime"
+
+[[mappings]]
+category = "Development"
+app_matches = ["microsoft.windowsterminal"]
+reason = "Microsoft Windows Terminal developer console"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["spotify"]
+reason = "Spotify streaming music client"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["inkscape", "ink/stitch"]
+reason = "Inkscape vector graphics & embroidery editor"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["adobe creative cloud"]
+reason = "Adobe Creative Cloud desktop runtime & shared assets"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["jellyfin"]
+reason = "Jellyfin personal media server / client"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["appleinc.itunes", "appleinc.applemusicwin"]
+reason = "Apple iTunes / Apple Music media client"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["clipchamp.clipchamp"]
+reason = "Microsoft Clipchamp video editor"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["microsoft.paint", "microsoft.mspaint"]
+reason = "Microsoft Paint raster image editor"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["microsoft.windows.photos", "realheicfileviewer"]
+reason = "Photo & HEIC image viewer"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = ["k-lite mega codec pack"]
+reason = "DirectShow / Media Foundation audio-video codecs"
+
+[[mappings]]
+category = "Productivity"
+app_matches = ["microsoft office ltsc", "microsoft.office.onenote"]
+reason = "Microsoft Office & OneNote productivity suite"
+
+[[mappings]]
+category = "Productivity"
+app_matches = ["microsoft power bi desktop"]
+reason = "Microsoft Power BI analytics & reporting tool"
+
+[[mappings]]
+category = "Productivity"
+app_matches = ["microsoft.microsoftstickynotes", "microsoft.todos"]
+reason = "Microsoft notes & task management app"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["nvidia app"]
+reason = "NVIDIA GPU companion & driver control utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["logitech g hub"]
+reason = "Logitech peripheral configuration & profile utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["amd software"]
+reason = "AMD Radeon driver control & tuning utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["teamviewer", "rustdesk"]
+reason = "Remote desktop support & screen sharing utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["tailscale"]
+reason = "Tailscale WireGuard mesh VPN client"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["crystaldiskinfo", "crystaldiskmark", "hwinfo"]
+reason = "Hardware & disk diagnostics / benchmarking utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["treesize free"]
+reason = "JAM Software disk usage analyzer"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["winrar", "winrar.shellextension"]
+reason = "WinRAR archive & compression utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["internet download manager", "mister download manager"]
+reason = "Desktop file download accelerator"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["msi afterburner", "rivatuner statistics server"]
+reason = "GPU telemetry, tuning & FPS overlay utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["ai noise cancelation audio software"]
+reason = "ASUS audio noise-reduction utility"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["appleinc.appledevices", "asuspcassistant", "asus smart display control", "b9eced6f.armourycrate"]
+reason = "Vendor hardware / mobile device management utility"
+
+# Keyword fallback rules (priority c: evaluated after authored mappings and hard signals)
+[[rules]]
+category = "Browsers"
+name_contains = ["firefox", "brave", "opera", "vivaldi"]
+reason = "Web browser name keyword"
+
+[[rules]]
+category = "Communication"
+name_contains = ["slack", "telegram", "zoom", "teams", "yourphone"]
+reason = "Communication / phone-link name keyword"
+
+[[rules]]
+category = "Development"
+name_contains = ["sdk", "devkit", "devhome", "terminal", "code"]
+reason = "Developer SDK / terminal keyword"
+
+[[rules]]
+category = "Media & Creative"
+name_contains = ["zunevideo", "zunemusic", "videoextension", "imageextension", "mediaextensions", "windowscamera", "soundrecorder", "3dviewer", "photocraft", "filmcraft", "artcraft", "dtsxultra"]
+reason = "Audio/video codec, camera, or creative media keyword"
+
+[[rules]]
+category = "Productivity"
+name_contains = ["calculator", "notepad", "alarms", "maps", "powerautomate", "bingweather", "bingnews", "bingsearch"]
+reason = "Personal productivity & information utility keyword"
+
+[[rules]]
+category = "Utilities"
+name_contains = ["controlpanel", "audiocontrol", "eartrumpet", "screensketch", "quickassist", "feedbackhub", "gethelp", "sechealthui", "desktopappinstaller", "winget", "xboxgamingoverlay", "xboxgameoverlay", "gameassist", "mixedreality", "auto clicker", "contextmenu"]
+reason = "System companion, overlay, diagnostics, or desktop utility keyword"

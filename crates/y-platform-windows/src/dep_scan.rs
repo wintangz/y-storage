@@ -112,12 +112,54 @@ fn parse_installerdata_xml(xml_text: &str) -> Vec<(String, String)> {
     out
 }
 
+fn should_descend_binary_subdir(depth: usize, name_lower: &str) -> bool {
+    if matches!(
+        name_lower,
+        "data"
+            | "patch"
+            | "locales"
+            | "resources"
+            | "node_modules"
+            | ".git"
+            | "cache"
+            | "toolchains"
+            | "packages"
+            | "logs"
+            | "shader"
+            | "shaders"
+    ) {
+        return false;
+    }
+    if depth < 1 {
+        return true;
+    }
+    depth < 3
+        && matches!(
+            name_lower,
+            "launcher"
+                | "portal"
+                | "engine"
+                | "binaries"
+                | "bin"
+                | "win64"
+                | "win32"
+                | "x64"
+                | "x86"
+                | "extras"
+                | "eos"
+                | "eosbootstrapper"
+                | "service"
+                | "services"
+        )
+}
+
 fn collect_app_evidence(
     app: &AttributedApp,
     steam_idx: &SteamManifestIndex,
 ) -> AppBinaryEvidence {
     let mut ev = AppBinaryEvidence::default();
     let mut body_roots: Vec<PathBuf> = Vec::new();
+    let mut companion_tokens: BTreeSet<String> = BTreeSet::new();
 
     for item in &app.items {
         let is_body_candidate = item.zone == Some(ZoneKind::Body)
@@ -129,6 +171,16 @@ fn collect_app_evidence(
             let p = PathBuf::from(&item.path);
             if p.is_dir() {
                 body_roots.push(p);
+            }
+        } else if !item.path.ends_with("[files]") {
+            if let Ok(rd) = fs::read_dir(&item.path) {
+                for ent in rd.flatten() {
+                    if let Ok(ft) = ent.file_type() {
+                        if ft.is_dir() {
+                            companion_tokens.insert(ent.file_name().to_string_lossy().to_ascii_lowercase());
+                        }
+                    }
+                }
             }
         }
         if let Some(entries) = steam_idx.by_install_path.get(&normalize_path_key(&item.path)) {
@@ -180,29 +232,13 @@ fn collect_app_evidence(
             let name_lower = name.to_ascii_lowercase();
 
             if ft.is_dir() {
-                if depth < 1
-                    && !matches!(
-                        name_lower.as_str(),
-                        "data"
-                            | "patch"
-                            | "locales"
-                            | "resources"
-                            | "node_modules"
-                            | ".git"
-                            | "cache"
-                            | "toolchains"
-                            | "packages"
-                            | "logs"
-                            | "shader"
-                            | "shaders"
-                    )
-                {
+                if should_descend_binary_subdir(depth, &name_lower) {
                     subdirs.push((path, depth + 1));
                 }
                 continue;
             }
 
-            if depth <= 1 {
+            if depth <= 3 {
                 names_set.insert(name_lower.clone());
             }
 
@@ -243,6 +279,7 @@ fn collect_app_evidence(
 
     ev.imported_dlls = dlls_set.into_iter().collect();
     ev.file_names_lower = names_set.into_iter().collect();
+    ev.companion_dir_tokens = companion_tokens.into_iter().collect();
     ev
 }
 

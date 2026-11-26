@@ -1,5 +1,6 @@
 pub mod attribution;
 pub mod cache;
+pub mod categories;
 pub mod config;
 pub mod dependencies;
 pub mod discovery;

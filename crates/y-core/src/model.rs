@@ -82,6 +82,49 @@ impl AttributionBasis {
 
 pub const NO_KNOWN_DEPENDENCIES_LABEL: &str = "no known dependencies";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+pub enum AppCategory {
+    #[serde(rename = "Games")]
+    Games,
+    #[serde(rename = "Platforms & Launchers")]
+    PlatformsAndLaunchers,
+    #[serde(rename = "Browsers")]
+    Browsers,
+    #[serde(rename = "Communication")]
+    Communication,
+    #[serde(rename = "Development")]
+    Development,
+    #[serde(rename = "Media & Creative")]
+    MediaAndCreative,
+    #[serde(rename = "Productivity")]
+    Productivity,
+    #[serde(rename = "Utilities")]
+    Utilities,
+    #[serde(rename = "System & Runtimes")]
+    SystemAndRuntimes,
+    #[default]
+    #[serde(rename = "Uncategorized")]
+    Uncategorized,
+}
+
+impl AppCategory {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Games => "Games",
+            Self::PlatformsAndLaunchers => "Platforms & Launchers",
+            Self::Browsers => "Browsers",
+            Self::Communication => "Communication",
+            Self::Development => "Development",
+            Self::MediaAndCreative => "Media & Creative",
+            Self::Productivity => "Productivity",
+            Self::Utilities => "Utilities",
+            Self::SystemAndRuntimes => "System & Runtimes",
+            Self::Uncategorized => "Uncategorized",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DependencyKind {
     PlatformLauncher,
@@ -376,6 +419,10 @@ pub struct AttributedApp {
     pub display_icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_rgba: Option<CachedAppIcon>,
+    #[serde(default)]
+    pub category: AppCategory,
+    #[serde(default)]
+    pub category_basis: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

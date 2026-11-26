@@ -7,8 +7,9 @@ use y_core::dependencies::{
     parse_deps_json_is_dotnet, parse_steam_appmanifest, resolve_catalog_targets,
 };
 use y_core::model::{
-    AttributionBasis, DependencyConfidence, DriveInfo, InstalledApp, RegistryDiscoveryStats,
-    ScannedUnit, ScannedUnitKind, ZoneKind,
+    AttributedApp, AttributionBasis, BreakdownItem, DependencyConfidence, DriveInfo, GrowthDelta,
+    InstalledApp, NoTouchCategory, RegistryDiscoveryStats, ScanReport, ScannedUnit,
+    ScannedUnitKind, ZoneKind,
 };
 use y_core::pe::parse_pe_imported_dlls;
 
@@ -349,4 +350,245 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         .unwrap();
     assert_eq!(rev_vcpp.dependent_count, 1);
     assert_eq!(rev_vcpp.binary_importer_count, 1);
+}
+
+#[test]
+fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating_totals() {
+    let catalog = DependencyCatalog::parse_and_validate(y_core::dependencies::EMBEDDED_DEPENDENCY_CATALOG).unwrap();
+    let mut report = ScanReport {
+        scan_timestamp_unix: 20,
+        scan_timestamp_display: "now".into(),
+        duration_ms: 10,
+        drives: vec![],
+        registry_stats: RegistryDiscoveryStats {
+            raw_display_name_entries: 2,
+            raw_with_install_location: 1,
+            canonical_apps: 2,
+            canonical_with_direct_install_location: 1,
+            canonical_with_inferred_install_location: 0,
+        },
+        apps: vec![
+            AttributedApp {
+                id: "reg:epic-games-launcher".into(),
+                display_name: "Epic Games Launcher".into(),
+                publishers: vec!["Epic Games, Inc.".into()],
+                install_location: Some("Z:\\Games\\Epic Games".into()),
+                total_bytes: 1_960_387_113,
+                previous_bytes: None,
+                growth: GrowthDelta::NoBaseline,
+                no_touch: None,
+                bases: vec![AttributionBasis::InstallLocation, AttributionBasis::Token],
+                items: vec![
+                    BreakdownItem {
+                        path: "Z:\\Games\\Epic Games".into(),
+                        bytes: 907_441_380,
+                        zone: Some(ZoneKind::Body),
+                        qualifier: None,
+                        basis: Some(AttributionBasis::InstallLocation),
+                        no_touch: None,
+                        drive_letter: 'Z',
+                    },
+                    BreakdownItem {
+                        path: "C:\\Users\\Win\\AppData\\Local\\Epic Games\\EOSOverlay".into(),
+                        bytes: 159_536_788,
+                        zone: Some(ZoneKind::Red),
+                        qualifier: None,
+                        basis: Some(AttributionBasis::Token),
+                        no_touch: None,
+                        drive_letter: 'C',
+                    },
+                ],
+                dependencies: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: y_core::model::AppCategory::PlatformsAndLaunchers,
+                category_basis: String::new(),
+            },
+            AttributedApp {
+                id: "reg:epic-online-services".into(),
+                display_name: "Epic Online Services".into(),
+                publishers: vec!["Epic Games, Inc.".into()],
+                install_location: None,
+                total_bytes: 1_236_736_012,
+                previous_bytes: None,
+                growth: GrowthDelta::NoBaseline,
+                no_touch: Some(NoTouchCategory::SystemRuntime),
+                bases: vec![AttributionBasis::ExactName],
+                items: vec![BreakdownItem {
+                    path: "C:\\Program Files (x86)\\Epic Games\\Epic Online Services".into(),
+                    bytes: 1_236_736_012,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::ExactName),
+                    no_touch: Some(NoTouchCategory::SystemRuntime),
+                    drive_letter: 'C',
+                }],
+                dependencies: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: y_core::model::AppCategory::SystemAndRuntimes,
+                category_basis: String::new(),
+            },
+        ],
+        shared_caches: vec![],
+        shared_caches_total_bytes: 0,
+        your_files: vec![],
+        your_files_total_bytes: 0,
+        windows_system: vec![],
+        windows_system_total_bytes: 0,
+        unattributed: vec![],
+        unattributed_total_bytes: 0,
+        reverse_dependencies: vec![],
+        catalog_source: "embedded".into(),
+        warnings: vec![],
+    };
+    let services = vec![
+        WindowsServiceEntry {
+            service_name: "EpicOnlineServices".into(),
+            display_name: "Epic Online Services".into(),
+            service_type: 16,
+            raw_image_path: "C:\\Program Files (x86)\\Epic Games\\Epic Online Services\\service\\EpicOnlineServicesHost.exe".into(),
+            normalized_image_path: "C:\\Program Files (x86)\\Epic Games\\Epic Online Services\\service\\EpicOnlineServicesHost.exe".into(),
+            depend_on_service: vec![],
+        },
+        WindowsServiceEntry {
+            service_name: "EpicGamesUpdater".into(),
+            display_name: "Epic Games Updater".into(),
+            service_type: 16,
+            raw_image_path: "Z:\\Games\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesUpdater.exe".into(),
+            normalized_image_path: "Z:\\Games\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesUpdater.exe".into(),
+            depend_on_service: vec![],
+        },
+    ];
+    let statuses = resolve_catalog_targets(&catalog, &report.apps, &services, |_| true);
+    let mut ev_map = HashMap::new();
+    ev_map.insert(
+        "reg:epic-games-launcher".to_string(),
+        AppBinaryEvidence {
+            file_names_lower: vec![
+                "epiconlineservicesinstaller.exe".into(),
+                "eosbootstrapper.exe".into(),
+                "eossdk-win64-shipping.dll".into(),
+            ],
+            companion_dir_tokens: vec!["epiconlineservices".into()],
+            ..Default::default()
+        },
+    );
+
+    analyze_report_dependencies(&mut report, &catalog, &services, &ev_map, &statuses);
+
+    let launcher = report.apps.iter().find(|a| a.id == "reg:epic-games-launcher").unwrap();
+    assert_eq!(launcher.total_bytes, 1_960_387_113);
+    let eos_dep = launcher
+        .dependencies
+        .iter()
+        .find(|d| d.target_id == "epic-online-services")
+        .expect("Epic Games Launcher must link Epic Online Services");
+    assert_eq!(eos_dep.confidence, DependencyConfidence::Proven);
+    assert!(eos_dep.basis.contains("EpicOnlineServices"));
+    assert_eq!(eos_dep.own_size_bytes, Some(1_236_736_012));
+
+    let rev_eos = report
+        .reverse_dependencies
+        .iter()
+        .find(|r| r.target_id == "epic-online-services")
+        .expect("reverse_dependencies must include epic-online-services");
+    assert!(rev_eos.consumers.iter().any(|c| c.app_id == "reg:epic-games-launcher"));
+}
+
+#[test]
+fn app_category_classifier_precedence_mapping_beats_signal_beats_keyword() {
+    use y_core::categories::{CategoryCatalog, EMBEDDED_APP_CATEGORIES, classify_app};
+    use y_core::model::AppCategory;
+
+    let cat = CategoryCatalog::parse_and_validate(EMBEDDED_APP_CATEGORIES).unwrap();
+
+    // (1) Explicit mapping beats hard signal: Photos has no_touch=Service (would be System & Runtimes by signal),
+    // but mapping puts it in Media & Creative.
+    let photos = AttributedApp {
+        id: "store:microsoft.windows.photos_8wekyb3d8bbwe".into(),
+        display_name: "Store: Microsoft.Windows.Photos".into(),
+        publishers: vec!["Microsoft Store".into()],
+        install_location: None,
+        total_bytes: 100,
+        previous_bytes: None,
+        growth: GrowthDelta::NoBaseline,
+        no_touch: Some(NoTouchCategory::Service),
+        bases: vec![AttributionBasis::ExactName],
+        items: vec![],
+        dependencies: vec![],
+        display_icon: None,
+        icon_rgba: None,
+        category: AppCategory::default(),
+        category_basis: String::new(),
+    };
+    let (p_cat, p_basis) = classify_app(&photos, &cat, |_| false);
+    assert_eq!(p_cat, AppCategory::MediaAndCreative);
+    assert!(p_basis.starts_with("mapping:"));
+
+    // (2) Hard signal beats keyword rule: a game inside steamapps\common whose name contains "Terminal" (keyword rule -> Development)
+    // is still classified as Games by the Steam library hard signal.
+    let steam_game = AttributedApp {
+        id: "reg:fake-terminal-game".into(),
+        display_name: "Terminal Velocity Remastered".into(),
+        publishers: vec!["Indie".into()],
+        install_location: Some("D:\\Games\\Steam\\steamapps\\common\\Terminal Velocity".into()),
+        total_bytes: 500,
+        previous_bytes: None,
+        growth: GrowthDelta::NoBaseline,
+        no_touch: None,
+        bases: vec![AttributionBasis::InstallLocation],
+        items: vec![],
+        dependencies: vec![],
+        display_icon: None,
+        icon_rgba: None,
+        category: AppCategory::default(),
+        category_basis: String::new(),
+    };
+    let (g_cat, g_basis) = classify_app(&steam_game, &cat, |_| false);
+    assert_eq!(g_cat, AppCategory::Games);
+    assert!(g_basis.starts_with("signal:"));
+
+    // (3) Keyword rule applies when neither mapping nor hard signal matches.
+    let custom_calc = AttributedApp {
+        id: "reg:fancy-calculator".into(),
+        display_name: "Fancy Scientific Calculator".into(),
+        publishers: vec!["Independent".into()],
+        install_location: Some("C:\\Program Files\\FancyCalc".into()),
+        total_bytes: 200,
+        previous_bytes: None,
+        growth: GrowthDelta::NoBaseline,
+        no_touch: None,
+        bases: vec![AttributionBasis::InstallLocation],
+        items: vec![],
+        dependencies: vec![],
+        display_icon: None,
+        icon_rgba: None,
+        category: AppCategory::default(),
+        category_basis: String::new(),
+    };
+    let (c_cat, c_basis) = classify_app(&custom_calc, &cat, |_| false);
+    assert_eq!(c_cat, AppCategory::Productivity);
+    assert!(c_basis.starts_with("rule:"));
+
+    // (4) Opaque/ambiguous entry falls through honestly to Uncategorized.
+    let opaque = AttributedApp {
+        id: "store:cr.sb.odmf5200".into(),
+        display_name: "Store: cr.sb.odmf5200".into(),
+        publishers: vec!["Microsoft Store".into()],
+        install_location: None,
+        total_bytes: 100,
+        previous_bytes: None,
+        growth: GrowthDelta::NoBaseline,
+        no_touch: None,
+        bases: vec![AttributionBasis::PackageFallback],
+        items: vec![],
+        dependencies: vec![],
+        display_icon: None,
+        icon_rgba: None,
+        category: AppCategory::default(),
+        category_basis: String::new(),
+    };
+    let (u_cat, _) = classify_app(&opaque, &cat, |_| false);
+    assert_eq!(u_cat, AppCategory::Uncategorized);
 }

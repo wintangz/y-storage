@@ -18,6 +18,8 @@ pub enum AppSortMode {
     #[default]
     Size,
     Name,
+    Publisher,
+    Category,
     Growth,
 }
 
@@ -26,7 +28,7 @@ impl AppSortMode {
     pub const fn default_direction(self) -> SortDirection {
         match self {
             Self::Size | Self::Growth => SortDirection::Desc,
-            Self::Name => SortDirection::Asc,
+            Self::Name | Self::Publisher | Self::Category => SortDirection::Asc,
         }
     }
 
@@ -102,6 +104,10 @@ pub struct AppConfig {
     pub filter_chip: AppFilterChip,
     #[serde(default)]
     pub search_query: String,
+    #[serde(default)]
+    pub ledger_collapsed: bool,
+    #[serde(default)]
+    pub ledger_height_px: Option<f32>,
     pub targets: Vec<DriveScanTarget>,
 }
 
@@ -115,6 +121,8 @@ impl Default for AppConfig {
             sort_direction: SortDirection::Desc,
             filter_chip: AppFilterChip::All,
             search_query: String::new(),
+            ledger_collapsed: false,
+            ledger_height_px: None,
             targets: vec![DriveScanTarget {
                 letter: 'C',
                 enabled: true,
@@ -164,6 +172,8 @@ impl AppConfig {
             sort_direction: SortDirection::Desc,
             filter_chip: AppFilterChip::All,
             search_query: String::new(),
+            ledger_collapsed: false,
+            ledger_height_px: None,
             targets,
         }
     }

@@ -852,6 +852,7 @@ pub fn execute_scan_with_progress(
         previous_history,
     );
     crate::dep_scan::enrich_report_with_dependencies(&mut report);
+    y_core::categories::classify_report_apps(&mut report, crate::paths::has_game_manifest_dir);
     crate::icons::populate_report_icons(&mut report);
     report.duration_ms = start.elapsed().as_millis() as u64;
     report

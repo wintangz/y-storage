@@ -191,3 +191,20 @@ pub fn current_local_timestamp() -> (u64, String) {
     );
     (unix, display)
 }
+
+#[must_use]
+pub fn has_game_manifest_dir(dir: &str) -> bool {
+    let p = std::path::Path::new(dir);
+    if p.join(".egstore").is_dir() {
+        return true;
+    }
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for ent in rd.flatten() {
+            let n = ent.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.starts_with("goggame-") && n.ends_with(".info") {
+                return true;
+            }
+        }
+    }
+    false
+}

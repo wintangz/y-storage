@@ -4,7 +4,7 @@
 > **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
 > **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
 
-**Last Updated**: 2026-11-26 (`perf-pass-1`)
+**Last Updated**: 2026-11-26 (`polish-fix-2`)
 
 ---
 
@@ -41,8 +41,8 @@ All WT applications share one dual-mode palette calibrated against `z-controller
 | `widget_active` (`S3` Press) | `#182230` | `#DCEBF8` | Pointer-down active buttons and pressed controls |
 | `input_bg` (`Well`) | `#0A0A10` | `#EEF4FA` on `panel` (`#FFFFFF` directly on `bg` canvas) | Text input wells (maintains distinct recess vs `#FFFFFF` cards and `#EEF4FA` canvas) |
 | `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders, SubtleOutline strokes, hairline ledger dividers |
-| `scrollbar_thumb` | `#2E2E46` | `#C0D0E2` | Slim vertical scrollbar thumb at rest |
-| `scrollbar_thumb_hover` | `#54B9F2` | `#2F9BE8` | Slim vertical scrollbar thumb on hover |
+| `scrollbar_thumb` | `#52567A` | `#98B0CA` | Slim vertical scrollbar thumb at rest (minimum visible contrast against track) |
+| `scrollbar_thumb_hover` | `#7A86B8` | `#648CB8` | Slim vertical scrollbar thumb on hover (brightens to `accent_line` when dragged) |
 | `text` | `#EDEDF2` | `#1C2733` | Primary headlines, row identities, dominant measurements, button hover/press text |
 | `muted` | `#9A9AB0` | `#5F7186` | Secondary metadata, quiet totals, SubtleOutline labels, disabled text |
 | `subtle_text` | `#82829A` | `#748499` | Low-contrast inline descriptors, publishers, truncated basis copy |
@@ -87,11 +87,11 @@ WT applications pair **`Segoe UI`** for proportional interface text with **`Cons
 
 ### 4.2 Corner-Radius Scale (Differentiated by Role)
 Different architectural tiers carry distinct corner radii:
+- **`0.5 * badge_height` (~`9.0px` `RADIUS_BADGE_PILL`)**: Non-interactive status/zone/confidence/qualifier **pill badges** (`NO-TOUCH`, `LOCKED`, `proven`, `inferred`, `shared`, `missing`, `● GREEN`, `● RED`, `BODY`, `Roaming config`, `ProgramData · shared`, kind chips).
 - **`8.0px` (`RADIUS_PANEL` / `CARD_ROUNDING`)**: Elevated containers — summary pods, ledger wrappers, active/expanded containers & gradient rims, Settings panels, overlays.
-- **`6.0px` (`RADIUS_CONTROL`)**: Shared interactive controls synced with `z-controller` — `ThemeToggle`, outline action buttons, segmented sort controls, text input wells.
-- **`4.0px` (`RADIUS_PILL`)**: Compact single-select filter pills and `16x16` toggle checkboxes.
-- **`3.5px`–`4.0px` (Track Outer) / `2.5px`–`3.0px` (Track Fill)**: Chunky `7px`–`8px` rounded status and capacity meters.
-- **`2.0px` (`RADIUS_BADGE`)**: Non-interactive semantic state badges (`RADIUS_BADGE`).
+- **`6.0px` (`RADIUS_CONTROL`)**: Shared interactive controls synced with `z-controller` — `ThemeToggle`, outline action buttons (`Rescan`, `Settings`, `Clear`, `Add exclusion`, `Remove`, overlay `Close`/`All`), segmented sort controls, text input wells.
+- **`4.0px` (`RADIUS_PILL`)**: Compact interactive single-select filter buttons, inline `used by N apps >` triggers, and `16x16` toggle checkboxes.
+- **`3.5px`–`4.0px` (Track Outer) / `2.5px`–`3.0px` (Track Fill)**: Chunky `7px`–`8px` rounded capacity and battery meters.
 - **`0.0px`**: Hairline-divided ledger rows, inline `<= 2px` proportion rules, and horizontal dividers.
 
 ---
@@ -140,9 +140,9 @@ All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controlle
 
 ## 7. Chip Discipline
 
-1. **Badges Exist Only for Decisions or State**: `2.0px` (`RADIUS_BADGE`) non-interactive chips (`Margin::symmetric(5.0, 1.0)`, `10.5pt` Strong) render strictly when encoding an actionable constraint, safety boundary, verification confidence, or status mark (`§8`).
-2. **Forbidden Static Chips**: Never wrap persistent modes (`READ-ONLY`), hardware/OS classifications (`SYSTEM DRIVE`), prose category names (`shared runtime`), internal spec terms (`Constitutional`), or quiet steady-state labels in bordered badge chips.
-3. **Filter Pills**: Single-select filter controls use `RADIUS_PILL = 4.0px` (`pill_blue_fill` + `1px accent_line` + `text` when active; `widget` + `1px border` + `muted` when inactive).
+1. **Pill Badges Exist Only for Decisions or State**: Non-interactive semantic badges render as full **pill shapes** (`corner_radius = 0.5 * height`, e.g., `9.0px` on `18px` pills; `10.5pt` Regular) strictly when encoding an actionable constraint, safety boundary, verification confidence, qualifier, or status mark (`§8`). Never render large heavy dark solid badge fills in Light mode — both Dark and Light modes use outline (`1px`) + soft tinted backdrop + high-contrast ink (`#E3F2FD` / `#2F9BE8` / `#1565B8` for Light blue `proven` pills; `#121C28` / `#54B9F2` / `#7CCBFF` for Dark).
+2. **Forbidden Static Chips**: Never wrap persistent modes (`READ-ONLY`), hardware/OS classifications (`SYSTEM DRIVE`), prose category names (`Category` column text, `shared runtime` in tables), internal spec terms (`Constitutional`), or quiet steady-state labels in bordered badge chips.
+3. **Interactive Filter Buttons**: Single-select filter controls use `RADIUS_PILL = 4.0px` (`pill_blue_fill` + `1px accent_line` + `text` when active; `widget` + `1px border` + `muted` when inactive) so interactive controls remain visually distinct from non-interactive pill badges.
 
 ---
 
@@ -188,16 +188,16 @@ Each section below documents only what is unique to an individual WT application
 
 ## 11. App-Specific: `y-storage`
 
-- **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Regular`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill): `accent_line` when healthy/full-walk, `LOGO_LAVENDER` when install-only, and saturated `STATUS_RED` whenever `>= 85%` used (`<= 15%` headroom remaining).
+- **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Regular`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill) rendered in the unified 3-stop WT horizontal gradient (`LOGO_BLUE #54B9F2 -> LOGO_LAVENDER #D8A6FF -> LOGO_PINK #F7A8D8` mapped across `0%..100%` of the full track width, clipped to fill fraction; saturated `STATUS_RED` only if a drive scan fails or is unreachable).
 - **Tabular App Footprint Ledger & Inspection Drawer**:
-  - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Growth delta · Total size`), clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default).
+  - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Category · Growth delta · Total size`), clicking `App name`, `Publisher`, `Category`, `Growth delta`, or `Total size` sorts (`Size` desc default).
   - Fixed `18x18 px` extracted Windows app icon (or consistent neutral folder-tile glyph) keeping column x-positions fixed across rows.
   - `Total size` embeds a quiet `<= 2px` (`PROP_BAR_W = 76.0`, `PROP_BAR_H = 2.0`) proportional bar relative to the largest unfiltered app and exposes exact bytes + `%` share on hover. Missing growth baselines display muted `"new"`.
-  - Expanding an app row converts it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`§5`), suppressing the row hairline above it and aligning two sub-tables cleanly to the main `Total size` right edge:
-    - `Locations (N)`: `Zone · Path · Basis · Size` (`● GREEN` / `● RED` saturated zone badges, `BODY` quiet structural badge, `ProgramData (Machine-shared)` lavender qualifier, word-capped `"…"` `Basis` with hover tooltip).
-    - `Dependencies`: `Dependency name · Kind · Confidence · Used by · Own size` (`proven` / `inferred` / `shared` / `missing` chips, `SecondaryOutline` `used by N apps >` overlay buttons, word-capped `basis` underneath).
-- **Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with `2px` colour ticks (`LOGO_LAVENDER`, `LOGO_BLUE`, `STATUS_GREEN`, `LOGO_PINK`) and sizes right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert if `diff != 0`).
+  - Expanding an app row converts it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`§5`), suppressing the row hairline above it, showing its `Category` + rule basis (plus a `used by N apps >` pill when referenced as a dependency), and aligning two sub-tables cleanly to the main `Total size` right edge:
+    - `Locations (N)`: `Zone · Path · Basis · Size` (`● GREEN` / `● RED` full-pill zone badges, `BODY` quiet structural pill, `ProgramData (Machine-shared)` lavender pill, segment-boundary `"…"` `Basis` with hover tooltip).
+    - `Dependencies`: `Dependency name · Kind · Confidence · Used by · Own size` (`proven` / `inferred` / `shared` / `missing` pills, `SecondaryOutline` `used by N apps >` overlay buttons, segment-boundary `basis` underneath).
+- **Collapsible & Resizable Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with a top `6px` drag-resize handle (`156px .. 50%` viewport height), a `"Pinned storage ledger"` collapse chevron folding to a single inline summary line (`Win/sys · Your files · Shared caches · Unattributed` + `● diff 0 B`), and semantic `2px` colour ticks (`muted`, `muted`, `STATUS_GREEN`, muted neutral) right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert pill if `diff != 0`), while the main app list paints a soft `22px` bottom gradient fade above the footer when scrollable content overflows.
 - **`y-storage` Domain Critique Checks (`YS1`–`YS3`)**:
   - **YS1 (Shared Size Column Alignment)**: Sticky header `Total size`, main row totals, expanded `Locations`/`Dependencies` size columns, and pinned summary totals share one exact right vertical edge (accounting for the `14px` `6px + SPACE_8` scrollbar gutter).
   - **YS2 (Drive Headline Dominance)**: Drive free space (`14.5pt Consolas Regular`) visibly anchors the top strip above app rows (`13.0pt`).
-  - **YS3 (Subordinate Shared Dependencies)**: Inside expanded drawers, `Dependencies` own sizes (`11.5pt` `muted`) visually recede behind the app's own total (`13.5pt` `text`) so shared runtimes never read as additive footprint.
+  - **YS3 (Subordinate Shared Dependencies)**: Inside expanded drawers, `Dependencies` own sizes (`11.5pt` `muted`) visually recede behind the app's own total (`13.0pt` `text`) so shared runtimes never read as additive footprint.
