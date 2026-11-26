@@ -33,12 +33,14 @@ const RADIUS_PILL: f32 = 4.0;
 const RADIUS_BADGE: f32 = 2.0;
 
 const SIZE_COL_W: f32 = 96.0;
-const DELTA_COL_W: f32 = 88.0;
+const DELTA_COL_W: f32 = 96.0;
 const SCROLL_GUTTER_W: f32 = 6.0 + SPACE_8;
 const HEADER_CONTROL_H: f32 = 28.0;
+const TABLE_HEADER_H: f32 = 26.0;
+const SUB_HEADER_H: f32 = 20.0;
 const APP_ROW_H: f32 = 30.0;
 const PINNED_ROW_H: f32 = 24.0;
-const SUB_LINE1_H: f32 = 20.0;
+const SUB_LINE1_H: f32 = 22.0;
 const SUB_LINE2_H: f32 = 16.0;
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 
@@ -889,76 +891,210 @@ fn draw_sort_arrow(painter: &egui::Painter, center: Pos2, desc: bool, color: Col
     }
 }
 
-fn draw_sort_mode_button(
+#[derive(Debug, Clone, Copy)]
+struct ColSpan {
+    min_x: f32,
+    max_x: f32,
+}
+
+impl ColSpan {
+    fn new(min_x: f32, width: f32) -> Self {
+        Self {
+            min_x,
+            max_x: min_x + width.max(0.0),
+        }
+    }
+
+    fn rect(self, y0: f32, y1: f32) -> Rect {
+        Rect::from_min_max(Pos2::new(self.min_x, y0), Pos2::new(self.max_x, y1))
+    }
+}
+
+struct MainTableColumns {
+    chevron: ColSpan,
+    name: ColSpan,
+    publisher: ColSpan,
+    delta: ColSpan,
+    size: ColSpan,
+}
+
+impl MainTableColumns {
+    fn compute(origin_x: f32, row_w: f32) -> Self {
+        let gap = SPACE_12;
+        let chev_w = 16.0;
+        let chev_gap = SPACE_8;
+        let pub_w = 208.0;
+        let delta_w = DELTA_COL_W;
+        let size_w = SIZE_COL_W;
+        let fixed_w = chev_w + chev_gap + pub_w + delta_w + size_w + gap * 3.0;
+        let name_w = (row_w - fixed_w).max(120.0);
+
+        let chevron = ColSpan::new(origin_x, chev_w);
+        let name = ColSpan::new(chevron.max_x + chev_gap, name_w);
+        let publisher = ColSpan::new(name.max_x + gap, pub_w);
+        let delta = ColSpan::new(publisher.max_x + gap, delta_w);
+        let size = ColSpan::new(delta.max_x + gap, (origin_x + row_w - (delta.max_x + gap)).max(size_w));
+        Self {
+            chevron,
+            name,
+            publisher,
+            delta,
+            size,
+        }
+    }
+}
+
+struct LocationsTableColumns {
+    zone: ColSpan,
+    path: ColSpan,
+    basis: ColSpan,
+    size: ColSpan,
+}
+
+impl LocationsTableColumns {
+    fn compute(origin_x: f32, sub_w: f32) -> Self {
+        let gap = SPACE_12;
+        let zone_w = 64.0;
+        let basis_w = 170.0;
+        let size_w = SIZE_COL_W;
+        let fixed_w = zone_w + basis_w + size_w + gap * 3.0;
+        let path_w = (sub_w - fixed_w).max(120.0);
+
+        let zone = ColSpan::new(origin_x, zone_w);
+        let path = ColSpan::new(zone.max_x + gap, path_w);
+        let basis = ColSpan::new(path.max_x + gap, basis_w);
+        let size = ColSpan::new(basis.max_x + gap, (origin_x + sub_w - (basis.max_x + gap)).max(size_w));
+        Self {
+            zone,
+            path,
+            basis,
+            size,
+        }
+    }
+}
+
+struct DependenciesTableColumns {
+    name: ColSpan,
+    kind: ColSpan,
+    confidence: ColSpan,
+    used_by: ColSpan,
+    own_size: ColSpan,
+}
+
+impl DependenciesTableColumns {
+    fn compute(origin_x: f32, sub_w: f32) -> Self {
+        let gap = SPACE_12;
+        let kind_w = 148.0;
+        let conf_w = 152.0;
+        let used_w = 112.0;
+        let size_w = SIZE_COL_W;
+        let fixed_w = kind_w + conf_w + used_w + size_w + gap * 4.0;
+        let name_w = (sub_w - fixed_w).max(120.0);
+
+        let name = ColSpan::new(origin_x, name_w);
+        let kind = ColSpan::new(name.max_x + gap, kind_w);
+        let confidence = ColSpan::new(kind.max_x + gap, conf_w);
+        let used_by = ColSpan::new(confidence.max_x + gap, used_w);
+        let own_size = ColSpan::new(used_by.max_x + gap, (origin_x + sub_w - (used_by.max_x + gap)).max(size_w));
+        Self {
+            name,
+            kind,
+            confidence,
+            used_by,
+            own_size,
+        }
+    }
+}
+
+fn table_cell_ui(ui: &mut egui::Ui, cell_rect: Rect, layout: Layout) -> egui::Ui {
+    let mut cell_ui = ui.new_child(UiBuilder::new().max_rect(cell_rect).layout(layout));
+    cell_ui.set_clip_rect(
+        cell_rect
+            .expand2(Vec2::new(0.0, 1.0))
+            .intersect(ui.clip_rect()),
+    );
+    cell_ui
+}
+
+fn draw_sortable_col_header(
     ui: &mut egui::Ui,
+    cell_rect: Rect,
+    id_salt: &str,
+    label: &str,
     mode: AppSortMode,
     active_mode: AppSortMode,
     active_dir: SortDirection,
+    right_aligned: bool,
     pal: &ThemePalette,
 ) -> bool {
     let is_active = mode == active_mode;
-    let label = match mode {
-        AppSortMode::Size => "Size",
-        AppSortMode::Name => {
-            if is_active {
-                match active_dir {
-                    SortDirection::Asc => "Name A-Z",
-                    SortDirection::Desc => "Name Z-A",
-                }
-            } else {
-                "Name"
-            }
-        }
-        AppSortMode::Growth => "Growth",
-    };
+    let id = ui.make_persistent_id(("table_hdr", id_salt));
+    let resp = ui.interact(cell_rect, id, Sense::click());
+    let hovered = resp.hovered();
 
-    let arrow_space = if is_active { 14.0 } else { 0.0 };
-    let font_id = FontId::new(12.0, FontFamily::Proportional);
-    let text_color = if is_active { pal.accent_line } else { pal.muted };
-    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
-    let desired_w = (galley.size().x + SPACE_12 * 2.0 + arrow_space)
-        .max(60.0)
-        .round();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 26.0), Sense::click());
+    if hovered {
+        ui.painter().rect_filled(cell_rect, Rounding::same(3.0), pal.widget_hover);
+    }
 
-    let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
-        (pal.widget_active, LOGO_PINK, pal.text)
-    } else if resp.hovered() {
-        (
-            pal.widget_hover,
-            pal.accent_line,
-            if is_active { pal.accent_line } else { pal.text },
-        )
+    let fg = if resp.is_pointer_button_down_on() {
+        pal.accent_line
     } else if is_active {
-        (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+        pal.text
+    } else if hovered {
+        pal.text
     } else {
-        (pal.widget, pal.border, pal.muted)
+        pal.muted
     };
 
-    let ppp = ui.ctx().pixels_per_point();
-    let snapped = paint_crisp_bordered_box(ui.painter(), rect, 6.0, fill, border_col, 1.0, ppp);
-    let content_w = galley.size().x + arrow_space;
-    let start_x = (snapped.center().x - content_w * 0.5).round();
-    let text_pos = Pos2::new(start_x, (snapped.center().y - galley.size().y * 0.5).round());
-    ui.painter().galley(text_pos, galley, draw_fg);
+    let font_id = FontId::new(11.0, FontFamily::Proportional);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, fg));
+    let arrow_w = if is_active { 12.0 } else { 0.0 };
+    let total_w = galley.size().x + arrow_w;
+    let start_x = if right_aligned {
+        (cell_rect.max.x - total_w).max(cell_rect.min.x)
+    } else {
+        cell_rect.min.x
+    };
+    let text_pos = Pos2::new(start_x.round(), (cell_rect.center().y - galley.size().y * 0.5).round());
+    ui.painter().galley(text_pos, galley, fg);
     if is_active {
         let arrow_c = Pos2::new(
-            (start_x + content_w - 4.0).round(),
-            snapped.center().y.round(),
+            (start_x + total_w - 4.0).round(),
+            cell_rect.center().y.round(),
         );
-        draw_sort_arrow(ui.painter(), arrow_c, active_dir == SortDirection::Desc, draw_fg);
+        draw_sort_arrow(ui.painter(), arrow_c, active_dir == SortDirection::Desc, pal.accent_line);
     }
 
     let tip = match mode {
-        AppSortMode::Size => "Sort by total storage footprint (click to flip desc/asc)",
-        AppSortMode::Name => "Sort alphabetically by name (click to flip A-Z / Z-A)",
+        AppSortMode::Size => "Sort by total storage footprint (click active column to flip desc/asc)",
+        AppSortMode::Name => "Sort alphabetically by app name (click active column to flip A-Z / Z-A)",
         AppSortMode::Growth => {
-            "Sort by growth delta vs previous scan (click to flip desc/asc; no-baseline apps follow at bottom)"
+            "Sort by growth delta vs previous scan (click active column to flip desc/asc; no-baseline apps follow at bottom)"
         }
     };
     let clicked = resp.clicked();
     let _ = resp.on_hover_text(tip);
     clicked
+}
+
+fn draw_static_col_header(
+    ui: &mut egui::Ui,
+    cell_rect: Rect,
+    label: &str,
+    font_size: f32,
+    right_aligned: bool,
+    pal: &ThemePalette,
+) {
+    let font_id = FontId::new(font_size, FontFamily::Proportional);
+    let fg = pal.subtle_text;
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, fg));
+    let x = if right_aligned {
+        (cell_rect.max.x - galley.size().x).max(cell_rect.min.x)
+    } else {
+        cell_rect.min.x
+    };
+    let text_pos = Pos2::new(x.round(), (cell_rect.center().y - galley.size().y * 0.5).round());
+    ui.painter().galley(text_pos, galley, fg);
 }
 
 fn draw_filter_radio_chip(
@@ -1301,14 +1437,11 @@ pub fn draw_app_ui(
                 let mut list_view_dirty = false;
 
                 ui.add_space(SPACE_8);
-                // Row 3: Search input (left) + Segmented Sort Control (right)
+                // Row 3: Search input (column headers handle sorting)
                 let mut search_dirty = false;
-                let mut sort_dirty = false;
-                draw_split_row(
-                    ui,
-                    HEADER_CONTROL_H,
-                    300.0,
-                    Sense::hover(),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), HEADER_CONTROL_H),
+                    Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
                         let prev_q = ui_state.search_query.clone();
@@ -1340,31 +1473,8 @@ pub fn draw_app_ui(
                             search_dirty = true;
                         }
                     },
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_4;
-                        // Right-to-left placement -> visually left-to-right: Sort: [Size] [Name] [Growth]
-                        for mode_btn in [AppSortMode::Growth, AppSortMode::Name, AppSortMode::Size] {
-                            if draw_sort_mode_button(
-                                ui,
-                                mode_btn,
-                                ui_state.sort_mode,
-                                ui_state.sort_direction,
-                                &pal,
-                            ) {
-                                let (nm, nd) = mode_btn.click_transition(
-                                    ui_state.sort_mode,
-                                    ui_state.sort_direction,
-                                );
-                                ui_state.sort_mode = nm;
-                                ui_state.sort_direction = nd;
-                                sort_dirty = true;
-                            }
-                        }
-                        ui.add_space(SPACE_4);
-                        ui.label(RichText::new("Sort:").size(12.0).color(pal.muted));
-                    },
                 );
-                if search_dirty || sort_dirty {
+                if search_dirty {
                     list_view_dirty = true;
                 }
 
@@ -1479,7 +1589,7 @@ pub fn draw_app_ui(
                         .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
-                    draw_main_app_list(ui, ui_state, report, &pal);
+                    draw_main_app_list(ui, ui_state, report, &pal, emit);
                 });
 
             if let (Some(rep), Some(target_id)) = (report, ui_state.open_reverse_dep_id.clone()) {
@@ -1516,6 +1626,7 @@ fn draw_main_app_list(
     ui_state: &mut StorageUiState,
     report: Option<&ScanReport>,
     pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
 ) {
     let Some(rep) = report else {
         draw_crisp_frame(
@@ -1556,250 +1667,641 @@ fn draw_main_app_list(
         &ui_state.search_query,
         sys_drive_letter,
     );
+    let shown = visible_apps.len();
 
-    draw_synced_scroll_area(ui, "main_app_scroll", None, [false, false], pal, pal.bg, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let shown = visible_apps.len();
+    let avail_w = ui.available_width();
+    let avail_h = ui.available_height();
+    let panel_left = ui.cursor().min.x;
+    let panel_w = (avail_w - SCROLL_GUTTER_W).max(320.0);
+    let ppp = ui.ctx().pixels_per_point();
+    let inset = 1.0 / ppp.max(0.5);
 
-        if shown == 0 {
-            draw_crisp_frame(
-                ui,
-                pal.panel,
-                pal.border,
-                RADIUS_PANEL,
-                Margin::same(SPACE_12),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(
-                        RichText::new("No matching apps for the active filter/search.")
-                            .size(12.5)
-                            .color(pal.muted),
-                    );
-                },
-            );
-            return;
-        }
+    let outer_border_slot = ui.painter().add(egui::Shape::Noop);
+    let inner_fill_slot = ui.painter().add(egui::Shape::Noop);
+    let header_bg_slot = ui.painter().add(egui::Shape::Noop);
 
-        // Single calm 8px-rounded ledger container with hairline row dividers (zero uniform card soup).
-        draw_crisp_frame(
-            ui,
-            pal.panel,
-            pal.border,
-            RADIUS_PANEL,
-            Margin::ZERO,
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 0.0;
+    let panel_top_y = ui.cursor().min.y;
+    ui.add_space(inset);
 
-                for (row_idx, app) in visible_apps.iter().enumerate() {
-                    let expanded = ui_state.expanded_apps.contains(&app.id);
-                    let row_slot = ui.painter().add(egui::Shape::Noop);
-                    let accent_bar_slot = ui.painter().add(egui::Shape::Noop);
+    let hdr_content_x0 = panel_left + inset + SPACE_12;
+    let hdr_content_w = (panel_w - (inset * 2.0 + SPACE_12 * 2.0)).max(200.0);
+    let cols = MainTableColumns::compute(hdr_content_x0, hdr_content_w);
 
-                    let row_res = egui::Frame::none()
-                        .fill(Color32::TRANSPARENT)
-                        .inner_margin(Margin::symmetric(SPACE_12, SPACE_4))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.spacing_mut().item_spacing.y = SPACE_4;
+    // Sticky column-header strip fixed outside ScrollArea; clicking sortable columns changes sort mode/direction.
+    let (hdr_row_rect, _) =
+        ui.allocate_exact_size(Vec2::new(panel_w, TABLE_HEADER_H), Sense::hover());
+    let hdr_y0 = hdr_row_rect.min.y;
+    let hdr_y1 = hdr_row_rect.max.y;
 
-                            // Dominant quantity (T2: 13.5pt Strong) vs primary identity (T3: 13.0pt Regular) vs meta (T4: 11.0pt subtle)
-                            let right_col_w = DELTA_COL_W + SPACE_8 + SIZE_COL_W;
-                            let header_resp = draw_split_row(
-                                ui,
-                                APP_ROW_H,
-                                right_col_w,
-                                Sense::click(),
-                                |ui| {
-                                    ui.spacing_mut().item_spacing.x = SPACE_8;
-                                    draw_chevron(
-                                        ui,
-                                        expanded,
-                                        if expanded { pal.accent_line } else { pal.muted },
+    let mut sort_clicked: Option<AppSortMode> = None;
+    if draw_sortable_col_header(
+        ui,
+        cols.name.rect(hdr_y0, hdr_y1),
+        "main_name",
+        "App name",
+        AppSortMode::Name,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
+        false,
+        pal,
+    ) {
+        sort_clicked = Some(AppSortMode::Name);
+    }
+    draw_static_col_header(
+        ui,
+        cols.publisher.rect(hdr_y0, hdr_y1),
+        "Publisher",
+        11.0,
+        false,
+        pal,
+    );
+    if draw_sortable_col_header(
+        ui,
+        cols.delta.rect(hdr_y0, hdr_y1),
+        "main_delta",
+        "Growth delta",
+        AppSortMode::Growth,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
+        true,
+        pal,
+    ) {
+        sort_clicked = Some(AppSortMode::Growth);
+    }
+    if draw_sortable_col_header(
+        ui,
+        cols.size.rect(hdr_y0, hdr_y1),
+        "main_size",
+        "Total size",
+        AppSortMode::Size,
+        ui_state.sort_mode,
+        ui_state.sort_direction,
+        true,
+        pal,
+    ) {
+        sort_clicked = Some(AppSortMode::Size);
+    }
+    if let Some(mode) = sort_clicked {
+        let (nm, nd) = mode.click_transition(ui_state.sort_mode, ui_state.sort_direction);
+        ui_state.sort_mode = nm;
+        ui_state.sort_direction = nd;
+        emit(UiAction::UpdateListView {
+            sort_mode: ui_state.sort_mode,
+            sort_direction: ui_state.sort_direction,
+            filter_chip: ui_state.filter_chip,
+            search_query: ui_state.search_query.clone(),
+        });
+    }
+
+    let hdr_div_rect = Rect::from_min_size(
+        Pos2::new(panel_left + inset, hdr_y1),
+        Vec2::new((panel_w - inset * 2.0).max(0.0), 1.0),
+    );
+    ui.painter()
+        .rect_filled(hdr_div_rect, Rounding::ZERO, pal.border);
+    ui.advance_cursor_after_rect(hdr_div_rect);
+
+    let body_max_h = (avail_h - (TABLE_HEADER_H + 1.0 + inset * 2.0 + 2.0)).max(80.0);
+    draw_synced_scroll_area(
+        ui,
+        "main_app_scroll",
+        Some(body_max_h),
+        [false, true],
+        pal,
+        pal.bg,
+        |ui| {
+            ui.set_width(panel_w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let body_clip = Rect::from_min_max(
+                Pos2::new(panel_left + inset, ui.clip_rect().min.y),
+                Pos2::new(panel_left + panel_w - inset, ui.clip_rect().max.y),
+            )
+            .intersect(ui.clip_rect());
+            ui.set_clip_rect(body_clip);
+
+            if shown == 0 {
+                egui::Frame::none()
+                    .inner_margin(Margin::symmetric(SPACE_12 + inset, SPACE_12))
+                    .show(ui, |ui| {
+                        ui.set_width((panel_w - (SPACE_12 + inset) * 2.0).max(160.0));
+                        ui.label(
+                            RichText::new("No matching apps for the active filter/search.")
+                                .size(12.5)
+                                .color(pal.muted),
+                        );
+                    });
+                return;
+            }
+
+            for (row_idx, app) in visible_apps.iter().enumerate() {
+                let expanded = ui_state.expanded_apps.contains(&app.id);
+                let row_slot = ui.painter().add(egui::Shape::Noop);
+                let accent_bar_slot = ui.painter().add(egui::Shape::Noop);
+
+                let row_outer_rect = ui
+                    .allocate_ui_with_layout(
+                        Vec2::new(panel_w, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            let (sum_rect, _) = ui.allocate_exact_size(
+                                Vec2::new(panel_w, APP_ROW_H + SPACE_4 * 2.0),
+                                Sense::hover(),
+                            );
+                            let y0 = sum_rect.min.y + SPACE_4;
+                            let y1 = sum_rect.max.y - SPACE_4;
+
+                            // 1. Chevron
+                            {
+                                let mut c_ui = table_cell_ui(
+                                    ui,
+                                    cols.chevron.rect(y0, y1),
+                                    Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                );
+                                draw_chevron(
+                                    &mut c_ui,
+                                    expanded,
+                                    if expanded { pal.accent_line } else { pal.muted },
+                                );
+                            }
+
+                            // 2. App name (+ inline NO-TOUCH/LOCKED state chip)
+                            {
+                                let name_rect = cols.name.rect(y0, y1);
+                                let name_font = FontId::new(13.0, FontFamily::Proportional);
+                                let mut n_ui = table_cell_ui(
+                                    ui,
+                                    name_rect,
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                n_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                if let Some(nt) = app.no_touch {
+                                    let chip_lbl = nt.label();
+                                    let chip_text_w = n_ui.fonts(|f| {
+                                        f.layout_no_wrap(
+                                            chip_lbl.to_owned(),
+                                            FontId::new(10.5, FontFamily::Proportional),
+                                            pal.no_touch_outline,
+                                        )
+                                        .size()
+                                        .x
+                                    });
+                                    let chip_reserve = chip_text_w + 14.0 + SPACE_8;
+                                    let max_name_w = (name_rect.width() - chip_reserve).max(40.0);
+                                    let measured_name_w = n_ui.fonts(|f| {
+                                        f.layout_no_wrap(
+                                            app.display_name.clone(),
+                                            name_font.clone(),
+                                            pal.text,
+                                        )
+                                        .size()
+                                        .x
+                                    });
+                                    let text_alloc_w = measured_name_w.min(max_name_w);
+                                    let (t_rect, _) = n_ui.allocate_exact_size(
+                                        Vec2::new(text_alloc_w, y1 - y0),
+                                        Sense::hover(),
+                                    );
+                                    let mut t_ui = table_cell_ui(
+                                        &mut n_ui,
+                                        t_rect,
+                                        Layout::left_to_right(Align::Center),
                                     );
                                     draw_truncated_text(
-                                        ui,
+                                        &mut t_ui,
                                         &app.display_name,
-                                        FontId::new(13.0, FontFamily::Proportional),
+                                        name_font,
                                         pal.text,
                                         false,
                                     );
-                                    if let Some(nt) = app.no_touch {
-                                        paint_chip(
-                                            ui,
-                                            nt.label(),
-                                            no_touch_chip_style(pal),
-                                            if expanded { pal.panel_alt } else { pal.panel },
-                                        );
-                                    }
-                                    if let Some(first_pub) = app.publishers.first() {
-                                        draw_truncated_text(
-                                            ui,
-                                            first_pub,
-                                            FontId::new(11.0, FontFamily::Proportional),
-                                            pal.subtle_text,
-                                            false,
-                                        );
-                                    }
-                                },
-                                |ui| {
-                                    ui.spacing_mut().item_spacing.x = SPACE_8;
-                                    let (sz_rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(SIZE_COL_W, APP_ROW_H),
-                                        Sense::hover(),
+                                    paint_chip(
+                                        &mut n_ui,
+                                        chip_lbl,
+                                        no_touch_chip_style(pal),
+                                        if expanded { pal.panel_alt } else { pal.panel },
                                     );
-                                    let mut sz_ui = ui.new_child(
-                                        UiBuilder::new()
-                                            .max_rect(sz_rect)
-                                            .layout(Layout::right_to_left(Align::Center)),
+                                } else {
+                                    draw_truncated_text(
+                                        &mut n_ui,
+                                        &app.display_name,
+                                        name_font,
+                                        pal.text,
+                                        false,
                                     );
-                                    draw_right_aligned_size(&mut sz_ui, app.total_bytes, 13.5, pal.text, true);
+                                }
+                            }
 
-                                    let (d_rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(DELTA_COL_W, APP_ROW_H),
-                                        Sense::hover(),
-                                    );
-                                    if let Some((d_text, d_col, d_tip)) = format_delta_display(app.growth, pal) {
-                                        let mut d_ui = ui.new_child(
-                                            UiBuilder::new()
-                                                .max_rect(d_rect)
-                                                .layout(Layout::right_to_left(Align::Center)),
-                                        );
-                                        d_ui.add(
-                                            egui::Label::new(RichText::new(&d_text).size(11.5).color(d_col))
-                                                .selectable(false),
-                                        )
-                                        .on_hover_text(d_tip);
-                                    }
-                                },
+                            // 3. Publisher
+                            if let Some(first_pub) = app.publishers.first() {
+                                let mut p_ui = table_cell_ui(
+                                    ui,
+                                    cols.publisher.rect(y0, y1),
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                draw_truncated_text(
+                                    &mut p_ui,
+                                    first_pub,
+                                    FontId::new(11.0, FontFamily::Proportional),
+                                    pal.subtle_text,
+                                    false,
+                                );
+                            }
+
+                            // 4. Growth delta
+                            if let Some((d_text, d_col, d_tip)) =
+                                format_delta_display(app.growth, pal)
+                            {
+                                let mut d_ui = table_cell_ui(
+                                    ui,
+                                    cols.delta.rect(y0, y1),
+                                    Layout::right_to_left(Align::Center),
+                                );
+                                d_ui.add(
+                                    egui::Label::new(RichText::new(&d_text).size(11.5).color(d_col))
+                                        .selectable(false),
+                                )
+                                .on_hover_text(d_tip);
+                            }
+
+                            // 5. Total size
+                            {
+                                let mut s_ui = table_cell_ui(
+                                    ui,
+                                    cols.size.rect(y0, y1),
+                                    Layout::right_to_left(Align::Center),
+                                );
+                                draw_right_aligned_size(
+                                    &mut s_ui,
+                                    app.total_bytes,
+                                    13.5,
+                                    pal.text,
+                                    true,
+                                );
+                            }
+
+                            let sum_click_rect = Rect::from_min_max(
+                                Pos2::new(panel_left + inset, sum_rect.min.y),
+                                Pos2::new(panel_left + panel_w - inset, sum_rect.max.y),
                             );
-
-                            if header_resp.clicked() {
+                            let sum_resp = ui.interact(
+                                sum_click_rect,
+                                ui.make_persistent_id(("app_row_toggle", &app.id)),
+                                Sense::click(),
+                            );
+                            if sum_resp.clicked() {
                                 if expanded {
                                     ui_state.expanded_apps.remove(&app.id);
                                 } else {
                                     ui_state.expanded_apps.insert(app.id.clone());
                                 }
                             }
+                            let row_hovered = sum_resp.hovered();
 
                             if expanded {
+                                let sub_x0 = cols.name.min_x;
+                                let sub_w = (cols.size.max_x - sub_x0).max(200.0);
+                                let loc_cols = LocationsTableColumns::compute(sub_x0, sub_w);
+                                let dep_cols = DependenciesTableColumns::compute(sub_x0, sub_w);
+
+                                // Sub-table 1: Locations (Zone · Path · Basis · Size)
                                 ui.add_space(SPACE_4);
-                                // Sub-section 1: Hairline-divided Location Breakdown (zero nested cards)
-                                ui.label(
+                                let (loc_title_rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(panel_w, 18.0),
+                                    Sense::hover(),
+                                );
+                                let mut lt_ui = table_cell_ui(
+                                    ui,
+                                    Rect::from_min_max(
+                                        Pos2::new(sub_x0, loc_title_rect.min.y),
+                                        Pos2::new(cols.size.max_x, loc_title_rect.max.y),
+                                    ),
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                lt_ui.label(
                                     RichText::new(format!("Locations ({})", app.items.len()))
                                         .size(11.0)
                                         .strong()
                                         .color(pal.muted),
                                 );
+
+                                let (loc_hdr_rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(panel_w, SUB_HEADER_H),
+                                    Sense::hover(),
+                                );
+                                let ly0 = loc_hdr_rect.min.y;
+                                let ly1 = loc_hdr_rect.max.y;
+                                draw_static_col_header(
+                                    ui,
+                                    loc_cols.zone.rect(ly0, ly1),
+                                    "Zone",
+                                    10.5,
+                                    false,
+                                    pal,
+                                );
+                                draw_static_col_header(
+                                    ui,
+                                    loc_cols.path.rect(ly0, ly1),
+                                    "Path",
+                                    10.5,
+                                    false,
+                                    pal,
+                                );
+                                draw_static_col_header(
+                                    ui,
+                                    loc_cols.basis.rect(ly0, ly1),
+                                    "Basis",
+                                    10.5,
+                                    false,
+                                    pal,
+                                );
+                                draw_static_col_header(
+                                    ui,
+                                    loc_cols.size.rect(ly0, ly1),
+                                    "Size",
+                                    10.5,
+                                    true,
+                                    pal,
+                                );
+                                ui.painter().rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(sub_x0, ly1 - 1.0),
+                                        Vec2::new(sub_w, 1.0),
+                                    ),
+                                    Rounding::ZERO,
+                                    pal.border,
+                                );
+
                                 for (loc_i, item) in app.items.iter().enumerate() {
                                     if loc_i > 0 {
-                                        let r = Rect::from_min_size(
-                                            ui.cursor().min,
-                                            Vec2::new(ui.available_width(), 1.0),
+                                        let div_y = ui.cursor().min.y;
+                                        ui.painter().rect_filled(
+                                            Rect::from_min_size(
+                                                Pos2::new(sub_x0, div_y),
+                                                Vec2::new(sub_w, 1.0),
+                                            ),
+                                            Rounding::ZERO,
+                                            pal.border,
                                         );
-                                        ui.painter().rect_filled(r, Rounding::ZERO, pal.border);
-                                        ui.add_space(SPACE_4);
+                                        ui.add_space(1.0);
                                     }
-                                    draw_split_row(
-                                        ui,
-                                        SUB_LINE1_H,
-                                        SIZE_COL_W,
+                                    let (l_rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(panel_w, SUB_LINE1_H + 2.0),
                                         Sense::hover(),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_4;
-                                            if let Some(zone) = item.zone {
-                                                paint_chip(
-                                                    ui,
-                                                    zone.short_label(),
-                                                    zone_chip_style(zone, pal),
-                                                    pal.panel_alt,
-                                                );
-                                            }
-                                            if let Some(qual) = item.qualifier {
-                                                let q_lbl = match qual {
-                                                    LocationQualifier::RoamingConfig => "Roaming config",
-                                                    LocationQualifier::MachineShared => "ProgramData · shared",
-                                                };
-                                                paint_chip(ui, q_lbl, qualifier_chip_style(pal), pal.panel_alt);
-                                            }
-                                            draw_truncated_text(
+                                    );
+                                    let ry0 = l_rect.min.y;
+                                    let ry1 = l_rect.max.y;
+
+                                    if let Some(zone) = item.zone {
+                                        let mut z_ui = table_cell_ui(
+                                            ui,
+                                            loc_cols.zone.rect(ry0, ry1),
+                                            Layout::left_to_right(Align::Center),
+                                        );
+                                        paint_chip(
+                                            &mut z_ui,
+                                            zone.short_label(),
+                                            zone_chip_style(zone, pal),
+                                            pal.panel_alt,
+                                        );
+                                    }
+
+                                    {
+                                        let p_rect = loc_cols.path.rect(ry0, ry1);
+                                        let path_font = FontId::new(11.5, FontFamily::Monospace);
+                                        if let Some(qual) = item.qualifier {
+                                            let q_lbl = match qual {
+                                                LocationQualifier::RoamingConfig => "Roaming config",
+                                                LocationQualifier::MachineShared => {
+                                                    "ProgramData · shared"
+                                                }
+                                            };
+                                            let mut p_ui = table_cell_ui(
                                                 ui,
+                                                p_rect,
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            p_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                            let q_text_w = p_ui.fonts(|f| {
+                                                f.layout_no_wrap(
+                                                    q_lbl.to_owned(),
+                                                    FontId::new(10.5, FontFamily::Proportional),
+                                                    pal.lavender_text,
+                                                )
+                                                .size()
+                                                .x
+                                            });
+                                            let q_reserve = q_text_w + 14.0 + SPACE_8;
+                                            let max_p_w = (p_rect.width() - q_reserve).max(80.0);
+                                            let measured_p_w = p_ui.fonts(|f| {
+                                                f.layout_no_wrap(
+                                                    item.path.clone(),
+                                                    path_font.clone(),
+                                                    pal.text,
+                                                )
+                                                .size()
+                                                .x
+                                            });
+                                            let (t_rect, _) = p_ui.allocate_exact_size(
+                                                Vec2::new(measured_p_w.min(max_p_w), ry1 - ry0),
+                                                Sense::hover(),
+                                            );
+                                            let mut pt_ui = table_cell_ui(
+                                                &mut p_ui,
+                                                t_rect,
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            draw_truncated_text(
+                                                &mut pt_ui,
                                                 &item.path,
-                                                FontId::new(11.5, FontFamily::Monospace),
+                                                path_font,
                                                 pal.text,
                                                 false,
                                             );
-                                        },
-                                        |ui| {
-                                            draw_right_aligned_size(ui, item.bytes, 11.5, pal.text, false);
-                                        },
-                                    );
-                                    if let Some(basis) = item.basis {
-                                        draw_split_row(
+                                            paint_chip(
+                                                &mut p_ui,
+                                                q_lbl,
+                                                qualifier_chip_style(pal),
+                                                pal.panel_alt,
+                                            );
+                                        } else {
+                                            let mut p_ui = table_cell_ui(
+                                                ui,
+                                                p_rect,
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            draw_truncated_text(
+                                                &mut p_ui,
+                                                &item.path,
+                                                path_font,
+                                                pal.text,
+                                                false,
+                                            );
+                                        }
+                                    }
+
+                                    {
+                                        let mut b_ui = table_cell_ui(
                                             ui,
-                                            SUB_LINE2_H,
-                                            SIZE_COL_W,
-                                            Sense::hover(),
-                                            |ui| {
-                                                let basis_str = format!("Basis: {}", basis.label());
-                                                draw_truncated_text(
-                                                    ui,
-                                                    &basis_str,
-                                                    FontId::new(10.5, FontFamily::Proportional),
-                                                    pal.subtle_text,
-                                                    false,
-                                                );
-                                            },
-                                            |_| {},
+                                            loc_cols.basis.rect(ry0, ry1),
+                                            Layout::left_to_right(Align::Center),
+                                        );
+                                        let basis_str = item
+                                            .basis
+                                            .map(|b| b.label())
+                                            .unwrap_or("—");
+                                        draw_truncated_text(
+                                            &mut b_ui,
+                                            basis_str,
+                                            FontId::new(10.5, FontFamily::Proportional),
+                                            pal.subtle_text,
+                                            false,
+                                        );
+                                    }
+
+                                    {
+                                        let mut s_ui = table_cell_ui(
+                                            ui,
+                                            loc_cols.size.rect(ry0, ry1),
+                                            Layout::right_to_left(Align::Center),
+                                        );
+                                        draw_right_aligned_size(
+                                            &mut s_ui,
+                                            item.bytes,
+                                            11.5,
+                                            pal.text,
+                                            false,
                                         );
                                     }
                                 }
 
-                                ui.add_space(SPACE_4);
-                                let div_rect = Rect::from_min_size(
-                                    ui.cursor().min,
-                                    Vec2::new(ui.available_width(), 1.0),
+                                ui.add_space(SPACE_8);
+                                let sec_div_y = ui.cursor().min.y;
+                                ui.painter().rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(sub_x0, sec_div_y),
+                                        Vec2::new(sub_w, 1.0),
+                                    ),
+                                    Rounding::ZERO,
+                                    pal.border,
                                 );
-                                ui.painter().rect_filled(div_rect, Rounding::ZERO, pal.border);
                                 ui.add_space(SPACE_8);
 
-                                // Sub-section 2: Hairline-divided Dependencies (kind as quiet text, no solid pastel fill, quiet shared sizes)
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = SPACE_8;
-                                    ui.label(
-                                        RichText::new("Dependencies")
-                                            .size(11.5)
-                                            .strong()
-                                            .color(pal.muted),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} · shared sizes excluded from app total",
-                                            app.dependencies.len()
-                                        ))
-                                        .size(10.5)
-                                        .color(pal.subtle_text),
-                                    );
-                                });
+                                // Sub-table 2: Dependencies (Dependency name · Kind · Confidence · Used by · Own size)
+                                let (dep_title_rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(panel_w, 18.0),
+                                    Sense::hover(),
+                                );
+                                let mut dt_ui = table_cell_ui(
+                                    ui,
+                                    Rect::from_min_max(
+                                        Pos2::new(sub_x0, dep_title_rect.min.y),
+                                        Pos2::new(cols.size.max_x, dep_title_rect.max.y),
+                                    ),
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                dt_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                dt_ui.label(
+                                    RichText::new("Dependencies")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(pal.muted),
+                                );
+                                dt_ui.label(
+                                    RichText::new(format!(
+                                        "{} · shared sizes excluded from app total",
+                                        app.dependencies.len()
+                                    ))
+                                    .size(10.5)
+                                    .color(pal.subtle_text),
+                                );
 
                                 if app.dependencies.is_empty() {
-                                    ui.add_sized(
-                                        Vec2::new(ui.available_width(), SUB_LINE1_H),
-                                        egui::Label::new(
-                                            RichText::new(NO_KNOWN_DEPENDENCIES_LABEL)
-                                                .size(11.5)
-                                                .color(pal.subtle_text),
+                                    let (empty_r, _) = ui.allocate_exact_size(
+                                        Vec2::new(panel_w, SUB_LINE1_H),
+                                        Sense::hover(),
+                                    );
+                                    let mut e_ui = table_cell_ui(
+                                        ui,
+                                        Rect::from_min_max(
+                                            Pos2::new(sub_x0, empty_r.min.y),
+                                            Pos2::new(cols.size.max_x, empty_r.max.y),
                                         ),
+                                        Layout::left_to_right(Align::Center),
+                                    );
+                                    e_ui.label(
+                                        RichText::new(NO_KNOWN_DEPENDENCIES_LABEL)
+                                            .size(11.5)
+                                            .color(pal.subtle_text),
                                     );
                                 } else {
+                                    let (dep_hdr_rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(panel_w, SUB_HEADER_H),
+                                        Sense::hover(),
+                                    );
+                                    let dy0 = dep_hdr_rect.min.y;
+                                    let dy1 = dep_hdr_rect.max.y;
+                                    draw_static_col_header(
+                                        ui,
+                                        dep_cols.name.rect(dy0, dy1),
+                                        "Dependency name",
+                                        10.5,
+                                        false,
+                                        pal,
+                                    );
+                                    draw_static_col_header(
+                                        ui,
+                                        dep_cols.kind.rect(dy0, dy1),
+                                        "Kind",
+                                        10.5,
+                                        false,
+                                        pal,
+                                    );
+                                    draw_static_col_header(
+                                        ui,
+                                        dep_cols.confidence.rect(dy0, dy1),
+                                        "Confidence",
+                                        10.5,
+                                        false,
+                                        pal,
+                                    );
+                                    draw_static_col_header(
+                                        ui,
+                                        dep_cols.used_by.rect(dy0, dy1),
+                                        "Used by",
+                                        10.5,
+                                        false,
+                                        pal,
+                                    );
+                                    draw_static_col_header(
+                                        ui,
+                                        dep_cols.own_size.rect(dy0, dy1),
+                                        "Own size",
+                                        10.5,
+                                        true,
+                                        pal,
+                                    );
+                                    ui.painter().rect_filled(
+                                        Rect::from_min_size(
+                                            Pos2::new(sub_x0, dy1 - 1.0),
+                                            Vec2::new(sub_w, 1.0),
+                                        ),
+                                        Rounding::ZERO,
+                                        pal.border,
+                                    );
+
                                     for (dep_i, dep) in app.dependencies.iter().enumerate() {
                                         if dep_i > 0 {
-                                            let r = Rect::from_min_size(
-                                                ui.cursor().min,
-                                                Vec2::new(ui.available_width(), 1.0),
+                                            let div_y = ui.cursor().min.y;
+                                            ui.painter().rect_filled(
+                                                Rect::from_min_size(
+                                                    Pos2::new(sub_x0, div_y),
+                                                    Vec2::new(sub_w, 1.0),
+                                                ),
+                                                Rounding::ZERO,
+                                                pal.border,
                                             );
-                                            ui.painter().rect_filled(r, Rounding::ZERO, pal.border);
-                                            ui.add_space(SPACE_4);
+                                            ui.add_space(2.0);
                                         }
                                         let rev_n = rev_counts
                                             .get(dep.target_id.as_str())
@@ -1808,84 +2310,141 @@ fn draw_main_app_list(
                                         let is_open_rev = ui_state.open_reverse_dep_id.as_deref()
                                             == Some(dep.target_id.as_str());
 
-                                        draw_split_row(
-                                            ui,
-                                            SUB_LINE1_H,
-                                            SIZE_COL_W,
+                                        let (d_rect, _) = ui.allocate_exact_size(
+                                            Vec2::new(panel_w, SUB_LINE1_H + 2.0),
                                             Sense::hover(),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                                draw_truncated_text(
-                                                    ui,
-                                                    &dep.target_name,
-                                                    FontId::new(12.0, FontFamily::Proportional),
-                                                    pal.text,
-                                                    false,
+                                        );
+                                        let r1y0 = d_rect.min.y;
+                                        let r1y1 = d_rect.max.y;
+
+                                        // 1. Dependency name
+                                        {
+                                            let mut dn_ui = table_cell_ui(
+                                                ui,
+                                                dep_cols.name.rect(r1y0, r1y1),
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            draw_truncated_text(
+                                                &mut dn_ui,
+                                                &dep.target_name,
+                                                FontId::new(12.0, FontFamily::Proportional),
+                                                pal.text,
+                                                false,
+                                            );
+                                        }
+
+                                        // 2. Kind
+                                        {
+                                            let mut dk_ui = table_cell_ui(
+                                                ui,
+                                                dep_cols.kind.rect(r1y0, r1y1),
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            draw_truncated_text(
+                                                &mut dk_ui,
+                                                dep.kind.label(),
+                                                FontId::new(11.0, FontFamily::Proportional),
+                                                pal.subtle_text,
+                                                false,
+                                            );
+                                        }
+
+                                        // 3. Confidence (+ shared / missing)
+                                        {
+                                            let mut dc_ui = table_cell_ui(
+                                                ui,
+                                                dep_cols.confidence.rect(r1y0, r1y1),
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            dc_ui.spacing_mut().item_spacing.x = SPACE_4;
+                                            paint_chip(
+                                                &mut dc_ui,
+                                                dep.confidence.label(),
+                                                confidence_chip_style(dep.confidence, pal),
+                                                pal.panel_alt,
+                                            );
+                                            if dep.shared {
+                                                paint_chip(
+                                                    &mut dc_ui,
+                                                    "shared",
+                                                    ChipStyle {
+                                                        fill: Color32::TRANSPARENT,
+                                                        stroke: pal.border,
+                                                        text: pal.muted,
+                                                    },
+                                                    pal.panel_alt,
                                                 );
-                                                ui.label(
-                                                    RichText::new(dep.kind.label())
+                                            }
+                                            if !dep.present {
+                                                paint_chip(
+                                                    &mut dc_ui,
+                                                    "missing",
+                                                    no_touch_chip_style(pal),
+                                                    pal.panel_alt,
+                                                );
+                                            }
+                                        }
+
+                                        // 4. Used by
+                                        {
+                                            let mut du_ui = table_cell_ui(
+                                                ui,
+                                                dep_cols.used_by.rect(r1y0, r1y1),
+                                                Layout::left_to_right(Align::Center),
+                                            );
+                                            if rev_n > 0 {
+                                                let lbl = if rev_n == 1 {
+                                                    "used by 1 app >".to_string()
+                                                } else {
+                                                    format!("used by {rev_n} apps >")
+                                                };
+                                                if draw_z_button(
+                                                    &mut du_ui,
+                                                    &lbl,
+                                                    Vec2::new(0.0, 18.0),
+                                                    10.5,
+                                                    RADIUS_PILL,
+                                                    true,
+                                                    is_open_rev,
+                                                    pal,
+                                                )
+                                                .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
+                                                .clicked()
+                                                {
+                                                    ui_state.open_reverse_dep_id =
+                                                        if is_open_rev {
+                                                            None
+                                                        } else {
+                                                            Some(dep.target_id.clone())
+                                                        };
+                                                }
+                                            } else {
+                                                du_ui.label(
+                                                    RichText::new("—")
                                                         .size(11.0)
                                                         .color(pal.subtle_text),
                                                 );
-                                                paint_chip(
-                                                    ui,
-                                                    dep.confidence.label(),
-                                                    confidence_chip_style(dep.confidence, pal),
-                                                    pal.panel_alt,
+                                            }
+                                        }
+
+                                        // 5. Own size (quiet muted, never reads like additive component)
+                                        {
+                                            let mut ds_ui = table_cell_ui(
+                                                ui,
+                                                dep_cols.own_size.rect(r1y0, r1y1),
+                                                Layout::right_to_left(Align::Center),
+                                            );
+                                            if let Some(own) = dep.own_size_bytes {
+                                                draw_right_aligned_size(
+                                                    &mut ds_ui,
+                                                    own,
+                                                    11.5,
+                                                    pal.muted,
+                                                    false,
                                                 );
-                                                if dep.shared {
-                                                    paint_chip(
-                                                        ui,
-                                                        "shared",
-                                                        ChipStyle {
-                                                            fill: Color32::TRANSPARENT,
-                                                            stroke: pal.border,
-                                                            text: pal.muted,
-                                                        },
-                                                        pal.panel_alt,
-                                                    );
-                                                }
-                                                if !dep.present {
-                                                    paint_chip(
-                                                        ui,
-                                                        "missing",
-                                                        no_touch_chip_style(pal),
-                                                        pal.panel_alt,
-                                                    );
-                                                }
-                                                if rev_n > 0 {
-                                                    let lbl = if rev_n == 1 {
-                                                        "used by 1 app >".to_string()
-                                                    } else {
-                                                        format!("used by {rev_n} apps >")
-                                                    };
-                                                    if draw_z_button(
-                                                        ui,
-                                                        &lbl,
-                                                        Vec2::new(0.0, 18.0),
-                                                        10.5,
-                                                        RADIUS_PILL,
-                                                        true,
-                                                        is_open_rev,
-                                                        pal,
-                                                    )
-                                                    .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
-                                                    .clicked()
-                                                    {
-                                                        ui_state.open_reverse_dep_id =
-                                                            if is_open_rev {
-                                                                None
-                                                            } else {
-                                                                Some(dep.target_id.clone())
-                                                            };
-                                                    }
-                                                }
-                                            },
-                                            |ui| {
-                                                if let Some(own) = dep.own_size_bytes {
-                                                    draw_right_aligned_size(ui, own, 11.5, pal.muted, false);
-                                                } else {
-                                                    ui.add(
+                                            } else {
+                                                ds_ui
+                                                    .add(
                                                         egui::Label::new(
                                                             RichText::new("—")
                                                                 .size(11.5)
@@ -1894,76 +2453,122 @@ fn draw_main_app_list(
                                                         .selectable(false),
                                                     )
                                                     .on_hover_text("No separate on-disk folder (OS runtime or unmounted drive)");
-                                                }
-                                            },
-                                        );
+                                            }
+                                        }
 
-                                        draw_split_row(
-                                            ui,
-                                            SUB_LINE2_H,
-                                            SIZE_COL_W,
+                                        // Full-width quieter second line for dependency basis so sub-columns stay uncrowded.
+                                        let (basis_r, _) = ui.allocate_exact_size(
+                                            Vec2::new(panel_w, SUB_LINE2_H + 2.0),
                                             Sense::hover(),
-                                            |ui| {
-                                                draw_truncated_text(
-                                                    ui,
-                                                    &dep.basis,
-                                                    FontId::new(10.5, FontFamily::Proportional),
-                                                    pal.subtle_text,
-                                                    false,
-                                                );
-                                            },
-                                            |_| {},
+                                        );
+                                        let mut db_ui = table_cell_ui(
+                                            ui,
+                                            Rect::from_min_max(
+                                                Pos2::new(sub_x0, basis_r.min.y),
+                                                Pos2::new(cols.size.max_x, basis_r.max.y),
+                                            ),
+                                            Layout::left_to_right(Align::Center),
+                                        );
+                                        draw_truncated_text(
+                                            &mut db_ui,
+                                            &dep.basis,
+                                            FontId::new(10.5, FontFamily::Proportional),
+                                            pal.subtle_text,
+                                            false,
                                         );
                                     }
                                 }
-                                ui.add_space(SPACE_4);
+                                ui.add_space(SPACE_8);
                             }
-                            header_resp.hovered()
-                        });
+                            row_hovered
+                        },
+                    );
 
-                    let r = row_res.response.rect;
-                    if expanded {
-                        ui.painter().set(
-                            row_slot,
-                            egui::Shape::rect_filled(r, Rounding::ZERO, pal.panel_alt),
-                        );
-                        // 2px left accent bar + top/bottom crisp hairlines highlight the elevated inspected app.
-                        let bar_rect = Rect::from_min_size(r.min, Vec2::new(2.0, r.height()));
-                        ui.painter().set(
-                            accent_bar_slot,
-                            egui::Shape::rect_filled(bar_rect, Rounding::ZERO, pal.accent_line),
-                        );
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(r.min, Vec2::new(r.width(), 1.0)),
-                            Rounding::ZERO,
-                            pal.accent_line,
-                        );
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(
-                                Pos2::new(r.min.x, (r.max.y - 1.0).round()),
-                                Vec2::new(r.width(), 1.0),
-                            ),
-                            Rounding::ZERO,
-                            pal.accent_line,
-                        );
-                    } else if row_res.inner {
-                        ui.painter().set(
-                            row_slot,
-                            egui::Shape::rect_filled(r, Rounding::ZERO, pal.widget_hover),
-                        );
-                    }
-
-                    if !expanded && row_idx + 1 < shown {
-                        let sep = Rect::from_min_size(
-                            Pos2::new(r.min.x, (r.max.y - 1.0).round()),
-                            Vec2::new(r.width(), 1.0),
-                        );
-                        ui.painter().rect_filled(sep, Rounding::ZERO, pal.border);
-                    }
+                let r_full = row_outer_rect.response.rect;
+                let inner_row_rect = Rect::from_min_max(
+                    Pos2::new(panel_left + inset, r_full.min.y),
+                    Pos2::new(panel_left + panel_w - inset, r_full.max.y),
+                );
+                if expanded {
+                    ui.painter().set(
+                        row_slot,
+                        egui::Shape::rect_filled(inner_row_rect, Rounding::ZERO, pal.panel_alt),
+                    );
+                    let bar_rect =
+                        Rect::from_min_size(inner_row_rect.min, Vec2::new(2.0, inner_row_rect.height()));
+                    ui.painter().set(
+                        accent_bar_slot,
+                        egui::Shape::rect_filled(bar_rect, Rounding::ZERO, pal.accent_line),
+                    );
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(inner_row_rect.min, Vec2::new(inner_row_rect.width(), 1.0)),
+                        Rounding::ZERO,
+                        pal.accent_line,
+                    );
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
+                            Vec2::new(inner_row_rect.width(), 1.0),
+                        ),
+                        Rounding::ZERO,
+                        pal.accent_line,
+                    );
+                } else if row_outer_rect.inner {
+                    ui.painter().set(
+                        row_slot,
+                        egui::Shape::rect_filled(inner_row_rect, Rounding::ZERO, pal.widget_hover),
+                    );
                 }
-            },
+
+                if !expanded && row_idx + 1 < shown {
+                    let sep = Rect::from_min_size(
+                        Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
+                        Vec2::new(inner_row_rect.width(), 1.0),
+                    );
+                    ui.painter().rect_filled(sep, Rounding::ZERO, pal.border);
+                }
+            }
+        },
+    );
+
+    ui.add_space(inset + 2.0);
+    let panel_bot_y = ui.cursor().min.y;
+    let raw_panel_rect = Rect::from_min_max(
+        Pos2::new(panel_left, panel_top_y),
+        Pos2::new(panel_left + panel_w, panel_bot_y),
+    );
+    let snapped_panel = snap_rect_to_pixels(raw_panel_rect, ppp);
+    ui.painter().set(
+        outer_border_slot,
+        egui::Shape::rect_filled(snapped_panel, Rounding::same(RADIUS_PANEL), pal.border),
+    );
+    let inner_panel = snapped_panel.shrink(inset);
+    if inner_panel.width() > 0.0 && inner_panel.height() > 0.0 {
+        let inner_r = (RADIUS_PANEL - inset).max(0.0);
+        ui.painter().set(
+            inner_fill_slot,
+            egui::Shape::rect_filled(inner_panel, Rounding::same(inner_r), pal.panel),
         );
-    });
+        let hdr_fill_rect = Rect::from_min_max(
+            inner_panel.min,
+            Pos2::new(inner_panel.max.x, hdr_y1.min(inner_panel.max.y)),
+        );
+        if hdr_fill_rect.height() > 0.0 {
+            ui.painter().set(
+                header_bg_slot,
+                egui::Shape::rect_filled(
+                    hdr_fill_rect,
+                    Rounding {
+                        nw: inner_r,
+                        ne: inner_r,
+                        sw: 0.0,
+                        se: 0.0,
+                    },
+                    pal.panel_alt,
+                ),
+            );
+        }
+    }
 }
 
 fn draw_reverse_dependency_overlay(
