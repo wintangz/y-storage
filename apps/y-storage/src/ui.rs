@@ -867,6 +867,7 @@ fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, roundi
 }
 
 /// Paints an unbroken rounded rectangle border & optional fill, safe for `Color32::TRANSPARENT` fills at 96 DPI.
+/// When `border_color == Color32::TRANSPARENT`, skips the perimeter ring mesh completely (quiet row-level `SubtleOutline`).
 fn paint_crisp_bordered_box(
     painter: &egui::Painter,
     rect: Rect,
@@ -877,6 +878,12 @@ fn paint_crisp_bordered_box(
     ppp: f32,
 ) -> Rect {
     let snapped = snap_rect_to_pixels(rect, ppp);
+    if border_color == Color32::TRANSPARENT {
+        if snapped.width() > 0.0 && snapped.height() > 0.0 && fill != Color32::TRANSPARENT {
+            painter.rect_filled(snapped, Rounding::same(rounding.max(0.0)), fill);
+        }
+        return snapped;
+    }
     let inset = (border_px / ppp.max(0.5)).max(1.0 / ppp.max(0.5));
     let inner = snapped.shrink(inset);
     if inner.width() > 0.0 && inner.height() > 0.0 && fill != Color32::TRANSPARENT {
@@ -1134,7 +1141,56 @@ fn paint_bottom_fade_overlay(painter: &egui::Painter, rect: Rect, surface_bg: Co
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Renders an outline button whose states, accent outlines, and foreground colours match z-controller across both themes.
+/// Resolves `(fill, border_col, text_color)` under the WT accent-rationing rule:
+/// accent colour is reserved for the view's primary CTA, active/selected states, and hover feedback.
+fn resolve_button_colors(
+    variant: ButtonVariant,
+    enabled: bool,
+    pressed: bool,
+    hovered: bool,
+    active_highlight: bool,
+    pal: &ThemePalette,
+) -> (Color32, Color32, Color32) {
+    if !enabled {
+        return match variant {
+            ButtonVariant::SubtleOutline => (
+                Color32::TRANSPARENT,
+                Color32::TRANSPARENT,
+                lerp_color(pal.bg, pal.muted, 0.55),
+            ),
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
+                (Color32::TRANSPARENT, pal.border, pal.muted)
+            }
+        };
+    }
+    if pressed {
+        let press_border = match variant {
+            ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => LOGO_PINK,
+        };
+        return (pal.widget_active, press_border, pal.text);
+    }
+    if hovered {
+        return match variant {
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
+                (pal.widget_hover, pal.accent_line, pal.accent_line)
+            }
+            ButtonVariant::SubtleOutline => {
+                (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
+            }
+        };
+    }
+    if active_highlight {
+        return (pal.pill_blue_fill, pal.accent_line, pal.accent_line);
+    }
+    match variant {
+        ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
+        ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
+        ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
+    }
+}
+
+/// Renders an outline or quiet row-level button enforcing the 3-tier WT accent-rationing hierarchy.
 #[allow(clippy::too_many_arguments)]
 fn draw_z_button(
     ui: &mut egui::Ui,
@@ -1155,25 +1211,14 @@ fn draw_z_button(
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, desired_h), sense);
 
-    let (fill, border_col, text_color) = if !enabled {
-        (Color32::TRANSPARENT, pal.border, pal.muted)
-    } else if resp.is_pointer_button_down_on() {
-        (pal.widget_active, LOGO_PINK, pal.text)
-    } else if resp.hovered() {
-        (pal.widget_hover, pal.accent_line, pal.text)
-    } else if active_highlight {
-        (pal.pill_red_fill, LOGO_PINK, pal.text)
-    } else {
-        match variant {
-            ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
-            ButtonVariant::SecondaryOutline => (
-                Color32::TRANSPARENT,
-                lerp_color(pal.border, pal.accent_line, 0.72),
-                pal.accent_line,
-            ),
-            ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, pal.border, pal.muted),
-        }
-    };
+    let (fill, border_col, text_color) = resolve_button_colors(
+        variant,
+        enabled,
+        resp.is_pointer_button_down_on(),
+        resp.hovered(),
+        active_highlight,
+        pal,
+    );
 
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
@@ -1734,23 +1779,19 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(HEADER_CONTROL_H), Sense::click());
     let hovered = resp.hovered();
     let pressed = resp.is_pointer_button_down_on();
-    let (fill, border) = if pressed {
-        (pal.widget_active, LOGO_PINK)
+    let (fill, border, fg) = if pressed {
+        (pal.widget_active, LOGO_PINK, pal.text)
     } else if hovered {
-        (pal.widget_hover, pal.accent_line)
+        (pal.widget_hover, pal.accent_line, pal.accent_line)
     } else {
-        (
-            Color32::TRANSPARENT,
-            lerp_color(pal.border, pal.accent_line, 0.72),
-        )
+        (Color32::TRANSPARENT, pal.border, pal.text)
     };
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, 6.0, fill, border, 1.0, ppp);
     let c = snapped.center();
     match mode {
         ThemeMode::Dark => {
-            // Sun glyph synced with z-controller outline icon button
-            let fg = if pressed || hovered { pal.text } else { pal.accent_line };
+            // Sun glyph synced with SecondaryOutline (neutral text at rest, accent on hover)
             ui.painter()
                 .circle_stroke(c, 3.2, Stroke::new(1.3_f32, fg));
             for i in 0..8 {
@@ -1763,10 +1804,10 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
             }
         }
         ThemeMode::Light => {
-            // Crescent moon glyph synced with z-controller (cutout matches transparent header canvas)
+            // Crescent moon glyph synced with SecondaryOutline (cutout matches canvas or interaction fill)
             let cutout = if pressed || hovered { fill } else { pal.bg };
             ui.painter()
-                .circle_filled(c + Vec2::new(-0.5, 0.2), 5.3, pal.accent_line);
+                .circle_filled(c + Vec2::new(-0.5, 0.2), 5.3, fg);
             ui.painter()
                 .circle_filled(c + Vec2::new(2.2, -1.9), 4.4, cutout);
         }
@@ -2025,7 +2066,11 @@ fn draw_filter_radio_chip(
     let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
         (pal.widget_active, LOGO_PINK, pal.text)
     } else if resp.hovered() {
-        (pal.widget_hover, pal.accent_line, pal.text)
+        (
+            pal.widget_hover,
+            pal.accent_line,
+            if selected { pal.text } else { pal.accent_line },
+        )
     } else if selected {
         (pal.pill_blue_fill, pal.accent_line, pal.text)
     } else {
@@ -3431,7 +3476,7 @@ fn draw_main_app_list(
                                             4.0,
                                             true,
                                             is_open,
-                                            ButtonVariant::SecondaryOutline,
+                                            ButtonVariant::SubtleOutline,
                                             pal,
                                         );
                                         used_btn_w = btn_resp.rect.width() + SPACE_8;
@@ -3899,7 +3944,7 @@ fn draw_main_app_list(
                                                     4.0,
                                                     true,
                                                     is_open_rev,
-                                                    ButtonVariant::SecondaryOutline,
+                                                    ButtonVariant::SubtleOutline,
                                                     pal,
                                                 )
                                                 .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
@@ -4157,7 +4202,7 @@ fn draw_reverse_dependency_overlay(
                                 6.0,
                                 true,
                                 false,
-                                ButtonVariant::PrimaryOutline,
+                                ButtonVariant::SecondaryOutline,
                                 pal,
                             )
                             .on_hover_text("Open full Reverse Dependencies view")
@@ -4800,7 +4845,7 @@ fn draw_unattributed_item_row(
         RADIUS_PILL,
         true,
         false,
-        ButtonVariant::SecondaryOutline,
+        ButtonVariant::SubtleOutline,
         pal,
     );
     if row_idx == 0 {
@@ -4825,7 +4870,7 @@ fn draw_unattributed_item_row(
         RADIUS_PILL,
         exists,
         false,
-        ButtonVariant::SecondaryOutline,
+        ButtonVariant::SubtleOutline,
         pal,
     );
     if exists {
@@ -4979,7 +5024,11 @@ fn draw_reverse_group_header(
         Sense::click(),
         |ui| {
             ui.spacing_mut().item_spacing.x = SPACE_8;
-            draw_chevron(ui, expanded, pal.accent_line);
+            draw_chevron(
+                ui,
+                expanded,
+                if expanded { pal.accent_line } else { pal.muted },
+            );
             let (dfont, dfb) = prop_strong_font(has_prop_strong, 13.0);
             draw_truncated_text(
                 ui,
@@ -5213,7 +5262,7 @@ fn draw_settings_view(
                                 RADIUS_CONTROL,
                                 true,
                                 false,
-                                ButtonVariant::PrimaryOutline,
+                                ButtonVariant::SecondaryOutline,
                                 pal,
                             )
                             .clicked()
@@ -5748,5 +5797,55 @@ mod tests {
         }
         assert!(state.first_unattrib_web_search_rect.is_some());
         assert_eq!(state.unattrib_exists_cache.get(missing_dir), Some(&false));
+    }
+
+    #[test]
+    fn button_hierarchy_reserves_accent_for_primary_active_and_hover() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            let pal = ThemePalette::for_mode(mode);
+
+            // 1. PrimaryOutline (single view CTA): accent at rest + accent on hover
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, false, false, &pal),
+                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, true, false, &pal),
+                (pal.widget_hover, pal.accent_line, pal.accent_line)
+            );
+
+            // 2. SecondaryOutline (Settings, ThemeToggle, All, Close, Add exclusion): neutral at rest, accent on hover
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, false, false, &pal),
+                (Color32::TRANSPARENT, pal.border, pal.text)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, true, false, &pal),
+                (pal.widget_hover, pal.accent_line, pal.accent_line)
+            );
+
+            // 3. SubtleOutline / row-level actions (Locate, Web search, used by N apps >, Remove, Clear):
+            // quiet borderless at rest, muted surface fill + accent text on hover, active accent when latched
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, false, &pal),
+                (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, true, false, &pal),
+                (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, true, &pal),
+                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::SubtleOutline, false, false, false, false, &pal),
+                (
+                    Color32::TRANSPARENT,
+                    Color32::TRANSPARENT,
+                    lerp_color(pal.bg, pal.muted, 0.55)
+                )
+            );
+        }
     }
 }

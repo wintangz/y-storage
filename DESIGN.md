@@ -4,7 +4,7 @@
 > **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
 > **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
 
-**Last Updated**: 2026-11-26 (`unattributed-assist-1`)
+**Last Updated**: 2026-11-26 (`button-discipline-1`)
 
 ---
 
@@ -40,11 +40,11 @@ All WT applications share one dual-mode palette calibrated against `z-controller
 | `widget_hover` (`S3` Hover) | `#1F1F31` | `#E9F2FA` | Hovered buttons, theme toggle, interactive toggles, hovered rows |
 | `widget_active` (`S3` Press) | `#182230` | `#DCEBF8` | Pointer-down active buttons and pressed controls |
 | `input_bg` (`Well`) | `#0A0A10` | `#EEF4FA` on `panel` (`#FFFFFF` directly on `bg` canvas) | Text input wells (maintains distinct recess vs `#FFFFFF` cards and `#EEF4FA` canvas) |
-| `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders, SubtleOutline strokes, hairline ledger dividers |
+| `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders, `SecondaryOutline` rest strokes, hairline ledger dividers |
 | `scrollbar_thumb` | `#52567A` | `#98B0CA` | Slim vertical scrollbar thumb at rest (minimum visible contrast against track) |
 | `scrollbar_thumb_hover` | `#7A86B8` | `#648CB8` | Slim vertical scrollbar thumb on hover (brightens to `accent_line` when dragged) |
-| `text` | `#EDEDF2` | `#1C2733` | Primary headlines, row identities, dominant measurements, button hover/press text |
-| `muted` | `#9A9AB0` | `#5F7186` | Secondary metadata, quiet totals, SubtleOutline labels, disabled text |
+| `text` | `#EDEDF2` | `#1C2733` | Primary headlines, row identities, dominant measurements, `SecondaryOutline` rest labels/glyphs |
+| `muted` | `#9A9AB0` | `#5F7186` | Secondary metadata, quiet totals, `SubtleOutline` row-level rest labels, disabled button labels |
 | `subtle_text` | `#82829A` | `#748499` | Low-contrast inline descriptors, publishers, truncated basis copy |
 | `hint_text` | `#64647A` | `#98A6B8` | Unfocused, empty input placeholder hints only (hidden on focus or non-empty value) |
 
@@ -52,7 +52,7 @@ All WT applications share one dual-mode palette calibrated against `z-controller
 
 | Token | Dark Mode | Light Mode | Role |
 |---|---|---|---|
-| `LOGO_BLUE` / `accent_line` | `#54B9F2` | `#2F9BE8` (`#54B9F2` rim stop) | Active outlines, Primary/Secondary button accents, primary meters, chevrons, gradient stop `0.0` |
+| `LOGO_BLUE` / `accent_line` | `#54B9F2` | `#2F9BE8` (`#54B9F2` rim stop) | **Rationed** (`§6`): `PrimaryOutline` CTA, selected/active states, lower-tier button hover, primary meters, chevrons, gradient stop `0.0` |
 | `LOGO_LAVENDER` (`lavender_text`) | `#D8A6FF` | `#D8A6FF` (`#783EB8` small text) | Secondary meters/ticks, qualifier badge stroke, gradient stop `0.5` |
 | `LOGO_PINK` | `#F7A8D8` | `#F7A8D8` | Pressed/latched control outline, subtle unattributed ticks, gradient stop `1.0` |
 | `pill_blue_fill` | `#121C28` | `#EBF6FF` | Subtle fill for `PrimaryOutline` buttons, active filter pills, checkboxes, provenance badges |
@@ -112,26 +112,29 @@ The signature continuous gradient rim is a **state signal**, never decorative ch
 
 All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controller\apps\z-controller\src\ui.rs`) so headers, forms, dialogs, and scrollbars feel built from one binary toolkit.
 
+> **Accent Rationing Family Rule (`button-discipline-1` — inherited by `z-controller`)**: **Accent is rationed: primary + active states only.** `accent_line` (`#54B9F2` Dark / `#2F9BE8` Light) is reserved strictly for **(1)** the single primary action of a view (`PrimaryOutline`, e.g., `Rescan` in the main header), **(2)** selected/active states (active filter chip, active sort arrow, checked checkbox, focused input border, active scrollbar drag, expanded chevron, open reverse-dependency trigger/overlay), and **(3)** hover feedback on lower-tier buttons. Everything else is **neutral** (`SecondaryOutline`) or **quiet** (`SubtleOutline`) at rest so the single primary action reads unmistakably.
+
 ### 6.1 Crisp Outline Geometry & Padding
-- **Perimeter ring rendering**: Controls use pixel-snapped `RADIUS_CONTROL = 6.0px` geometry via `paint_crisp_bordered_box` / `paint_crisp_ring_mesh` (`1.0px` stroke inset normalized by `pixels_per_point`). When `fill == Color32::TRANSPARENT`, ONLY the unbroken `1px` perimeter mesh is drawn — avoiding solid-fill quad artifacts across 96 DPI and HiDPI scales.
-- **Horizontal padding**: `SPACE_12` (`12px`) for standard controls (`min_size.y > 22.0`); `SPACE_8` (`8px`) for compact table/inline action buttons (`min_size.y <= 22.0`, e.g., row cross-reference triggers).
+- **Perimeter ring rendering**: Controls use pixel-snapped `RADIUS_CONTROL = 6.0px` geometry via `paint_crisp_bordered_box` / `paint_crisp_ring_mesh` (`1.0px` stroke inset normalized by `pixels_per_point`). When `border_color == Color32::TRANSPARENT` (`SubtleOutline` / row-level actions), NO perimeter ring mesh is drawn at rest or on hover — avoiding repeating bordered rectangles down stacked rows. When `border_color` is opaque and `fill == Color32::TRANSPARENT`, ONLY the unbroken `1px` perimeter mesh is drawn cleanly across 96 DPI and HiDPI scales.
+- **Horizontal padding**: `SPACE_12` (`12px`) for standard controls (`min_size.y > 22.0`); `SPACE_8` (`8px`) for compact table/inline action buttons (`min_size.y <= 22.0`, e.g., `Locate`, `Web search`, `used by N apps >`).
 
 ### 6.2 Outline Button Variants & Interactive States
 
 | Variant / State | Background Fill | `1px` Outline Stroke | Text / Glyph Foreground | Typical Use |
 |---|---|---|---|---|
-| **`PrimaryOutline`** (rest) | `pill_blue_fill` (`#121C28` / `#EBF6FF`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | Primary header/panel CTA (`Rescan`, `Continue`, `Apply`) |
-| **`SecondaryOutline`** (rest) | `TRANSPARENT` | `lerp(border, accent_line, 0.72)` | `accent_line` (`#54B9F2` / `#2F9BE8`) | Navigation, view toggles, secondary actions (`Settings`, `Back to Apps`, `ThemeToggle`, `Add exclusion`, `used by N apps >`) |
-| **`SubtleOutline`** (rest) | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `muted` (`#9A9AB0` / `#5F7186`) | Dismissive, clear, or low-priority utility actions (`Clear`, `Remove`, overlay `Close` / `All`) |
-| **Hovered** (any enabled variant) | `widget_hover` (`#1F1F31` / `#E9F2FA`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `text` (`#EDEDF2` / `#1C2733`) | Pointer hover across all enabled buttons |
-| **Pressed** (`is_pointer_button_down_on`) | `widget_active` (`#182230` / `#DCEBF8`) | `LOGO_PINK` (`#F7A8D8`) | `text` (`#EDEDF2` / `#1C2733`) | Active pointer press feedback (universal WT press border) |
-| **Active-Highlight** (latched toggle) | `pill_red_fill` (`#2C121E` / `#FDE8ED`) | `LOGO_PINK` (`#F7A8D8`) | `text` (`#EDEDF2` / `#1C2733`) | Latched warning/record/toggle state |
-| **Disabled** | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `muted` (`#9A9AB0` / `#5F7186`) | Unavailable action (inert `Sense::hover`) |
+| **`PrimaryOutline`** (rest) | `pill_blue_fill` (`#121C28` / `#EBF6FF`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | **Single** primary CTA of a view (`Rescan` only in main view) |
+| **`SecondaryOutline`** (rest) | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `text` (`#EDEDF2` / `#1C2733`) | **Neutral** view/utility/overlay/card buttons (`Settings`, `Back to Apps`, `ThemeToggle`, overlay `All` / `Close`, `Add exclusion`) |
+| **`SubtleOutline` / Row-Level** (rest) | `TRANSPARENT` | `TRANSPARENT` (no border) | `muted` (`#9A9AB0` / `#5F7186`) | **Quiet** repeated row actions & inline resets (`Locate`, `Web search`, `used by N apps >`, `Remove`, `Clear`) — stacked rows read as one quiet text column |
+| **Hovered** (`PrimaryOutline` / `SecondaryOutline`) | `widget_hover` (`#1F1F31` / `#E9F2FA`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | Hover feedback promotes border & label/glyph to accent |
+| **Hovered** (`SubtleOutline` / Row-Level) | `widget_hover` (`#1F1F31` / `#E9F2FA`) | `TRANSPARENT` (no border) | `accent_line` (`#54B9F2` / `#2F9BE8`) | Muted surface fill (`4px`/`6px` pill) + accent label with zero border box |
+| **Pressed** (`is_pointer_button_down_on`) | `widget_active` (`#182230` / `#DCEBF8`) | `LOGO_PINK` (`#F7A8D8`; `TRANSPARENT` on `SubtleOutline`) | `text` (`#EDEDF2` / `#1C2733`) | Active pointer press feedback |
+| **Active-Highlight** (open/selected trigger) | `pill_blue_fill` (`#121C28` / `#EBF6FF`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | Open/latched cross-reference trigger (e.g., active `used by N apps >`) |
+| **Disabled** (`!enabled`) | `TRANSPARENT` | `border` (`TRANSPARENT` on `SubtleOutline`) | `muted` (`lerp(bg, muted, 0.55)` on `SubtleOutline`) | Unavailable action (`Scanning...`, missing-on-disk `Locate` with zero box stroke) |
 
 ### 6.3 Shared Header & Form Controls
-- **`ThemeToggle` Icon Button**: Square `28x28 px` (`HEADER_CONTROL_H`) `6.0px` `SecondaryOutline` container sharing exact `Hovered`/`Pressed` rules above.
-  - Dark mode draws an 8-ray sun glyph in `accent_line` (`text` on hover/press).
-  - Light mode draws a crescent moon in `accent_line` (`r = 5.3`) punched cleanly by an offset cutout circle (`r = 4.4`) painted in `bg` when rest/transparent, or the active hover/press `fill` during interaction.
+- **`ThemeToggle` Icon Button**: Square `28x28 px` (`HEADER_CONTROL_H`) `6.0px` `SecondaryOutline` container sharing the exact `SecondaryOutline` Neutral-rest / Accent-hover / Pink-press states above.
+  - Dark mode draws an 8-ray sun glyph in `text` at rest (`accent_line` on hover, `text` on press).
+  - Light mode draws a crescent moon in `text` at rest (`accent_line` on hover, `text` on press; `r = 5.3`), punched cleanly by an offset cutout circle (`r = 4.4`) painted in `bg` when rest/transparent, or the active hover/press `fill` during interaction.
 - **Text Inputs**: Recessed `RADIUS_CONTROL = 6.0px` frame filled with `input_bg` (or `header_input_bg` `#FFFFFF` when sitting directly on `#EEF4FA` Light header canvas), `1px` `border` (`accent_line` while focused), `12.0pt` `text` value, `12.0pt` `hint_text` visible **only** when unfocused and empty.
 - **Checkboxes**: `16x16 px` `RADIUS_PILL = 4.0px` box (`pill_blue_fill` + `accent_line` + `1.75pt` `accent_line` check stroke when checked; `widget_hover` + `accent_line` hovered; `input_bg` + `border` unchecked).
 - **Scrollbars**: Non-floating `6.0px` vertical thumb (`scrollbar_thumb` -> `scrollbar_thumb_hover` -> `accent_line`), `handle_min_length = 24.0`, `SPACE_8` (`8px`) inner gutter (`bar_outer_margin = 0.0`).
@@ -177,7 +180,7 @@ Before accepting screenshots of any WT application, verify **`FC1`–`FC9`**:
 - **FC3 (State-Signal Gradient Rim Only)**: Diagonal gradient rims (`#54B9F2 -> #D8A6FF -> #F7A8D8`) appear strictly on active/expanded containers; zero collapsed containers or non-status pills use solid pastel fills.
 - **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, full-pill (`0.5 * h`) status badges, and `0px` hairline ledger rows.
 - **FC5 (Saturated Status Discipline)**: Saturated `#28D66C` / `#F04458` (`#0FA84F` / `#E02444` Light) marks appear strictly on live status dots, threshold/battery alerts, signed deltas, safety locks, and zone marks — while metadata, proportions, and qualifiers stay calm pastel/neutral.
-- **FC6 (Outline Button Hierarchy & Crisp `1px` Rings)**: `3x` cropped header/panel buttons show unbroken `1px` rings across Dark and Light modes, clear `PrimaryOutline` / `SecondaryOutline` / `SubtleOutline` hierarchy, and sharp moon/sun icon contrast.
+- **FC6 (Outline Button Hierarchy & Accent Rationing)**: `Rescan` (`PrimaryOutline`) is the sole accent-outlined button at rest in the header; `ThemeToggle` & `Settings` (`SecondaryOutline`) render neutral `border` + `text` at rest (accent only on hover) with sharp unbroken `1px` rings and clean moon/sun contrast; row-level `SubtleOutline` actions (`Locate`, `Web search`, `used by N apps >`) stay borderless and `muted` at rest (`widget_hover` + `accent_line` text on hover).
 - **FC7 (`>= 10.5pt` Floor)**: All visible labels, badges, captions, and tooltips meet or exceed `10.5pt`.
 - **FC8 (Dual-Mode Surface & Input Separation)**: Both Dark (`#0A0A10` / `#10101A` / `#14141F`) and Light (`#EEF4FA` / `#F4F8FC` / `#FFFFFF`) preserve distinct surface tiers and recessed `input_bg` wells.
 - **FC9 (Content-Hugging & Top-Left Sparse States)**: Empty or sparse panels align top-left cleanly without floating centred whitespace or orphaned headers.
@@ -205,10 +208,10 @@ Each section below documents only what is unique to an individual WT application
   - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Category · Growth delta · Total size`), clicking `App name`, `Publisher`, `Category`, `Growth delta`, or `Total size` sorts (`Size` desc default).
   - Fixed `18x18 px` extracted Windows app icon (or consistent neutral folder-tile glyph) keeping column x-positions fixed across rows.
   - `Total size` embeds a quiet `<= 2px` (`PROP_BAR_W = 76.0`, `PROP_BAR_H = 2.0`) proportional bar relative to the largest unfiltered app and exposes exact bytes + `%` share on hover. Missing growth baselines display muted `"new"`.
-  - Expanding an app row converts it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`§5`), suppressing the row hairline above it, showing its `Category` + rule basis (plus a `used by N apps >` pill when referenced as a dependency), and aligning two sub-tables cleanly to the main `Total size` right edge:
+  - Expanding an app row converts it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`§5`), suppressing the row hairline above it, showing its `Category` + rule basis (plus a quiet `SubtleOutline` `used by N apps >` trigger when referenced as a dependency), and aligning two sub-tables cleanly to the main `Total size` right edge:
     - `Locations (N)`: `Zone · Path · Basis · Size` (`● GREEN` / `● RED` full-pill zone badges, `BODY` quiet structural pill, `ProgramData (Machine-shared)` lavender pill, segment-boundary `"…"` `Basis` with hover tooltip).
-    - `Dependencies`: `Dependency name · Kind · Confidence · Used by · Own size` (`proven` / `inferred` / `shared` / `missing` pills, `SecondaryOutline` `used by N apps >` overlay buttons, segment-boundary `basis` underneath).
-- **Collapsible & Resizable Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with a top `6px` drag-resize handle (`156px .. 50%` viewport height), a `"Pinned storage ledger"` collapse chevron folding to a single inline summary line (`Win/sys · Your files · Shared caches · Unattributed` + `● diff 0 B`), and semantic `2px` colour ticks (`muted`, `muted`, `STATUS_GREEN`, muted neutral) right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert pill if `diff != 0`), while the main app list paints a soft `22px` bottom gradient fade above the footer when scrollable content overflows. Expanding **Unattributed** appends two compact `18px` `RADIUS_PILL` (`4.0px`) `SecondaryOutline` helper buttons (`Locate` and `Web search`) immediately left of the aligned size column (`Locate` is disabled with `"no longer on disk"` hover text if missing on disk; `Web search` previews the exact quoted query on hover and opens the default browser via `ShellExecuteW` without making direct network requests; attributed app `Locations` carry no action buttons).
+    - `Dependencies`: `Dependency name · Kind · Confidence · Used by · Own size` (`proven` / `inferred` / `shared` / `missing` pills, quiet borderless `SubtleOutline` `used by N apps >` overlay triggers, segment-boundary `basis` underneath).
+- **Collapsible & Resizable Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with a top `6px` drag-resize handle (`156px .. 50%` viewport height), a `"Pinned storage ledger"` collapse chevron folding to a single inline summary line (`Win/sys · Your files · Shared caches · Unattributed` + `● diff 0 B`), and semantic `2px` colour ticks (`muted`, `muted`, `STATUS_GREEN`, muted neutral) right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert pill if `diff != 0`), while the main app list paints a soft `22px` bottom gradient fade above the footer when scrollable content overflows. Expanding **Unattributed** appends two compact `18px` `RADIUS_PILL` (`4.0px`) `SubtleOutline` row helper actions (`Locate` and `Web search` — borderless `muted` at rest, `widget_hover` fill + `accent_line` text on hover) immediately left of the aligned size column (`Locate` is disabled without a border with `"no longer on disk"` hover text if missing on disk; `Web search` previews the exact quoted query on hover and opens the default browser via `ShellExecuteW` without making direct network requests; attributed app `Locations` carry no action buttons).
 - **`y-storage` Domain Critique Checks (`YS1`–`YS3`)**:
   - **YS1 (Shared Size Column Alignment)**: Sticky header `Total size`, main row totals, expanded `Locations`/`Dependencies` size columns, and pinned summary totals share one exact right vertical edge (accounting for the `14px` `6px + SPACE_8` scrollbar gutter).
   - **YS2 (Drive Headline Dominance)**: Drive free space (`14.5pt Consolas Regular`) visibly anchors the top strip above app rows (`13.0pt`).

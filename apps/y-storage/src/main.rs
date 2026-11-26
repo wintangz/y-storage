@@ -309,10 +309,12 @@ fn render_screenshot_frame(
     }
 
     let hover_size_mode = view == "hover-size";
-    let hover_web_search_mode = view == "unattributed-hover-query";
+    let hover_web_search_tooltip = view == "unattributed-hover-query";
+    let hover_web_search_btn = view == "unattributed-hover-btn";
+    let hover_web_search_mode = hover_web_search_tooltip || hover_web_search_btn;
     let hover_mode = hover_size_mode || hover_web_search_mode;
     match view {
-        "unattributed-expanded" | "unattributed-hover-query" => {
+        "unattributed-expanded" | "unattributed-hover-query" | "unattributed-hover-btn" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;
             ui_state.expand_unattributed = true;
@@ -387,10 +389,16 @@ fn render_screenshot_frame(
         ThemeMode::Light => 0x00EE_F4FA,
     };
 
-    let steps = if hover_mode { 4 } else { 3 };
+    let steps = if hover_size_mode || hover_web_search_tooltip {
+        4
+    } else if hover_web_search_btn {
+        3
+    } else {
+        3
+    };
     for step in 0..steps {
         let mut events = Vec::new();
-        let time_s = if hover_mode {
+        let time_s = if hover_size_mode || hover_web_search_tooltip {
             match step {
                 0 => 0.0,
                 1 => 0.1,
