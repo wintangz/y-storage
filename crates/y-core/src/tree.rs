@@ -49,6 +49,11 @@ fn is_container_dir(path: &str, apps: &[InstalledApp], shell_folders: &[String])
         "\\appdata\\roaming\\microsoft",
         "\\appdata\\locallow\\microsoft",
         "\\appdata\\local\\google",
+        "\\appdata\\roaming\\google",
+        "\\appdata\\local\\jetbrains",
+        "\\appdata\\roaming\\jetbrains",
+        "\\appdata\\locallow\\colossal order",
+        "\\appdata\\local\\microsoft\\windows",
         "\\appdata\\local\\nvidia",
         "\\appdata\\local\\nvidia corporation",
         "\\appdata\\local\\amd",
@@ -83,9 +88,12 @@ fn is_container_dir(path: &str, apps: &[InstalledApp], shell_folders: &[String])
         return true;
     }
 
-    // C:\Users\<Username> (3 path segments: C: , Users , <User>)
+    // C:\Users\<Username> (3 path segments) and C:\Users\<Username>\Microsoft (4 segments: e.g. Power BI Desktop Store App)
     let parts: Vec<&str> = pk.trim_end_matches('\\').split('\\').collect();
     if parts.len() == 3 && parts[1] == "users" {
+        return true;
+    }
+    if parts.len() == 4 && parts[1] == "users" && parts[3] == "microsoft" {
         return true;
     }
 
@@ -158,8 +166,9 @@ pub fn decompose_scanned_tree(
         if is_container_dir(&node.path, apps, shell_folders) && !node.children.is_empty() {
             if node.direct_file_bytes > 0 {
                 let parts: Vec<&str> = pk.trim_end_matches('\\').split('\\').collect();
-                let is_user_profile_root = parts.len() == 3 && parts[1] == "users";
-                let kind = if is_user_profile_root {
+                let is_registry_hive_container = (parts.len() == 3 && parts[1] == "users")
+                    || pk.ends_with("\\appdata\\local\\microsoft\\windows");
+                let kind = if is_registry_hive_container {
                     ScannedUnitKind::RegistryUserHive
                 } else {
                     ScannedUnitKind::Regular

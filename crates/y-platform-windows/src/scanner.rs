@@ -269,7 +269,7 @@ fn should_retain_children(path_lower: &str, depth: usize, shell_keys: &HashSet<S
     if shell_keys.contains(path_lower) {
         return false;
     }
-    depth <= 5
+    depth <= 5 || (depth == 6 && path_lower.ends_with("\\appdata\\local\\microsoft\\windows"))
 }
 
 fn scan_node_recursive(

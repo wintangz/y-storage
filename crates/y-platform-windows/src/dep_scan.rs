@@ -246,8 +246,28 @@ fn collect_app_evidence(
     ev
 }
 
+fn append_warning_log(unix_ts: u64, warn_msg: &str) {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let log_dir = base.join("y-storage");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("y-storage.log");
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{unix_ts}] WARN: {warn_msg}");
+    }
+}
+
 pub fn enrich_report_with_dependencies(report: &mut ScanReport) {
-    let catalog = DependencyCatalog::load_from_disk_or_embedded();
+    let loaded = DependencyCatalog::load_from_current_exe();
+    report.catalog_source = loaded.source_label;
+    if let Some(warn) = loaded.warning {
+        eprintln!("WARN [y-storage]: {warn}");
+        append_warning_log(report.scan_timestamp_unix, &warn);
+        report.warnings.push(warn);
+    }
+    let catalog = loaded.catalog;
     let services = enumerate_windows_services();
     let target_statuses =
         resolve_catalog_targets(&catalog, &report.apps, &services, |p| Path::new(p).exists());

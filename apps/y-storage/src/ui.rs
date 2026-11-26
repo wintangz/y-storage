@@ -488,6 +488,16 @@ pub fn draw_app_ui(
                     }
                 });
             }
+            if let Some(rep) = report {
+                for w in &rep.warnings {
+                    ui.add_space(SPACE_XS);
+                    ui.label(
+                        RichText::new(format!("Warning: {w}"))
+                            .size(11.5)
+                            .color(STATUS_RED),
+                    );
+                }
+            }
         });
 
     match ui_state.active_view {
@@ -1121,6 +1131,15 @@ fn draw_dependencies_view(
         return;
     };
 
+    if !rep.catalog_source.is_empty() {
+        ui.label(
+            RichText::new(format!("Dependency catalog source: {}", rep.catalog_source))
+                .size(11.0)
+                .color(pal.muted),
+        );
+        ui.add_space(SPACE_XS);
+    }
+
     let q = ui_state.dep_search_query.trim().to_ascii_lowercase();
     egui::ScrollArea::vertical()
         .id_salt("reverse_deps_scroll")
@@ -1494,6 +1513,8 @@ mod tests {
             }],
             unattributed_total_bytes: 5_000,
             reverse_dependencies: vec![],
+            catalog_source: "embedded".into(),
+            warnings: vec![],
         };
 
         let ctx = egui::Context::default();

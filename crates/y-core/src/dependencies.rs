@@ -13,6 +13,7 @@ pub const EMBEDDED_DEPENDENCY_CATALOG: &str =
     include_str!("../../../data/dependency_catalog.toml");
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogTarget {
     pub id: String,
     pub name: String,
@@ -29,18 +30,21 @@ pub struct CatalogTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogDllRule {
     pub target_id: String,
     pub dlls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogFingerprintRule {
     pub target_id: String,
     pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogAppRule {
     #[serde(default)]
     pub app_matches: Vec<String>,
@@ -53,6 +57,7 @@ pub struct CatalogAppRule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DependencyCatalog {
     #[serde(default)]
     pub targets: Vec<CatalogTarget>,
@@ -64,23 +69,97 @@ pub struct DependencyCatalog {
     pub app_rules: Vec<CatalogAppRule>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CatalogSourceKind {
+    Embedded,
+    ExternalOverride,
+    EmbeddedFallbackAfterError,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogLoadResult {
+    pub catalog: DependencyCatalog,
+    pub source_kind: CatalogSourceKind,
+    pub source_label: String,
+    pub override_path: Option<std::path::PathBuf>,
+    pub warning: Option<String>,
+}
+
 impl DependencyCatalog {
-    pub fn load_from_disk_or_embedded() -> Self {
-        let mut candidates = vec![Path::new("data").join("dependency_catalog.toml")];
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.insert(0, dir.join("data").join("dependency_catalog.toml"));
-            }
+    /// Parses and validates TOML text for the dependency catalog.
+    pub fn parse_and_validate(raw: &str) -> Result<Self, String> {
+        let cat = toml::from_str::<Self>(raw).map_err(|e| format!("invalid TOML schema: {e}"))?;
+        if cat.targets.is_empty() {
+            return Err("catalog defines zero [[targets]]".to_string());
         }
-        for path in candidates {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if let Ok(cat) = toml::from_str::<Self>(&raw) {
-                    return cat;
+        Ok(cat)
+    }
+
+    /// Loads the embedded catalog, or an optional valid override next to `exe_dir`.
+    pub fn load_for_exe_dir(exe_dir: Option<&Path>) -> CatalogLoadResult {
+        let embedded = Self::parse_and_validate(EMBEDDED_DEPENDENCY_CATALOG)
+            .expect("embedded data/dependency_catalog.toml must parse");
+
+        if let Some(dir) = exe_dir {
+            let candidates = [
+                dir.join("dependency_catalog.toml"),
+                dir.join("data").join("dependency_catalog.toml"),
+            ];
+            for cand in candidates {
+                if cand.exists() {
+                    match std::fs::read_to_string(&cand)
+                        .map_err(|e| format!("read error: {e}"))
+                        .and_then(|raw| Self::parse_and_validate(&raw))
+                    {
+                        Ok(cat) => {
+                            return CatalogLoadResult {
+                                catalog: cat,
+                                source_kind: CatalogSourceKind::ExternalOverride,
+                                source_label: format!("override: {}", cand.display()),
+                                override_path: Some(cand),
+                                warning: None,
+                            };
+                        }
+                        Err(err) => {
+                            let warn_msg = format!(
+                                "Failed to load dependency catalog override '{}': {}; falling back to embedded catalog.",
+                                cand.display(),
+                                err
+                            );
+                            return CatalogLoadResult {
+                                catalog: embedded,
+                                source_kind: CatalogSourceKind::EmbeddedFallbackAfterError,
+                                source_label: format!(
+                                    "embedded (fallback after invalid override: {})",
+                                    cand.display()
+                                ),
+                                override_path: Some(cand),
+                                warning: Some(warn_msg),
+                            };
+                        }
+                    }
                 }
             }
         }
-        toml::from_str::<Self>(EMBEDDED_DEPENDENCY_CATALOG)
-            .expect("embedded data/dependency_catalog.toml must parse")
+
+        CatalogLoadResult {
+            catalog: embedded,
+            source_kind: CatalogSourceKind::Embedded,
+            source_label: "embedded".to_string(),
+            override_path: None,
+            warning: None,
+        }
+    }
+
+    pub fn load_from_current_exe() -> CatalogLoadResult {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        Self::load_for_exe_dir(exe_dir.as_deref())
+    }
+
+    pub fn load_from_disk_or_embedded() -> Self {
+        Self::load_from_current_exe().catalog
     }
 }
 

@@ -312,6 +312,10 @@ pub struct ScanReport {
     pub unattributed_total_bytes: u64,
     #[serde(default)]
     pub reverse_dependencies: Vec<ReverseDependencyEntry>,
+    #[serde(default)]
+    pub catalog_source: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl ScanReport {

@@ -191,10 +191,15 @@ pub fn attribute_scan(
             continue;
         }
 
-        // 3. Token match (Package Cache GUID lookup + curated ecosystem rules).
-        if let Some((idx, is_install_override)) =
-            find_by_token(&mut buckets, &mut store_buckets, guid_to_app_name, &path_lower, &leaf_lower)
-        {
+        // 3. Token match (Package Cache GUID lookup, curated rules, versioned publisher products, and <X>Data rule).
+        if let Some((idx, is_install_override)) = find_by_token(
+            &mut buckets,
+            &mut store_buckets,
+            guid_to_app_name,
+            &path_lower,
+            &leaf,
+            &leaf_lower,
+        ) {
             let (zone, qual) =
                 classify_zone(&unit.path, is_install_override || unit.is_direct_install_root);
             let nt = buckets[idx].app.no_touch;
@@ -335,6 +340,58 @@ pub fn attribute_scan(
             continue;
         }
 
+        if path_lower.ends_with("\\appdata\\local\\ms-playwright") {
+            let idx = ensure_synthetic_app(
+                &mut buckets,
+                &mut store_buckets,
+                "standalone:playwright",
+                "Playwright",
+                "Standalone toolchain · regenerable dev-tool cache (downloaded browser binaries)",
+                None,
+                false,
+            );
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(ZoneKind::Green),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::StandaloneFolder),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::StandaloneFolder,
+            );
+            continue;
+        }
+
+        if path_lower.ends_with("\\appdata\\local\\gitkrakencli") {
+            let idx = ensure_synthetic_app(
+                &mut buckets,
+                &mut store_buckets,
+                "standalone:gitkraken-cli",
+                "GitKraken CLI",
+                "Standalone CLI toolchain (gk.exe)",
+                None,
+                false,
+            );
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::StandaloneFolder),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::StandaloneFolder,
+            );
+            continue;
+        }
+
         // 6. Openly shown Unattributed.
         let (zone, _) = classify_zone(&unit.path, false);
         unattributed.push(UnattributedItem {
@@ -437,6 +494,8 @@ pub fn attribute_scan(
         unattributed,
         unattributed_total_bytes,
         reverse_dependencies: Vec::new(),
+        catalog_source: String::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -458,7 +517,7 @@ fn leaf_name(path: &str) -> String {
 }
 
 fn is_shared_green_cache(path_lower: &str) -> bool {
-    path_lower.ends_with("\\appdata\\local\\temp")
+    let basic = path_lower.ends_with("\\appdata\\local\\temp")
         || path_lower.contains("\\appdata\\local\\temp\\")
         || path_lower.ends_with("\\appdata\\locallow\\temp")
         || path_lower.contains("\\appdata\\locallow\\temp\\")
@@ -471,7 +530,28 @@ fn is_shared_green_cache(path_lower: &str) -> bool {
         || path_lower.ends_with("\\appdata\\local\\crashdumps")
         || path_lower.ends_with("\\appdata\\local\\squirreltemp")
         || path_lower.ends_with("\\appdata\\local\\cache")
-        || path_lower.ends_with("\\programdata\\epicinstallertemp")
+        || path_lower.ends_with("\\programdata\\epicinstallertemp");
+    if basic {
+        return true;
+    }
+
+    let win_caches = [
+        "\\appdata\\local\\microsoft\\windows\\webcache",
+        "\\appdata\\local\\microsoft\\windows\\explorer",
+        "\\appdata\\local\\microsoft\\windows\\inetcache",
+        "\\appdata\\local\\microsoft\\windows\\caches",
+        "\\appdata\\local\\microsoft\\windows\\actioncentercache",
+        "\\appdata\\local\\microsoft\\windows\\pricache",
+        "\\appdata\\local\\microsoft\\windows\\appcache",
+        "\\appdata\\local\\microsoft\\windows\\iecompatcache",
+        "\\appdata\\local\\microsoft\\windows\\iecompatuacache",
+        "\\appdata\\local\\microsoft\\windows\\ppbcompatcache",
+        "\\appdata\\local\\microsoft\\windows\\ppbcompatuacache",
+        "\\appdata\\local\\microsoft\\windows\\temporary internet files",
+    ];
+    win_caches
+        .iter()
+        .any(|sfx| path_lower.ends_with(sfx) || path_lower.contains(&format!("{sfx}\\")))
 }
 
 fn is_user_profile_dot_folder(path_lower: &str, leaf_lower: &str) -> bool {
@@ -503,7 +583,6 @@ fn is_unattributable_os_noise(path_lower: &str, leaf_lower: &str) -> bool {
         || path_lower.ends_with("\\appdata\\locallow\\temp")
         || path_lower.ends_with("\\appdata\\local\\d3dscache")
         || path_lower.ends_with("\\appdata\\local\\crashdumps")
-        || path_lower.ends_with("\\appdata\\local\\microsoft\\windows")
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\windows")
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\installer")
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\crypto")
@@ -611,6 +690,7 @@ fn find_by_token(
     store_buckets: &mut HashMap<String, usize>,
     guid_to_app_name: &HashMap<String, String>,
     path_lower: &str,
+    leaf: &str,
     leaf_lower: &str,
 ) -> Option<(usize, bool)> {
     // 1. Package Cache {GUID} or known VS/SDK/EA/VC++ cache patterns.
@@ -868,6 +948,16 @@ fn find_by_token(
         (&["\\appdata\\roaming\\photocraft"], &["photocraft"], false),
         (&["\\appdata\\local\\mister download manager", "\\appdata\\roaming\\misterdownloadmanager"], &["mister download manager"], false),
         (&["\\appdata\\local\\theisle"], &["the isle"], false),
+        (
+            &[
+                "\\appdata\\roaming\\apple computer",
+                "\\appdata\\local\\apple computer",
+                "\\programdata\\apple computer",
+                "\\programdata\\apple",
+            ],
+            &["appleinc.itunes", "itunes", "appledevices"],
+            false,
+        ),
     ];
 
     for (path_needles, app_needles, is_body) in rules {
@@ -878,6 +968,129 @@ fn find_by_token(
             if let Some(idx) = find_app_matching(buckets, app_needles) {
                 return Some((idx, *is_body));
             }
+        }
+    }
+
+    // General rule: versioned per-product folder under a publisher folder (e.g. Local|Roaming\Google\AndroidStudio2024.2).
+    if let Some((idx, is_body)) =
+        match_versioned_publisher_product(buckets, store_buckets, path_lower, leaf)
+    {
+        return Some((idx, is_body));
+    }
+
+    // General rule: AppData\Roaming|Local\<X>Data attributes to app X when X is installed or a curated known app.
+    if let Some((idx, is_body)) =
+        match_xdata_folder(buckets, store_buckets, path_lower, leaf, leaf_lower)
+    {
+        return Some((idx, is_body));
+    }
+
+    // Verified known-app fallbacks (data folders of standalone or un-registered apps resolved cleanly).
+    let known_app_fallbacks: &[(&[&str], &[&str], &str, &str, &str, bool)] = &[
+        (
+            &["\\appdata\\roaming\\tabnine", "\\appdata\\local\\tabnine"],
+            &["tabnine"],
+            "app:tabnine",
+            "TabNine",
+            "Tabnine",
+            false,
+        ),
+        (
+            &[
+                "\\appdata\\local\\zalo",
+                "\\appdata\\local\\zalopc",
+                "\\appdata\\roaming\\zalopc",
+            ],
+            &["zalo"],
+            "app:zalo",
+            "Zalo",
+            "VNG Corp.",
+            false,
+        ),
+        (
+            &[
+                "\\appdata\\local\\jellyfin",
+                "\\programdata\\jellyfin",
+                "\\appdata\\local\\jellyfinmediaplayer",
+            ],
+            &["jellyfin"],
+            "app:jellyfin",
+            "Jellyfin",
+            "Jellyfin",
+            false,
+        ),
+        (
+            &[
+                "\\appdata\\roaming\\postman",
+                "\\appdata\\local\\postman",
+                "\\appdata\\roaming\\postmanagent",
+            ],
+            &["postman"],
+            "app:postman",
+            "Postman",
+            "Postman, Inc.",
+            false,
+        ),
+        (
+            &["\\microsoft\\power bi desktop store app"],
+            &["power bi desktop"],
+            "app:power-bi-desktop",
+            "Microsoft Power BI Desktop",
+            "Microsoft Corporation",
+            false,
+        ),
+        (
+            &[
+                "\\common files\\adobe",
+                "\\appdata\\roaming\\adobe",
+                "\\appdata\\local\\adobe",
+                "\\appdata\\locallow\\adobe",
+                "\\appdata\\roaming\\com.adobe.dunamis",
+            ],
+            &["adobe creative cloud", "adobe acrobat"],
+            "app:adobe-creative-cloud",
+            "Adobe Creative Cloud",
+            "Adobe Inc.",
+            false,
+        ),
+        (
+            &["\\colossal order\\cities skylines ii"],
+            &["cities: skylines ii", "cities skylines ii"],
+            "app:cities-skylines-ii",
+            "Cities: Skylines II",
+            "Colossal Order",
+            false,
+        ),
+        (
+            &["\\appdata\\roaming\\riot-client-ux", "\\appdata\\local\\riot games"],
+            &["riot client"],
+            "app:riot-client",
+            "Riot Client",
+            "Riot Games, Inc.",
+            false,
+        ),
+    ];
+
+    for (path_needles, app_needles, synth_key, display_name, publisher, is_body) in
+        known_app_fallbacks
+    {
+        if path_needles
+            .iter()
+            .any(|needle| path_matches_token(path_lower, leaf_lower, needle))
+        {
+            if let Some(idx) = find_app_matching(buckets, app_needles) {
+                return Some((idx, *is_body));
+            }
+            let idx = ensure_synthetic_app(
+                buckets,
+                store_buckets,
+                synth_key,
+                display_name,
+                publisher,
+                None,
+                false,
+            );
+            return Some((idx, *is_body));
         }
     }
 
@@ -993,6 +1206,183 @@ fn find_by_token(
         return Some((idx, true));
     }
 
+    None
+}
+
+fn publisher_display_for_folder(pub_lower: &str) -> Option<&'static str> {
+    match pub_lower {
+        "google" => Some("Google LLC"),
+        "jetbrains" => Some("JetBrains s.r.o."),
+        "autodesk" => Some("Autodesk"),
+        "adobe" => Some("Adobe Inc."),
+        _ => None,
+    }
+}
+
+fn split_camel_case(stem: &str) -> String {
+    let mut out = String::with_capacity(stem.len() + 4);
+    let mut prev: Option<char> = None;
+    for ch in stem.chars() {
+        if let Some(p) = prev {
+            if p.is_ascii_lowercase() && ch.is_ascii_uppercase() {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+        prev = Some(ch);
+    }
+    out
+}
+
+fn canonicalize_product_stem(stem: &str) -> String {
+    let compact = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match compact.as_str() {
+        "androidstudio" => "Android Studio".to_string(),
+        "intellijidea" | "ideaic" | "ideau" => "IntelliJ IDEA".to_string(),
+        "pycharm" | "pycharmce" => "PyCharm".to_string(),
+        "webstorm" => "WebStorm".to_string(),
+        "goland" => "GoLand".to_string(),
+        "rustrover" => "RustRover".to_string(),
+        "clion" => "CLion".to_string(),
+        "phpstorm" => "PhpStorm".to_string(),
+        "datagrip" => "DataGrip".to_string(),
+        "rider" => "Rider".to_string(),
+        _ => split_camel_case(stem),
+    }
+}
+
+fn parse_versioned_product_name(leaf: &str) -> Option<String> {
+    let bytes = leaf.as_bytes();
+    for i in 0..bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            continue;
+        }
+        let suffix = &leaf[i..];
+        let valid_ver_chars = suffix
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+        let has_version_shape = suffix.len() >= 2 && (suffix.contains('.') || suffix.chars().filter(|c| c.is_ascii_digit()).count() >= 2);
+        if valid_ver_chars && has_version_shape {
+            let mut stem_end = i;
+            let trimmed_sep = leaf[..stem_end].trim_end_matches([' ', '-', '_']);
+            stem_end = trimmed_sep.len();
+            if stem_end >= 2 {
+                let last = leaf.as_bytes()[stem_end - 1];
+                let prev = leaf.as_bytes()[stem_end - 2];
+                if matches!(last, b'v' | b'V') && !prev.is_ascii_alphabetic() {
+                    stem_end -= 1;
+                }
+            }
+            let stem = leaf[..stem_end].trim_end_matches([' ', '-', '_']);
+            let alpha_count = stem.chars().filter(|c| c.is_ascii_alphabetic()).count();
+            if alpha_count >= 4 {
+                return Some(canonicalize_product_stem(stem));
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn match_versioned_publisher_product(
+    buckets: &mut Vec<AppBucket>,
+    store_buckets: &mut HashMap<String, usize>,
+    path_lower: &str,
+    leaf: &str,
+) -> Option<(usize, bool)> {
+    let parts: Vec<&str> = path_lower.trim_end_matches('\\').split('\\').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let tier = parts[parts.len() - 3];
+    let pub_dir = parts[parts.len() - 2];
+    if !matches!(tier, "local" | "roaming" | "locallow") {
+        return None;
+    }
+    if parts.len() < 5 || parts[parts.len() - 4] != "appdata" {
+        return None;
+    }
+    let pub_display = publisher_display_for_folder(pub_dir)?;
+    let product_name = parse_versioned_product_name(leaf)?;
+    let product_tok = normalize_app_token(&product_name);
+    if product_tok.is_empty() {
+        return None;
+    }
+    if let Some(idx) = buckets
+        .iter()
+        .position(|b| normalize_app_token(&b.app.display_name) == product_tok)
+    {
+        return Some((idx, false));
+    }
+    let idx = ensure_synthetic_app(
+        buckets,
+        store_buckets,
+        &format!("product:{product_tok}"),
+        &product_name,
+        pub_display,
+        None,
+        false,
+    );
+    Some((idx, false))
+}
+
+fn lookup_known_xdata_app(stem_tok: &str) -> Option<(&'static str, &'static str)> {
+    match stem_tok {
+        "zalo" => Some(("Zalo", "VNG Corp.")),
+        "tabnine" => Some(("TabNine", "Tabnine")),
+        "jellyfin" => Some(("Jellyfin", "Jellyfin")),
+        "postman" => Some(("Postman", "Postman, Inc.")),
+        "riot client" => Some(("Riot Client", "Riot Games, Inc.")),
+        _ => None,
+    }
+}
+
+fn match_xdata_folder(
+    buckets: &mut Vec<AppBucket>,
+    store_buckets: &mut HashMap<String, usize>,
+    path_lower: &str,
+    leaf: &str,
+    leaf_lower: &str,
+) -> Option<(usize, bool)> {
+    let parts: Vec<&str> = path_lower.trim_end_matches('\\').split('\\').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    if parts[parts.len() - 3] != "appdata"
+        || !matches!(parts[parts.len() - 2], "roaming" | "local")
+    {
+        return None;
+    }
+    if !leaf_lower.ends_with("data")
+        || leaf.len() < 7
+        || matches!(leaf_lower, "appdata" | "application data" | "programdata")
+    {
+        return None;
+    }
+    let x_stem = leaf[..leaf.len() - 4].trim_end_matches(['-', '_', ' ']);
+    if x_stem.len() < 3 {
+        return None;
+    }
+    if let Some(idx) = find_by_exact_name(buckets, x_stem) {
+        return Some((idx, false));
+    }
+    let stem_tok = normalize_app_token(x_stem);
+    if let Some((display_name, publisher)) = lookup_known_xdata_app(&stem_tok) {
+        let idx = ensure_synthetic_app(
+            buckets,
+            store_buckets,
+            &format!("app:{stem_tok}"),
+            display_name,
+            publisher,
+            None,
+            false,
+        );
+        return Some((idx, false));
+    }
     None
 }
 
