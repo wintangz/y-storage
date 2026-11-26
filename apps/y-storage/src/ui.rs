@@ -62,8 +62,10 @@ pub struct ThemePalette {
     pub border: Color32,
     pub text: Color32,
     pub muted: Color32,
+    pub hint_text: Color32,
     pub widget: Color32,
     pub widget_hover: Color32,
+    pub widget_active: Color32,
     pub accent_line: Color32,
     pub lavender_text: Color32,
     pub status_green: Color32,
@@ -76,6 +78,8 @@ pub struct ThemePalette {
     pub pill_red_fill: Color32,
     pub proven_solid_fill: Color32,
     pub proven_solid_text: Color32,
+    pub scrollbar_thumb: Color32,
+    pub scrollbar_thumb_hover: Color32,
 }
 
 impl ThemePalette {
@@ -85,46 +89,54 @@ impl ThemePalette {
             ThemeMode::Dark => Self {
                 bg: Color32::from_rgb(10, 10, 16),        // #0A0A10
                 panel: Color32::from_rgb(20, 20, 31),     // #14141F
-                panel_alt: Color32::from_rgb(15, 15, 24), // #0F0F18
+                panel_alt: Color32::from_rgb(16, 16, 26), // #10101A (z-controller faint_bg)
                 border: Color32::from_rgb(38, 38, 58),    // #26263A
                 text: Color32::from_rgb(237, 237, 242),   // #EDEDF2
                 muted: Color32::from_rgb(154, 154, 176),  // #9A9AB0
-                widget: Color32::from_rgb(24, 24, 38),
-                widget_hover: Color32::from_rgb(33, 33, 52),
+                hint_text: Color32::from_rgb(86, 88, 110), // #56586E (distinct dim hint)
+                widget: Color32::from_rgb(24, 24, 38),    // #181826 (z-controller widget)
+                widget_hover: Color32::from_rgb(31, 31, 49), // #1F1F31 (z-controller widget_hover)
+                widget_active: Color32::from_rgb(24, 34, 48), // #182230 (z-controller widget_active)
                 accent_line: LOGO_BLUE,
                 lavender_text: LOGO_LAVENDER,
                 status_green: Color32::from_rgb(40, 214, 108),  // #28D66C
                 status_red: Color32::from_rgb(240, 68, 88),     // #F04458
                 delta_grew: LOGO_PINK,
                 no_touch_outline: Color32::from_rgb(206, 92, 108),
-                pill_blue_fill: Color32::from_rgb(18, 30, 44),
+                pill_blue_fill: Color32::from_rgb(18, 28, 40),  // #121C28 (z-controller pill_blue_fill)
                 pill_green_fill: Color32::from_rgb(16, 38, 26),
                 pill_lav_fill: Color32::from_rgb(32, 24, 46),
                 pill_red_fill: Color32::from_rgb(46, 20, 26),
                 proven_solid_fill: LOGO_BLUE,
                 proven_solid_text: Color32::from_rgb(10, 10, 16),
+                scrollbar_thumb: Color32::from_rgb(46, 46, 70), // #2E2E46
+                scrollbar_thumb_hover: LOGO_BLUE,
             },
             ThemeMode::Light => Self {
                 bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA
                 panel: Color32::from_rgb(255, 255, 255),  // #FFFFFF
-                panel_alt: Color32::from_rgb(244, 248, 253),
-                border: Color32::from_rgb(212, 224, 238), // #D4E0EE
+                panel_alt: Color32::from_rgb(244, 248, 252), // #F4F8FC (z-controller faint_bg)
+                border: Color32::from_rgb(217, 228, 240), // #D9E4F0 (z-controller border)
                 text: Color32::from_rgb(28, 39, 51),      // #1C2733
                 muted: Color32::from_rgb(95, 113, 134),   // #5F7186
-                widget: Color32::from_rgb(244, 248, 252),
-                widget_hover: Color32::from_rgb(231, 241, 250),
+                hint_text: Color32::from_rgb(152, 166, 184), // #98A6B8 (distinct muted hint)
+                widget: Color32::from_rgb(245, 248, 252), // #F5F8FC (z-controller widget)
+                widget_hover: Color32::from_rgb(233, 242, 250), // #E9F2FA (z-controller widget_hover)
+                widget_active: Color32::from_rgb(220, 235, 248), // #DCEBF8 (z-controller widget_active)
                 accent_line: LOGO_BLUE_READABLE,
                 lavender_text: Color32::from_rgb(120, 62, 184),
                 status_green: Color32::from_rgb(20, 138, 68),
                 status_red: Color32::from_rgb(206, 40, 64),
                 delta_grew: Color32::from_rgb(196, 48, 88),
                 no_touch_outline: Color32::from_rgb(188, 64, 80),
-                pill_blue_fill: Color32::from_rgb(232, 245, 255),
+                pill_blue_fill: Color32::from_rgb(235, 246, 255), // #EBF6FF (z-controller pill_blue_fill)
                 pill_green_fill: Color32::from_rgb(230, 248, 237),
                 pill_lav_fill: Color32::from_rgb(243, 236, 255),
                 pill_red_fill: Color32::from_rgb(253, 234, 237),
                 proven_solid_fill: LOGO_BLUE_READABLE,
                 proven_solid_text: Color32::WHITE,
+                scrollbar_thumb: Color32::from_rgb(192, 208, 226), // #C0D0E2
+                scrollbar_thumb_hover: LOGO_BLUE_READABLE,
             },
         }
     }
@@ -198,41 +210,27 @@ pub fn format_exact_bytes(bytes: u64) -> String {
     format!("{formatted} bytes")
 }
 
-fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> (String, Color32, String) {
+fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> Option<(String, Color32, String)> {
     match delta {
-        GrowthDelta::NoBaseline => (
-            "—".to_string(),
-            pal.muted,
-            "First recorded scan (no prior baseline)".to_string(),
-        ),
-        GrowthDelta::New(0) => (
-            "NEW".to_string(),
-            pal.delta_grew,
-            "Newly detected since previous scan".to_string(),
-        ),
-        GrowthDelta::New(b) => (
+        GrowthDelta::NoBaseline | GrowthDelta::New(0) | GrowthDelta::Changed(0) => None,
+        GrowthDelta::New(b) => Some((
             format!("+{}", format_size_2dec(b)),
             pal.delta_grew,
             format!("New since previous scan (+{})", format_exact_bytes(b)),
-        ),
-        GrowthDelta::Changed(0) => (
-            "0 B".to_string(),
-            pal.muted,
-            "0 bytes change since previous scan".to_string(),
-        ),
-        GrowthDelta::Changed(d) if d > 0 => (
+        )),
+        GrowthDelta::Changed(d) if d > 0 => Some((
             format!("+{}", format_size_2dec(d as u64)),
             pal.delta_grew,
             format!("+{} since previous scan", format_exact_bytes(d as u64)),
-        ),
-        GrowthDelta::Changed(d) => (
+        )),
+        GrowthDelta::Changed(d) => Some((
             format!("-{}", format_size_2dec(d.unsigned_abs())),
             pal.status_green,
             format!(
                 "-{} since previous scan",
                 format_exact_bytes(d.unsigned_abs())
             ),
-        ),
+        )),
     }
 }
 
@@ -273,14 +271,19 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
     visuals.window_fill = pal.panel;
     visuals.extreme_bg_color = pal.bg;
     visuals.faint_bg_color = pal.panel_alt;
-    visuals.override_text_color = Some(pal.text);
+    visuals.code_bg_color = pal.bg;
+    // Never force override_text_color so TextEdit hints keep muted contrast while real text uses pal.text.
+    visuals.override_text_color = None;
+    visuals.window_rounding = Rounding::same(8.0);
+    visuals.menu_rounding = Rounding::same(6.0);
+    visuals.window_stroke = Stroke::new(1.0_f32, pal.border);
     visuals.window_shadow = egui::epaint::Shadow::NONE;
     visuals.popup_shadow = egui::epaint::Shadow::NONE;
 
     visuals.widgets.noninteractive.bg_fill = pal.panel;
     visuals.widgets.noninteractive.weak_bg_fill = pal.panel;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.muted);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
 
     visuals.widgets.inactive.bg_fill = pal.widget;
@@ -295,36 +298,307 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.hovered.rounding = Rounding::same(6.0);
 
-    visuals.widgets.active.bg_fill = pal.pill_blue_fill;
-    visuals.widgets.active.weak_bg_fill = pal.pill_blue_fill;
+    visuals.widgets.active.bg_fill = pal.widget_active;
+    visuals.widgets.active.weak_bg_fill = pal.widget_active;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, LOGO_PINK);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.active.rounding = Rounding::same(6.0);
 
+    visuals.widgets.open.bg_fill = pal.widget_hover;
+    visuals.widgets.open.weak_bg_fill = pal.widget_hover;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, pal.accent_line);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.open.rounding = Rounding::same(6.0);
+
     style.visuals = visuals;
     style.animation_time = 0.0;
     style.spacing.item_spacing = Vec2::new(SPACE_8, SPACE_4);
-    style.spacing.button_padding = Vec2::new(SPACE_8, SPACE_4);
+    style.spacing.button_padding = Vec2::new(SPACE_12, SPACE_4);
     style.spacing.scroll.floating = false;
-    style.spacing.scroll.bar_width = 8.0;
+    style.spacing.scroll.foreground_color = false;
+    style.spacing.scroll.bar_width = 6.0;
+    style.spacing.scroll.bar_inner_margin = SPACE_8;
+    style.spacing.scroll.bar_outer_margin = 0.0;
+    style.spacing.scroll.handle_min_length = 24.0;
     ctx.set_style(style);
 }
 
-fn paint_chip(ui: &mut egui::Ui, label: &str, style: ChipStyle) -> egui::Response {
-    egui::Frame::none()
-        .fill(style.fill)
-        .stroke(Stroke::new(1.0_f32, style.stroke))
-        .rounding(Rounding::same(4.0))
-        .inner_margin(Margin::symmetric(6.0, 2.0))
-        .show(ui, |ui| {
+#[inline]
+fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
+    let inv = if ppp > 0.0 { 1.0 / ppp } else { 1.0 };
+    let x0 = (rect.min.x * ppp).round() * inv;
+    let y0 = (rect.min.y * ppp).round() * inv;
+    let x1 = ((rect.max.x * ppp).round() * inv).max(x0 + 2.0 * inv);
+    let y1 = ((rect.max.y * ppp).round() * inv).max(y0 + 2.0 * inv);
+    Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
+}
+
+/// Paints an unbroken rounded rectangle border by layering pixel-snapped outer (border) and inner (fill) filled rects, eliminating 96-DPI horizontal stroke dropout in SoftwarePainter.
+fn paint_crisp_bordered_box(
+    painter: &egui::Painter,
+    rect: Rect,
+    rounding: f32,
+    fill: Color32,
+    border_color: Color32,
+    border_px: f32,
+    ppp: f32,
+) -> Rect {
+    let snapped = snap_rect_to_pixels(rect, ppp);
+    let inset = (border_px / ppp.max(0.5)).max(1.0 / ppp.max(0.5));
+    if border_color != Color32::TRANSPARENT {
+        painter.rect_filled(snapped, Rounding::same(rounding), border_color);
+    }
+    let inner = snapped.shrink(inset);
+    if inner.width() > 0.0 && inner.height() > 0.0 && fill != Color32::TRANSPARENT {
+        painter.rect_filled(
+            inner,
+            Rounding::same((rounding - inset).max(0.0)),
+            fill,
+        );
+    }
+    snapped
+}
+
+/// Container frame with a guaranteed continuous 1px outline at 96 DPI and high DPI.
+fn draw_crisp_frame<R>(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    border_color: Color32,
+    rounding: f32,
+    inner_margin: Margin,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let outer_slot = ui.painter().add(egui::Shape::Noop);
+    let inner_slot = ui.painter().add(egui::Shape::Noop);
+    let padded = Margin {
+        left: inner_margin.left + 1.0,
+        right: inner_margin.right + 1.0,
+        top: inner_margin.top + 1.0,
+        bottom: inner_margin.bottom + 1.0,
+    };
+    let res = egui::Frame::none()
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .inner_margin(padded)
+        .show(ui, add_contents);
+
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = snap_rect_to_pixels(res.response.rect, ppp);
+    let inset = 1.0 / ppp.max(0.5);
+    ui.painter().set(
+        outer_slot,
+        egui::Shape::rect_filled(snapped, Rounding::same(rounding), border_color),
+    );
+    let inner = snapped.shrink(inset);
+    if inner.width() > 0.0 && inner.height() > 0.0 {
+        ui.painter().set(
+            inner_slot,
+            egui::Shape::rect_filled(inner, Rounding::same((rounding - inset).max(0.0)), fill),
+        );
+    }
+    res
+}
+
+/// Renders a button whose states and continuous 1px rounded outline mirror z-controller across both themes.
+fn draw_z_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    min_size: Vec2,
+    font_size: f32,
+    rounding: f32,
+    enabled: bool,
+    active_highlight: bool,
+    pal: &ThemePalette,
+) -> egui::Response {
+    let font_id = FontId::new(font_size, FontFamily::Proportional);
+    let text_color = if !enabled {
+        pal.muted
+    } else if active_highlight {
+        pal.accent_line
+    } else {
+        pal.text
+    };
+    let h_pad = if min_size.y <= 22.0 { SPACE_8 } else { SPACE_12 };
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
+    let desired_w = (galley.size().x + h_pad * 2.0).max(min_size.x).round();
+    let desired_h = min_size.y.round();
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, desired_h), sense);
+
+    let (fill, border_col) = if !enabled {
+        (pal.panel_alt, pal.border)
+    } else if resp.is_pointer_button_down_on() {
+        (pal.widget_active, LOGO_PINK)
+    } else if resp.hovered() {
+        (pal.widget_hover, pal.accent_line)
+    } else if active_highlight {
+        (pal.pill_blue_fill, pal.accent_line)
+    } else {
+        (pal.widget, pal.border)
+    };
+
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
+    let text_pos = Pos2::new(
+        (snapped.center().x - galley.size().x * 0.5).round(),
+        (snapped.center().y - galley.size().y * 0.5).round(),
+    );
+    ui.painter().galley(text_pos, galley, text_color);
+    resp
+}
+
+/// Recessed input box with crisp 1px border, dim placeholder hint hidden on focus or non-empty input, and full-strength entered text.
+fn draw_crisp_text_input(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    text: &mut String,
+    width: f32,
+    hint: &str,
+    pal: &ThemePalette,
+) -> egui::Response {
+    let edit_id = ui.make_persistent_id(id_salt);
+    let has_focus = ui.ctx().memory(|m| m.has_focus(edit_id));
+    let border_col = if has_focus { pal.accent_line } else { pal.border };
+    let show_hint = !has_focus && text.is_empty();
+    let hint_rt = if show_hint {
+        RichText::new(hint).size(12.0).color(pal.hint_text)
+    } else {
+        RichText::new("")
+    };
+
+    let inner = draw_crisp_frame(
+        ui,
+        pal.bg,
+        border_col,
+        6.0,
+        Margin::symmetric(SPACE_8, 3.0),
+        |ui| {
+            ui.set_min_height(18.0);
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .id(edit_id)
+                    .frame(false)
+                    .desired_width((width - SPACE_16 - 2.0).max(80.0))
+                    .font(FontId::new(12.0, FontFamily::Proportional))
+                    .text_color(pal.text)
+                    .hint_text(hint_rt),
+            )
+        },
+    );
+    inner.inner
+}
+
+/// Crisp 1px-bordered toggle checkbox matching the z-controller palette.
+fn draw_crisp_checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    label: &str,
+    pal: &ThemePalette,
+) -> bool {
+    let mut toggled = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_8;
+        let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
+        let ppp = ui.ctx().pixels_per_point();
+        let fill = if *checked {
+            pal.pill_blue_fill
+        } else if resp.hovered() {
+            pal.widget_hover
+        } else {
+            pal.bg
+        };
+        let border_col = if *checked || resp.hovered() {
+            pal.accent_line
+        } else {
+            pal.border
+        };
+        let snapped = paint_crisp_bordered_box(ui.painter(), box_rect, 4.0, fill, border_col, 1.0, ppp);
+        if *checked {
+            let c = snapped.center();
+            let st = Stroke::new(1.75_f32, pal.accent_line);
+            ui.painter()
+                .line_segment([Pos2::new(c.x - 4.0, c.y + 0.5), Pos2::new(c.x - 1.0, c.y + 3.5)], st);
+            ui.painter()
+                .line_segment([Pos2::new(c.x - 1.0, c.y + 3.5), Pos2::new(c.x + 4.5, c.y - 3.0)], st);
+        }
+        let lbl_resp = ui.add(
+            egui::Label::new(RichText::new(label).size(12.0).color(pal.text)).sense(Sense::click()),
+        );
+        if resp.clicked() || lbl_resp.clicked() {
+            *checked = !*checked;
+            toggled = true;
+        }
+    });
+    toggled
+}
+
+/// Vertical scroll area styled identically to z-controller: slim palette thumb, inside gutter, zero card overlap.
+fn draw_synced_scroll_area(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    max_height: Option<f32>,
+    auto_shrink: [bool; 2],
+    pal: &ThemePalette,
+    rail_bg: Color32,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    ui.scope(|ui| {
+        ui.spacing_mut().scroll.floating = false;
+        ui.spacing_mut().scroll.foreground_color = false;
+        ui.spacing_mut().scroll.bar_width = 6.0;
+        ui.spacing_mut().scroll.bar_inner_margin = SPACE_8;
+        ui.spacing_mut().scroll.bar_outer_margin = 0.0;
+        ui.spacing_mut().scroll.handle_min_length = 24.0;
+        {
+            let v = ui.visuals_mut();
+            v.extreme_bg_color = rail_bg;
+            v.widgets.inactive.bg_fill = pal.scrollbar_thumb;
+            v.widgets.hovered.bg_fill = pal.scrollbar_thumb_hover;
+            v.widgets.active.bg_fill = pal.accent_line;
+        }
+
+        let mut sa = egui::ScrollArea::vertical()
+            .id_salt(id_salt)
+            .auto_shrink(auto_shrink);
+        if let Some(mh) = max_height {
+            sa = sa.max_height(mh);
+        }
+        sa.show(ui, |ui| {
+            // Restore inner widget fills so buttons inside scrolled cards still paint with pal.widget.
+            {
+                let v = ui.visuals_mut();
+                v.extreme_bg_color = pal.bg;
+                v.widgets.inactive.bg_fill = pal.widget;
+                v.widgets.hovered.bg_fill = pal.widget_hover;
+                v.widgets.active.bg_fill = pal.widget_active;
+            }
+            body(ui);
+        });
+    });
+}
+
+fn paint_chip(ui: &mut egui::Ui, label: &str, style: ChipStyle, container_bg: Color32) -> egui::Response {
+    let fill = if style.fill == Color32::TRANSPARENT {
+        container_bg
+    } else {
+        style.fill
+    };
+    draw_crisp_frame(
+        ui,
+        fill,
+        style.stroke,
+        4.0,
+        Margin::symmetric(5.0, 1.0),
+        |ui| {
             ui.label(
                 RichText::new(label)
                     .size(10.5)
                     .color(style.text)
                     .strong(),
             );
-        })
-        .response
+        },
+    )
+    .response
 }
 
 fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
@@ -428,7 +702,11 @@ fn draw_split_row(
             .max_rect(left_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    left_ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+    left_ui.set_clip_rect(
+        left_rect
+            .expand2(Vec2::new(1.0, 1.0))
+            .intersect(ui.clip_rect()),
+    );
     left_fn(&mut left_ui);
 
     let mut right_ui = ui.new_child(
@@ -436,7 +714,11 @@ fn draw_split_row(
             .max_rect(right_rect)
             .layout(Layout::right_to_left(Align::Center)),
     );
-    right_ui.set_clip_rect(right_rect.intersect(ui.clip_rect()));
+    right_ui.set_clip_rect(
+        right_rect
+            .expand2(Vec2::new(1.0, 1.0))
+            .intersect(ui.clip_rect()),
+    );
     right_fn(&mut right_ui);
 
     resp
@@ -481,35 +763,38 @@ fn draw_chevron(ui: &mut egui::Ui, expanded: bool, color: Color32) {
 
 fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalette) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(HEADER_CONTROL_H), Sense::click());
-    let bg = if resp.hovered() {
-        pal.widget_hover
+    let hovered = resp.hovered();
+    let (fill, border) = if resp.is_pointer_button_down_on() {
+        (pal.widget_active, LOGO_PINK)
+    } else if hovered {
+        (pal.widget_hover, pal.accent_line)
     } else {
-        pal.widget
+        (pal.widget, pal.border)
     };
-    let border = if resp.hovered() {
-        pal.accent_line
-    } else {
-        pal.border
-    };
-    ui.painter()
-        .rect(rect, Rounding::same(6.0), bg, Stroke::new(1.0_f32, border));
-    let c = rect.center();
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(ui.painter(), rect, 6.0, fill, border, 1.0, ppp);
+    let c = snapped.center();
     match mode {
         ThemeMode::Dark => {
+            // Sun glyph synced with z-controller
+            let fg = if hovered { pal.accent_line } else { pal.text };
             ui.painter()
-                .circle_stroke(c, 4.2, Stroke::new(1.4_f32, LOGO_BLUE));
+                .circle_stroke(c, 3.2, Stroke::new(1.3_f32, fg));
             for i in 0..8 {
                 let a = (i as f32) * std::f32::consts::FRAC_PI_4;
-                let p0 = Pos2::new(c.x + a.cos() * 6.5, c.y + a.sin() * 6.5);
-                let p1 = Pos2::new(c.x + a.cos() * 8.5, c.y + a.sin() * 8.5);
-                ui.painter()
-                    .line_segment([p0, p1], Stroke::new(1.3_f32, LOGO_BLUE));
+                let dir = Vec2::new(a.cos(), a.sin());
+                ui.painter().line_segment(
+                    [c + dir * 5.0, c + dir * 7.2],
+                    Stroke::new(1.25_f32, fg),
+                );
             }
         }
         ThemeMode::Light => {
-            ui.painter().circle_filled(c, 6.4, pal.lavender_text);
+            // Crescent moon glyph synced with z-controller
             ui.painter()
-                .circle_filled(Pos2::new(c.x + 3.0, c.y - 2.0), 5.0, bg);
+                .circle_filled(c + Vec2::new(-0.5, 0.2), 5.3, pal.accent_line);
+            ui.painter()
+                .circle_filled(c + Vec2::new(2.2, -1.9), 4.4, fill);
         }
     }
     let clicked = resp.clicked();
@@ -556,7 +841,7 @@ pub fn draw_app_ui(
             draw_split_row(
                 ui,
                 HEADER_CONTROL_H,
-                220.0,
+                236.0,
                 Sense::hover(),
                 |ui| {
                     ui.label(
@@ -573,6 +858,7 @@ pub fn draw_app_ui(
                             stroke: pal.accent_line,
                             text: pal.accent_line,
                         },
+                        pal.bg,
                     );
                     if scanning {
                         let status = if let Some(p) = progress {
@@ -617,16 +903,22 @@ pub fn draw_app_ui(
                 },
                 |ui| {
                     // Right-to-left placement -> rightmost Settings, then Rescan, then Theme Icon immediately left of Rescan.
+                    ui.spacing_mut().item_spacing.x = SPACE_8;
                     let settings_lbl = match ui_state.active_view {
                         ActiveView::Settings | ActiveView::Dependencies => "Back to Apps",
                         ActiveView::Main => "Settings",
                     };
-                    if ui
-                        .add_sized(
-                            Vec2::new(88.0, HEADER_CONTROL_H),
-                            egui::Button::new(settings_lbl),
-                        )
-                        .clicked()
+                    if draw_z_button(
+                        ui,
+                        settings_lbl,
+                        Vec2::new(88.0, HEADER_CONTROL_H),
+                        12.0,
+                        6.0,
+                        true,
+                        false,
+                        &pal,
+                    )
+                    .clicked()
                     {
                         ui_state.open_reverse_dep_id = None;
                         ui_state.active_view = match ui_state.active_view {
@@ -635,17 +927,18 @@ pub fn draw_app_ui(
                         };
                     }
 
-                    let rescan_btn = egui::Button::new(
-                        RichText::new(if scanning { "Scanning..." } else { "Rescan" })
-                            .color(if scanning { pal.muted } else { pal.accent_line })
-                            .strong(),
-                    );
-                    if ui
-                        .add_enabled_ui(!scanning, |ui| {
-                            ui.add_sized(Vec2::new(80.0, HEADER_CONTROL_H), rescan_btn)
-                        })
-                        .inner
-                        .clicked()
+                    let rescan_lbl = if scanning { "Scanning..." } else { "Rescan" };
+                    if draw_z_button(
+                        ui,
+                        rescan_lbl,
+                        Vec2::new(76.0, HEADER_CONTROL_H),
+                        12.0,
+                        6.0,
+                        !scanning,
+                        false,
+                        &pal,
+                    )
+                    .clicked()
                     {
                         emit(UiAction::StartRescan);
                     }
@@ -660,46 +953,63 @@ pub fn draw_app_ui(
                 },
             );
 
-            // Row 2: Drive strip — slim proportional bar, used & free figures, free space most prominent
+            // Row 2: Drive strip — full-width bordered proportional bar (used / total), used & free figures
             if let Some(rep) = report {
                 if !rep.drives.is_empty() {
                     ui.add_space(SPACE_8);
                     let n = rep.drives.len().max(1);
                     let avail = ui.available_width();
                     let tile_w = ((avail - SPACE_8 * ((n - 1) as f32)) / (n as f32)).max(132.0);
+                    let ppp = ctx.pixels_per_point();
                     ui.horizontal(|ui| {
-                        for (idx, drv) in rep.drives.iter().enumerate() {
-                            if idx > 0 {
-                                ui.add_space(SPACE_4);
-                            }
-                            let frac = if drv.total_bytes > 0 {
-                                (drv.used_bytes as f32 / drv.total_bytes as f32).clamp(0.0, 1.0)
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        for drv in &rep.drives {
+                            let ratio = if drv.total_bytes > 0 {
+                                (drv.used_bytes as f64 / drv.total_bytes as f64).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
-                            egui::Frame::none()
-                                .fill(pal.panel)
-                                .stroke(Stroke::new(1.0_f32, pal.border))
-                                .rounding(Rounding::same(6.0))
-                                .inner_margin(Margin::symmetric(SPACE_8, SPACE_4))
-                                .show(ui, |ui| {
-                                    let inner_w = (tile_w - SPACE_16).max(112.0);
+                            draw_crisp_frame(
+                                ui,
+                                pal.panel,
+                                pal.border,
+                                6.0,
+                                Margin::symmetric(SPACE_8, SPACE_4),
+                                |ui| {
+                                    let inner_w = (tile_w - SPACE_16 - 2.0).max(112.0);
                                     ui.set_width(inner_w);
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = SPACE_4;
-                                        // Line 1: Drive letter + prominent free space
+                                        // Line 1: Drive letter + used on left, prominent free space on right
                                         draw_split_row(
                                             ui,
                                             18.0,
-                                            (inner_w * 0.72).max(76.0),
+                                            (inner_w * 0.44).max(76.0),
                                             Sense::hover(),
                                             |ui| {
+                                                ui.spacing_mut().item_spacing.x = SPACE_4;
                                                 ui.label(
                                                     RichText::new(format!("{}:\\", drv.letter))
                                                         .size(12.5)
                                                         .strong()
                                                         .color(pal.text),
                                                 );
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(format!(
+                                                            "{} used",
+                                                            format_size_2dec(drv.used_bytes)
+                                                        ))
+                                                        .size(10.5)
+                                                        .color(pal.muted),
+                                                    )
+                                                    .selectable(false),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "Used: {} / Total: {}",
+                                                    format_exact_bytes(drv.used_bytes),
+                                                    format_exact_bytes(drv.total_bytes)
+                                                ));
                                             },
                                             |ui| {
                                                 ui.add(
@@ -722,23 +1032,35 @@ pub fn draw_app_ui(
                                             },
                                         );
 
-                                        // Line 2: slim proportional bar + used figure
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_8;
-                                            let bar_w = (inner_w - 88.0).clamp(36.0, 76.0);
-                                            let (bar_rect, bar_resp) = ui.allocate_exact_size(
-                                                Vec2::new(bar_w, 4.0),
-                                                Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                bar_rect,
-                                                Rounding::same(2.0),
-                                                pal.panel_alt,
-                                            );
-                                            let fill_w = (bar_rect.width() * frac).max(2.0);
+                                        // Line 2: Full-width 6px bordered track filled proportionally: fill_px = round(inner_px * (used / total))
+                                        let bar_w = inner_w.floor().max(80.0);
+                                        let (bar_rect, bar_resp) = ui.allocate_exact_size(
+                                            Vec2::new(bar_w, 6.0),
+                                            Sense::hover(),
+                                        );
+                                        let snapped_bar = paint_crisp_bordered_box(
+                                            ui.painter(),
+                                            bar_rect,
+                                            3.0,
+                                            pal.bg,
+                                            pal.border,
+                                            1.0,
+                                            ppp,
+                                        );
+                                        let inset = 1.0 / ppp.max(0.5);
+                                        let inner_track = snapped_bar.shrink(inset);
+                                        let inner_px = (inner_track.width() * ppp).round();
+                                        let fill_px = if drv.used_bytes == 0 {
+                                            0.0
+                                        } else {
+                                            ((inner_px as f64) * ratio)
+                                                .round()
+                                                .clamp(1.0, inner_px as f64) as f32
+                                        };
+                                        if fill_px > 0.0 && inner_track.height() > 0.0 {
                                             let fill_rect = Rect::from_min_size(
-                                                bar_rect.min,
-                                                Vec2::new(fill_w, bar_rect.height()),
+                                                inner_track.min,
+                                                Vec2::new(fill_px / ppp.max(0.5), inner_track.height()),
                                             );
                                             let bar_col = if drv.full_walk_enabled {
                                                 pal.accent_line
@@ -747,37 +1069,24 @@ pub fn draw_app_ui(
                                             };
                                             ui.painter().rect_filled(
                                                 fill_rect,
-                                                Rounding::same(2.0),
+                                                Rounding::ZERO,
                                                 bar_col,
                                             );
-                                            let _ = bar_resp.on_hover_text(format!(
-                                                "{:.1}% used ({})",
-                                                frac * 100.0,
-                                                if drv.full_walk_enabled {
-                                                    "Full walk"
-                                                } else {
-                                                    "Install paths only"
-                                                }
-                                            ));
-
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!(
-                                                        "{} used",
-                                                        format_size_2dec(drv.used_bytes)
-                                                    ))
-                                                    .size(10.5)
-                                                    .color(pal.muted),
-                                                )
-                                                .selectable(false),
-                                            )
-                                            .on_hover_text(format!(
-                                                "Used: {}",
-                                                format_exact_bytes(drv.used_bytes)
-                                            ));
-                                        });
+                                        }
+                                        let _ = bar_resp.on_hover_text(format!(
+                                            "{:.2}% used ({:.0} / {:.0} px · {})",
+                                            ratio * 100.0,
+                                            fill_px,
+                                            inner_px,
+                                            if drv.full_walk_enabled {
+                                                "Full walk"
+                                            } else {
+                                                "Install paths only"
+                                            }
+                                        ));
                                     });
-                                });
+                                },
+                            );
                         }
                     });
                 }
@@ -792,12 +1101,27 @@ pub fn draw_app_ui(
                     Sense::hover(),
                     |ui| {
                         ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut ui_state.search_query)
-                                .desired_width(260.0)
-                                .hint_text("Search app name, publisher, or path..."),
+                        draw_crisp_text_input(
+                            ui,
+                            "main_app_filter",
+                            &mut ui_state.search_query,
+                            260.0,
+                            "Search app name, publisher, or path...",
+                            &pal,
                         );
-                        if !ui_state.search_query.is_empty() && ui.button("Clear").clicked() {
+                        if !ui_state.search_query.is_empty()
+                            && draw_z_button(
+                                ui,
+                                "Clear",
+                                Vec2::new(56.0, HEADER_CONTROL_H),
+                                11.5,
+                                6.0,
+                                true,
+                                false,
+                                &pal,
+                            )
+                            .clicked()
+                        {
                             ui_state.search_query.clear();
                         }
                     },
@@ -848,10 +1172,17 @@ pub fn draw_app_ui(
                     .frame(
                         egui::Frame::none()
                             .fill(pal.panel_alt)
-                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .stroke(Stroke::NONE)
                             .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                     )
                     .show(ctx, |ui| {
+                        let sr = ctx.screen_rect();
+                        let top_y = (ui.max_rect().top() - SPACE_8).round();
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(Pos2::new(sr.left(), top_y), Vec2::new(sr.width(), 1.0)),
+                            Rounding::ZERO,
+                            pal.border,
+                        );
                         draw_pinned_bottom_groups(ui, ui_state, rep, &pal);
                     });
             }
@@ -919,10 +1250,7 @@ fn draw_main_app_list(
         .collect();
 
     let q = ui_state.search_query.trim().to_ascii_lowercase();
-    egui::ScrollArea::vertical()
-        .id_salt("main_app_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    draw_synced_scroll_area(ui, "main_app_scroll", None, [false, false], pal, pal.bg, |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
             let mut shown = 0usize;
 
@@ -943,18 +1271,15 @@ fn draw_main_app_list(
                 }
                 shown += 1;
                 let expanded = ui_state.expanded_apps.contains(&app.id);
-                let frame_stroke = if expanded {
-                    Stroke::new(1.0_f32, pal.accent_line)
-                } else {
-                    Stroke::new(1.0_f32, pal.border)
-                };
+                let frame_border = if expanded { pal.accent_line } else { pal.border };
 
-                egui::Frame::none()
-                    .fill(pal.panel)
-                    .stroke(frame_stroke)
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(SPACE_8, SPACE_4))
-                    .show(ui, |ui| {
+                draw_crisp_frame(
+                    ui,
+                    pal.panel,
+                    frame_border,
+                    6.0,
+                    Margin::symmetric(SPACE_8, SPACE_4),
+                    |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = SPACE_4;
 
@@ -976,7 +1301,7 @@ fn draw_main_app_list(
                                     true,
                                 );
                                 if let Some(nt) = app.no_touch {
-                                    paint_chip(ui, nt.label(), no_touch_chip_style(pal));
+                                    paint_chip(ui, nt.label(), no_touch_chip_style(pal), pal.panel);
                                 }
                                 if let Some(first_pub) = app.publishers.first() {
                                     draw_truncated_text(
@@ -1002,22 +1327,23 @@ fn draw_main_app_list(
                                 );
                                 draw_right_aligned_size(&mut sz_ui, app.total_bytes, 13.0, pal.text, true);
 
-                                // Growth delta column (left of size column)
-                                let (d_text, d_col, d_tip) = format_delta_display(app.growth, pal);
+                                // Growth delta column (left of size column; completely empty when delta == 0)
                                 let (d_rect, _) = ui.allocate_exact_size(
                                     Vec2::new(DELTA_COL_W, APP_ROW_H),
                                     Sense::hover(),
                                 );
-                                let mut d_ui = ui.new_child(
-                                    UiBuilder::new()
-                                        .max_rect(d_rect)
-                                        .layout(Layout::right_to_left(Align::Center)),
-                                );
-                                d_ui.add(
-                                    egui::Label::new(RichText::new(&d_text).size(11.5).color(d_col))
-                                        .selectable(false),
-                                )
-                                .on_hover_text(d_tip);
+                                if let Some((d_text, d_col, d_tip)) = format_delta_display(app.growth, pal) {
+                                    let mut d_ui = ui.new_child(
+                                        UiBuilder::new()
+                                            .max_rect(d_rect)
+                                            .layout(Layout::right_to_left(Align::Center)),
+                                    );
+                                    d_ui.add(
+                                        egui::Label::new(RichText::new(&d_text).size(11.5).color(d_col))
+                                            .selectable(false),
+                                    )
+                                    .on_hover_text(d_tip);
+                                }
                             },
                         );
 
@@ -1064,6 +1390,7 @@ fn draw_main_app_list(
                                                         ui,
                                                         zone.short_label(),
                                                         zone_chip_style(zone, pal),
+                                                        pal.panel_alt,
                                                     );
                                                 }
                                                 if let Some(qual) = item.qualifier {
@@ -1075,7 +1402,7 @@ fn draw_main_app_list(
                                                             "ProgramData · shared"
                                                         }
                                                     };
-                                                    paint_chip(ui, q_lbl, qualifier_chip_style(pal));
+                                                    paint_chip(ui, q_lbl, qualifier_chip_style(pal), pal.panel_alt);
                                                 }
                                                 draw_truncated_text(
                                                     ui,
@@ -1127,8 +1454,7 @@ fn draw_main_app_list(
                                 ui.cursor().min,
                                 Vec2::new(ui.available_width(), 1.0),
                             );
-                            ui.painter()
-                                .line_segment([line_rect.left_top(), line_rect.right_top()], Stroke::new(1.0_f32, pal.border));
+                            ui.painter().rect_filled(line_rect, Rounding::ZERO, pal.border);
                             ui.add_space(SPACE_4);
 
                             // Sub-section 2: Clearly titled Dependencies section
@@ -1202,11 +1528,13 @@ fn draw_main_app_list(
                                                             stroke: pal.border,
                                                             text: pal.lavender_text,
                                                         },
+                                                        pal.panel_alt,
                                                     );
                                                     paint_chip(
                                                         ui,
                                                         dep.confidence.label(),
                                                         confidence_chip_style(dep.confidence, pal),
+                                                        pal.panel_alt,
                                                     );
                                                     if dep.shared {
                                                         paint_chip(
@@ -1217,6 +1545,7 @@ fn draw_main_app_list(
                                                                 stroke: pal.border,
                                                                 text: pal.muted,
                                                             },
+                                                            pal.panel_alt,
                                                         );
                                                     }
                                                     if !dep.present {
@@ -1224,6 +1553,7 @@ fn draw_main_app_list(
                                                             ui,
                                                             "missing",
                                                             no_touch_chip_style(pal),
+                                                            pal.panel_alt,
                                                         );
                                                     }
                                                     if rev_n > 0 {
@@ -1232,28 +1562,18 @@ fn draw_main_app_list(
                                                         } else {
                                                             format!("used by {rev_n} apps >")
                                                         };
-                                                        let btn = egui::Button::new(
-                                                            RichText::new(&lbl)
-                                                                .size(10.5)
-                                                                .color(if is_open_rev {
-                                                                    pal.proven_solid_text
-                                                                } else {
-                                                                    pal.accent_line
-                                                                })
-                                                                .strong(),
+                                                        if draw_z_button(
+                                                            ui,
+                                                            &lbl,
+                                                            Vec2::new(0.0, 18.0),
+                                                            10.5,
+                                                            4.0,
+                                                            true,
+                                                            true,
+                                                            pal,
                                                         )
-                                                        .fill(if is_open_rev {
-                                                            pal.accent_line
-                                                        } else {
-                                                            pal.pill_blue_fill
-                                                        })
-                                                        .stroke(Stroke::new(1.0_f32, pal.accent_line))
-                                                        .rounding(Rounding::same(4.0))
-                                                        .min_size(Vec2::new(0.0, 18.0));
-                                                        if ui
-                                                            .add(btn)
-                                                            .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
-                                                            .clicked()
+                                                        .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
+                                                        .clicked()
                                                         {
                                                             ui_state.open_reverse_dep_id =
                                                                 if is_open_rev {
@@ -1310,7 +1630,8 @@ fn draw_main_app_list(
                                 }
                             }
                         }
-                    });
+                    },
+                );
             }
 
             if shown == 0 {
@@ -1347,12 +1668,13 @@ fn draw_reverse_dependency_overlay(
         .order(Order::Foreground)
         .anchor(Align2::RIGHT_TOP, anchor_offset)
         .show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(pal.panel)
-                .stroke(Stroke::new(1.5_f32, pal.accent_line))
-                .rounding(Rounding::same(8.0))
-                .inner_margin(Margin::same(SPACE_12))
-                .show(ui, |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.accent_line,
+                8.0,
+                Margin::same(SPACE_12),
+                |ui| {
                     ui.set_width(area_w - SPACE_16 - SPACE_8);
                     ui.spacing_mut().item_spacing.y = SPACE_4;
 
@@ -1360,7 +1682,7 @@ fn draw_reverse_dependency_overlay(
                     draw_split_row(
                         ui,
                         24.0,
-                        132.0,
+                        136.0,
                         Sense::hover(),
                         |ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_8;
@@ -1374,10 +1696,33 @@ fn draw_reverse_dependency_overlay(
                         },
                         |ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_8;
-                            if ui.button("Close").clicked() {
+                            if draw_z_button(
+                                ui,
+                                "Close",
+                                Vec2::new(56.0, 24.0),
+                                11.5,
+                                6.0,
+                                true,
+                                false,
+                                pal,
+                            )
+                            .clicked()
+                            {
                                 close_clicked = true;
                             }
-                            if ui.button("All").on_hover_text("Open full Reverse Dependencies view").clicked() {
+                            if draw_z_button(
+                                ui,
+                                "All",
+                                Vec2::new(48.0, 24.0),
+                                11.5,
+                                6.0,
+                                true,
+                                false,
+                                pal,
+                            )
+                            .on_hover_text("Open full Reverse Dependencies view")
+                            .clicked()
+                            {
                                 ui_state.open_reverse_dep_id = None;
                                 ui_state.active_view = ActiveView::Dependencies;
                             }
@@ -1404,6 +1749,7 @@ fn draw_reverse_dependency_overlay(
                                     stroke: pal.border,
                                     text: pal.lavender_text,
                                 },
+                                pal.panel,
                             );
                             let used_lbl = if rev.dependent_count == 1 {
                                 "used by 1 app".to_string()
@@ -1418,6 +1764,7 @@ fn draw_reverse_dependency_overlay(
                                     stroke: pal.accent_line,
                                     text: pal.accent_line,
                                 },
+                                pal.panel,
                             );
                             if rev.binary_importer_count > 0 {
                                 paint_chip(
@@ -1428,6 +1775,7 @@ fn draw_reverse_dependency_overlay(
                                         stroke: pal.border,
                                         text: pal.muted,
                                     },
+                                    pal.panel,
                                 );
                             }
                         },
@@ -1439,11 +1787,14 @@ fn draw_reverse_dependency_overlay(
                     );
 
                     ui.add_space(SPACE_4);
-                    egui::ScrollArea::vertical()
-                        .id_salt(("rev_overlay_scroll", target_id))
-                        .max_height(260.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
+                    draw_synced_scroll_area(
+                        ui,
+                        ("rev_overlay_scroll", target_id),
+                        Some(260.0),
+                        [false, true],
+                        pal,
+                        pal.panel,
+                        |ui| {
                             ui.spacing_mut().item_spacing.y = SPACE_4;
                             for c in &rev.consumers {
                                 egui::Frame::none()
@@ -1464,6 +1815,7 @@ fn draw_reverse_dependency_overlay(
                                                     ui,
                                                     c.confidence.label(),
                                                     confidence_chip_style(c.confidence, pal),
+                                                    pal.panel_alt,
                                                 );
                                                 draw_truncated_text(
                                                     ui,
@@ -1501,8 +1853,10 @@ fn draw_reverse_dependency_overlay(
                                         );
                                     });
                             }
-                        });
-                });
+                        },
+                    );
+                },
+            );
         });
 }
 
@@ -1619,13 +1973,17 @@ fn draw_pinned_bottom_groups(
     };
 
     if any_expanded {
-        egui::ScrollArea::vertical()
-            .id_salt("pinned_groups_scroll")
-            .max_height(152.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
+        draw_synced_scroll_area(
+            ui,
+            "pinned_groups_scroll",
+            Some(152.0),
+            [false, true],
+            pal,
+            pal.panel_alt,
+            |ui| {
                 draw_cards(ui);
-            });
+            },
+        );
     } else {
         draw_cards(ui);
     }
@@ -1689,6 +2047,7 @@ fn draw_pinned_bottom_groups(
                         stroke: chip_col,
                         text: chip_col,
                     },
+                    pal.panel_alt,
                 );
             },
         );
@@ -1705,12 +2064,13 @@ fn draw_pinned_group_card(
     pal: &ThemePalette,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::Frame::none()
-        .fill(pal.panel)
-        .stroke(Stroke::new(1.0_f32, pal.border))
-        .rounding(Rounding::same(6.0))
-        .inner_margin(Margin::symmetric(SPACE_8, SPACE_4))
-        .show(ui, |ui| {
+    draw_crisp_frame(
+        ui,
+        pal.panel,
+        pal.border,
+        6.0,
+        Margin::symmetric(SPACE_8, SPACE_4),
+        |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = SPACE_4;
             let resp = draw_split_row(
@@ -1740,7 +2100,8 @@ fn draw_pinned_group_card(
             if *expanded {
                 body(ui);
             }
-        });
+        },
+    );
 }
 
 fn draw_simple_item_row(
@@ -1758,7 +2119,7 @@ fn draw_simple_item_row(
         |ui| {
             ui.add_space(SPACE_16);
             if let Some((lbl, style)) = chip {
-                paint_chip(ui, lbl, style);
+                paint_chip(ui, lbl, style, pal.panel);
             }
             draw_truncated_text(
                 ui,
@@ -1783,7 +2144,7 @@ fn draw_dependencies_view(
     draw_split_row(
         ui,
         HEADER_CONTROL_H,
-        260.0,
+        264.0,
         Sense::hover(),
         |ui| {
             ui.label(
@@ -1794,10 +2155,13 @@ fn draw_dependencies_view(
             );
         },
         |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut ui_state.dep_search_query)
-                    .desired_width(250.0)
-                    .hint_text("Filter dependency or app..."),
+            draw_crisp_text_input(
+                ui,
+                "rev_dep_search",
+                &mut ui_state.dep_search_query,
+                250.0,
+                "Filter dependency or app...",
+                pal,
             );
         },
     );
@@ -1818,10 +2182,7 @@ fn draw_dependencies_view(
     }
 
     let q = ui_state.dep_search_query.trim().to_ascii_lowercase();
-    egui::ScrollArea::vertical()
-        .id_salt("reverse_deps_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    draw_synced_scroll_area(ui, "reverse_deps_scroll", None, [false, false], pal, pal.bg, |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
             for dep in &rep.reverse_dependencies {
                 if !q.is_empty() {
@@ -1835,15 +2196,13 @@ fn draw_dependencies_view(
                     }
                 }
                 let expanded = ui_state.expanded_deps.contains(&dep.target_id);
-                egui::Frame::none()
-                    .fill(pal.panel)
-                    .stroke(Stroke::new(
-                        1.0_f32,
-                        if expanded { pal.accent_line } else { pal.border },
-                    ))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(SPACE_12, SPACE_8))
-                    .show(ui, |ui| {
+                draw_crisp_frame(
+                    ui,
+                    pal.panel,
+                    if expanded { pal.accent_line } else { pal.border },
+                    6.0,
+                    Margin::symmetric(SPACE_12, SPACE_8),
+                    |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = SPACE_4;
                         let resp = draw_reverse_group_header(ui, dep, expanded, pal);
@@ -1867,6 +2226,7 @@ fn draw_dependencies_view(
                                             ui,
                                             c.confidence.label(),
                                             confidence_chip_style(c.confidence, pal),
+                                            pal.panel,
                                         );
                                         draw_truncated_text(
                                             ui,
@@ -1895,7 +2255,8 @@ fn draw_dependencies_view(
                                 );
                             }
                         }
-                    });
+                    },
+                );
             }
         });
 }
@@ -1929,6 +2290,7 @@ fn draw_reverse_group_header(
                     stroke: pal.border,
                     text: pal.lavender_text,
                 },
+                pal.panel,
             );
             if dep.kind == DependencyKind::SharedRuntime || dep.binary_importer_count > 0 {
                 paint_chip(
@@ -1939,6 +2301,7 @@ fn draw_reverse_group_header(
                         stroke: pal.accent_line,
                         text: pal.accent_line,
                     },
+                    pal.panel,
                 );
             }
         },
@@ -1986,9 +2349,7 @@ fn draw_settings_view(
     );
     ui.add_space(SPACE_8);
 
-    egui::ScrollArea::vertical()
-        .id_salt("settings_scroll")
-        .show(ui, |ui| {
+    draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_8;
             for target in &mut draft.targets {
                 let drv_info = report
@@ -1996,19 +2357,20 @@ fn draw_settings_view(
                 let is_sys = drv_info.is_some_and(|d| d.is_system_drive)
                     || target.letter.eq_ignore_ascii_case(&'C');
 
-                egui::Frame::none()
-                    .fill(pal.panel)
-                    .stroke(Stroke::new(1.0_f32, pal.border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(SPACE_12, SPACE_8))
-                    .show(ui, |ui| {
+                draw_crisp_frame(
+                    ui,
+                    pal.panel,
+                    pal.border,
+                    6.0,
+                    Margin::symmetric(SPACE_12, SPACE_8),
+                    |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = SPACE_4;
 
                         draw_split_row(
                             ui,
                             24.0,
-                            180.0,
+                            184.0,
                             Sense::hover(),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = SPACE_8;
@@ -2027,6 +2389,7 @@ fn draw_settings_view(
                                             stroke: pal.accent_line,
                                             text: pal.accent_line,
                                         },
+                                        pal.panel,
                                     );
                                 }
                                 if let Some(di) = drv_info {
@@ -2049,10 +2412,12 @@ fn draw_settings_view(
                                 }
                             },
                             |ui| {
-                                if ui
-                                    .checkbox(&mut target.enabled, "Enable full drive walk")
-                                    .changed()
-                                {
+                                if draw_crisp_checkbox(
+                                    ui,
+                                    &mut target.enabled,
+                                    "Enable full drive walk",
+                                    pal,
+                                ) {
                                     changed = true;
                                 }
                             },
@@ -2073,8 +2438,24 @@ fn draw_settings_view(
                                     false,
                                 );
                                 if is_locked_win {
-                                    paint_chip(ui, "LOCKED · Constitutional", qualifier_chip_style(pal));
-                                } else if ui.small_button("Remove").clicked() {
+                                    paint_chip(
+                                        ui,
+                                        "LOCKED · Constitutional",
+                                        qualifier_chip_style(pal),
+                                        pal.panel,
+                                    );
+                                } else if draw_z_button(
+                                    ui,
+                                    "Remove",
+                                    Vec2::new(60.0, 22.0),
+                                    11.0,
+                                    5.0,
+                                    true,
+                                    false,
+                                    pal,
+                                )
+                                .clicked()
+                                {
                                     remove_idx = Some(idx);
                                 }
                             });
@@ -2089,12 +2470,27 @@ fn draw_settings_view(
                             .entry(target.letter)
                             .or_default();
                         ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(input)
-                                    .desired_width(280.0)
-                                    .hint_text(format!("{}:\\FolderToExclude", target.letter)),
+                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                            draw_crisp_text_input(
+                                ui,
+                                ("exclusion_input", target.letter),
+                                input,
+                                280.0,
+                                &format!("{}:\\FolderToExclude", target.letter),
+                                pal,
                             );
-                            if ui.button("Add exclusion").clicked() {
+                            if draw_z_button(
+                                ui,
+                                "Add exclusion",
+                                Vec2::new(104.0, HEADER_CONTROL_H),
+                                12.0,
+                                6.0,
+                                true,
+                                false,
+                                pal,
+                            )
+                            .clicked()
+                            {
                                 let trimmed = input.trim().to_string();
                                 if !trimmed.is_empty()
                                     && !target
@@ -2108,7 +2504,8 @@ fn draw_settings_view(
                                 }
                             }
                         });
-                    });
+                    },
+                );
             }
         });
 

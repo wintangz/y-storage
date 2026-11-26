@@ -217,6 +217,12 @@ fn render_screenshot(
         "settings" => {
             ui_state.active_view = ActiveView::Settings;
         }
+        "settings-typed" => {
+            ui_state.active_view = ActiveView::Settings;
+            ui_state
+                .new_exclusion_inputs
+                .insert('C', r"C:\TempBuildCache".to_string());
+        }
         _ => {
             ui_state.active_view = ActiveView::Main;
         }
