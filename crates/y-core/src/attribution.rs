@@ -5,9 +5,9 @@ use crate::discovery::{
 };
 use crate::history::{HistoryEntryRef, compute_growth};
 use crate::model::{
-    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, InstalledApp, NoTouchCategory,
-    RegistryDiscoveryStats, ScanReport, ScannedUnit, ScannedUnitKind, SystemDriveBreakdown,
-    UnattributedItem,
+    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, InstalledApp, LocationQualifier,
+    NoTouchCategory, RegistryDiscoveryStats, ScanReport, ScannedUnit, ScannedUnitKind,
+    SystemDriveBreakdown, UnattributedItem, ZoneKind,
 };
 use crate::zones::classify_zone;
 
@@ -42,6 +42,7 @@ pub fn attribute_scan(
         .collect();
 
     let mut store_buckets: HashMap<String, usize> = HashMap::new();
+    let mut shared_caches: Vec<BreakdownItem> = Vec::new();
     let mut your_files: Vec<BreakdownItem> = Vec::new();
     let mut unattributed: Vec<UnattributedItem> = Vec::new();
     let mut root_sys_by_drive: HashMap<char, Vec<BreakdownItem>> = HashMap::new();
@@ -118,6 +119,25 @@ pub fn attribute_scan(
         let path_lower = normalize_path_key(&unit.path);
         let leaf = leaf_name(&unit.path);
         let leaf_lower = leaf.to_ascii_lowercase();
+
+        // Rule 2(a): Known shared/system GREEN caches belong to a labelled cache group, not Unattributed and not any app.
+        if is_shared_green_cache(&path_lower) {
+            let qual = if path_lower.contains(":\\programdata\\") {
+                Some(LocationQualifier::MachineShared)
+            } else {
+                None
+            };
+            shared_caches.push(BreakdownItem {
+                path: unit.path.clone(),
+                bytes: unit.bytes,
+                zone: Some(ZoneKind::Green),
+                qualifier: qual,
+                basis: None,
+                no_touch: None,
+                drive_letter: d_letter,
+            });
+            continue;
+        }
 
         // Exclude drive root loose metadata like $Recycle.Bin, Config.Msi, System Volume Information, .GamingRoot from force-matching.
         if is_unattributable_os_noise(&path_lower, &leaf_lower) {
@@ -241,6 +261,80 @@ pub fn attribute_scan(
             }
         }
 
+        // 5b. Unmatched ProgramData\Package Cache items belong to Shared & system caches (GREEN).
+        if path_lower.contains("\\programdata\\package cache\\") {
+            shared_caches.push(BreakdownItem {
+                path: unit.path.clone(),
+                bytes: unit.bytes,
+                zone: Some(ZoneKind::Green),
+                qualifier: Some(LocationQualifier::MachineShared),
+                basis: None,
+                no_touch: None,
+                drive_letter: d_letter,
+            });
+            continue;
+        }
+
+        // 5c. Rule 2(b) & 2(c): Top-level user-profile dot-folders and standalone Roaming\flutter stand alone under their folder name.
+        if is_user_profile_dot_folder(&path_lower, &leaf_lower) {
+            let idx = ensure_synthetic_app(
+                &mut buckets,
+                &mut store_buckets,
+                &format!("dot:{leaf_lower}"),
+                &leaf,
+                "User profile dot-folder",
+                None,
+                false,
+            );
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(ZoneKind::Red),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::StandaloneFolder),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::StandaloneFolder,
+            );
+            continue;
+        }
+
+        if path_lower.ends_with("\\appdata\\roaming\\flutter")
+            || path_lower.ends_with("\\appdata\\local\\flutter")
+        {
+            let idx = ensure_synthetic_app(
+                &mut buckets,
+                &mut store_buckets,
+                "standalone:flutter",
+                "flutter",
+                "Standalone SDK / toolchain",
+                None,
+                false,
+            );
+            let qual = if path_lower.contains("\\appdata\\roaming\\") {
+                Some(LocationQualifier::RoamingConfig)
+            } else {
+                None
+            };
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: qual,
+                    basis: Some(AttributionBasis::StandaloneFolder),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::StandaloneFolder,
+            );
+            continue;
+        }
+
         // 6. Openly shown Unattributed.
         let (zone, _) = classify_zone(&unit.path, false);
         unattributed.push(UnattributedItem {
@@ -273,6 +367,7 @@ pub fn attribute_scan(
                 no_touch: b.app.no_touch,
                 bases: b.bases,
                 items: b.items,
+                dependencies: Vec::new(),
             }
         })
         .collect();
@@ -282,6 +377,9 @@ pub fn attribute_scan(
             .cmp(&a.total_bytes)
             .then_with(|| a.display_name.cmp(&b.display_name))
     });
+
+    shared_caches.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    let shared_caches_total_bytes = shared_caches.iter().map(|i| i.bytes).sum();
 
     your_files.sort_by(|a, b| b.bytes.cmp(&a.bytes));
     let your_files_total_bytes = your_files.iter().map(|i| i.bytes).sum();
@@ -330,12 +428,15 @@ pub fn attribute_scan(
         drives,
         registry_stats,
         apps,
+        shared_caches,
+        shared_caches_total_bytes,
         your_files,
         your_files_total_bytes,
         windows_system,
         windows_system_total_bytes,
         unattributed,
         unattributed_total_bytes,
+        reverse_dependencies: Vec::new(),
     }
 }
 
@@ -354,6 +455,31 @@ fn leaf_name(path: &str) -> String {
         .next()
         .unwrap_or(trimmed)
         .to_string()
+}
+
+fn is_shared_green_cache(path_lower: &str) -> bool {
+    path_lower.ends_with("\\appdata\\local\\temp")
+        || path_lower.contains("\\appdata\\local\\temp\\")
+        || path_lower.ends_with("\\appdata\\locallow\\temp")
+        || path_lower.contains("\\appdata\\locallow\\temp\\")
+        || path_lower.ends_with("\\appdata\\local\\d3dscache")
+        || path_lower.ends_with("\\appdata\\local\\nvidia\\dxcache")
+        || path_lower.ends_with("\\appdata\\local\\nvidia\\glcache")
+        || path_lower.ends_with("\\appdata\\local\\amd\\dxcache")
+        || path_lower.ends_with("\\appdata\\local\\amd\\dxccache")
+        || path_lower.ends_with("\\appdata\\local\\amd\\vkcache")
+        || path_lower.ends_with("\\appdata\\local\\crashdumps")
+        || path_lower.ends_with("\\appdata\\local\\squirreltemp")
+        || path_lower.ends_with("\\appdata\\local\\cache")
+        || path_lower.ends_with("\\programdata\\epicinstallertemp")
+}
+
+fn is_user_profile_dot_folder(path_lower: &str, leaf_lower: &str) -> bool {
+    if !leaf_lower.starts_with('.') || leaf_lower == ".[files]" || leaf_lower == "." || leaf_lower == ".." {
+        return false;
+    }
+    let parts: Vec<&str> = path_lower.trim_end_matches('\\').split('\\').collect();
+    parts.len() == 4 && parts[1] == "users"
 }
 
 fn is_unattributable_os_noise(path_lower: &str, leaf_lower: &str) -> bool {
@@ -606,7 +732,6 @@ fn find_by_token(
                 "\\appdata\\local\\discord",
                 "\\appdata\\roaming\\discord",
                 "\\common files\\discord",
-                "\\appdata\\local\\squirreltemp",
             ],
             &["discord"],
             false,
@@ -618,7 +743,6 @@ fn find_by_token(
             &[
                 "\\program files (x86)\\epic games",
                 "\\programdata\\epic",
-                "\\programdata\\epicinstallertemp",
                 "\\appdata\\local\\epicgameslauncher",
                 "\\appdata\\local\\epic games",
             ],
@@ -653,11 +777,19 @@ fn find_by_token(
         ),
         // NVIDIA
         (
+            &["\\program files\\nvidia corporation\\installer2\\display.physx"],
+            &["nvidia physx"],
+            true,
+        ),
+        (
+            &["\\appdata\\local\\nvidia corporation"],
+            &["nvidia app", "nvidia graphics driver"],
+            false,
+        ),
+        (
             &[
                 "\\program files\\nvidia corporation\\nv",
                 "\\program files\\nvidia corporation\\display",
-                "\\appdata\\local\\nvidia\\dxcache",
-                "\\appdata\\local\\nvidia\\glcache",
                 "\\appdata\\roaming\\nvidia",
                 "\\programdata\\nvidia corporation",
                 "\\programdata\\nvidia",
@@ -680,7 +812,7 @@ fn find_by_token(
             false,
         ),
         // Ollama
-        (&["\\.ollama", "\\appdata\\local\\ollama", "\\appdata\\roaming\\ollama"], &["ollama"], false),
+        (&["\\.ollama", "\\appdata\\local\\ollama", "\\appdata\\roaming\\ollama", "\\appdata\\roaming\\ollama app.exe"], &["ollama"], false),
         // Unity
         (
             &[
@@ -810,11 +942,36 @@ fn find_by_token(
         }
     }
 
-    // `Program Files\Common Files\Microsoft Shared` / `Program Files (x86)\Common Files\Microsoft Shared` -> Microsoft Office / VS shared runtime
+    // Office Click-to-Run / Office Add-in Local\Packages (`oice_16_*`) & Microsoft Shared
     if path_lower.contains("\\program files\\microsoft office")
         || path_lower.contains("\\program files (x86)\\microsoft office")
+        || path_lower.contains("\\common files\\microsoft shared")
+        || path_lower.contains("\\appdata\\local\\packages\\oice_16_")
     {
         if let Some(idx) = find_app_matching(buckets, &["microsoft office"]) {
+            return Some((idx, !path_lower.contains("\\appdata\\local\\packages\\")));
+        }
+    }
+
+    // Standalone BattlEye anti-cheat files when no separate Uninstall entry exists.
+    if path_matches_token(path_lower, leaf_lower, "\\common files\\battleye")
+        || path_matches_token(path_lower, leaf_lower, "\\appdata\\local\\battleye")
+    {
+        let idx = ensure_synthetic_app(
+            buckets,
+            store_buckets,
+            "sys:battleye",
+            "BattlEye",
+            "BattlEye Innovations",
+            Some(NoTouchCategory::AntiCheat),
+            false,
+        );
+        return Some((idx, path_lower.contains("\\program files")));
+    }
+
+    // NVIDIA PhysX installer folder fallback (`Display.PhysX.{...}`)
+    if path_lower.contains("\\nvidia corporation\\installer2\\display.physx") {
+        if let Some(idx) = find_app_matching(buckets, &["nvidia physx"]) {
             return Some((idx, true));
         }
     }

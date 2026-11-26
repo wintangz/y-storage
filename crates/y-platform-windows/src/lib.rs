@@ -1,6 +1,8 @@
+pub mod dep_scan;
 pub mod paths;
 pub mod registry;
 pub mod scanner;
+pub mod services;
 
 use windows_sys::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,

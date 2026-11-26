@@ -28,6 +28,9 @@ impl FolderSizeCache {
                 self.folder_bytes.insert(item.path.clone(), item.bytes);
             }
         }
+        for item in &report.shared_caches {
+            self.folder_bytes.insert(item.path.clone(), item.bytes);
+        }
         for item in &report.your_files {
             self.folder_bytes.insert(item.path.clone(), item.bytes);
         }

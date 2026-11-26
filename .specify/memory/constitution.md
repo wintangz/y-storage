@@ -10,9 +10,12 @@ Every feature in specifications, plans, tasks, code documentation, commits, and 
 - `attribution-zones`
 - `scan-history`
 - `storage-ui`
+- `dependencies`
+- `attribution-coverage-2`
+- `ground-truth`
 
 ### II. Every GB Has an Owner & Exact Drive Reconciliation
-After a scan, every scanned folder on an enabled drive MUST belong to exactly one owner: an attributed installed app (`InstalledApp`), `Your files`, `Windows & system`, or an openly displayed `Unattributed` group. Nothing is silently dropped, double-counted, or force-matched; every app attribution records its explicit basis (`InstallLocation`, `ExactName`, `Publisher`, `Token`, or `PackageFallback`). On every enabled drive, `apps_on_drive + your_files_on_drive + unattributed_on_drive + windows_and_system_on_drive + free_space == drive_total`, with the `Windows & system` remainder line (`drive_used - everything_scanned`, marked as an estimate) absorbing unwalked system files and filesystem overhead.
+After a scan, every scanned folder on an enabled drive MUST belong to exactly one owner: an attributed installed app (`InstalledApp`), a standalone user-profile dot-folder or toolchain (`StandaloneFolder`), `Shared & system caches (GREEN)`, `Your files`, `Windows & system`, or an openly displayed `Unattributed` group. Nothing is silently dropped, double-counted, or force-matched; every app attribution records its explicit basis (`InstallLocation`, `ExactName`, `Publisher`, `Token`, `PackageFallback`, `StandaloneFolder`). Shared dependencies NEVER inflate any dependent app's `total_bytes`. On every enabled drive, `apps_on_drive + shared_caches_on_drive + your_files_on_drive + unattributed_on_drive + windows_and_system_on_drive + free_space == drive_total`, with the `Windows & system` remainder line (`drive_used - everything_scanned`, marked as an estimate) absorbing unwalked system files and filesystem overhead.
 
 ### III. Permanent No-Touch & Zone Integrity
 Drivers, services, anti-cheat software, system runtimes (VC++, DirectX, .NET, Windows SDK), and registry hives (`NTUSER.DAT`) are permanently display-only (`NO-TOUCH`) across all versions. Every app breakdown item carries a clear zone tag:

@@ -39,9 +39,10 @@ fn main() {
 
     for d in &report.windows_system {
         let apps_d = report.total_apps_bytes_on_drive(d.drive_letter);
+        let caches_d = report.total_shared_caches_on_drive(d.drive_letter);
         let yf_d = report.total_your_files_on_drive(d.drive_letter);
         let un_d = report.total_unattributed_on_drive(d.drive_letter);
-        let sum_all = apps_d + yf_d + un_d + d.total_bytes + d.drive_free_bytes;
+        let sum_all = apps_d + caches_d + yf_d + un_d + d.total_bytes + d.drive_free_bytes;
         println!(
             "Drive {}:\\ reconciliation: apps={} ({}) + your_files={} ({}) + unattributed={} ({}) + win_sys={} ({}) + free={} ({}) = {} vs total={} (diff={})",
             d.drive_letter,

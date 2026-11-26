@@ -7,8 +7,8 @@ use egui::{
 use y_core::config::{AppConfig, ThemeMode};
 use y_core::discovery::normalize_path_key;
 use y_core::model::{
-    AttributionBasis, GrowthDelta, LocationQualifier, ScanReport, ZoneKind, format_bytes,
-    format_growth_delta,
+    AttributionBasis, DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
+    NO_KNOWN_DEPENDENCIES_LABEL, ScanReport, ZoneKind, format_bytes, format_growth_delta,
 };
 use y_platform_windows::scanner::ScanProgressSnapshot;
 
@@ -27,6 +27,7 @@ const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
     Main,
+    Dependencies,
     Settings,
 }
 
@@ -98,7 +99,10 @@ impl ThemePalette {
 pub struct StorageUiState {
     pub active_view: ActiveView,
     pub search_query: String,
+    pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
+    pub expanded_deps: HashSet<String>,
+    pub expand_shared_caches: bool,
     pub expand_windows_system: bool,
     pub expand_your_files: bool,
     pub expand_unattributed: bool,
@@ -111,7 +115,10 @@ impl Default for StorageUiState {
         Self {
             active_view: ActiveView::Main,
             search_query: String::new(),
+            dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
+            expanded_deps: HashSet::new(),
+            expand_shared_caches: false,
             expand_windows_system: false,
             expand_your_files: false,
             expand_unattributed: false,
@@ -348,13 +355,23 @@ pub fn draw_app_ui(
                         emit(UiAction::ToggleTheme(next));
                     }
                     let settings_lbl = match ui_state.active_view {
-                        ActiveView::Main => "Settings",
                         ActiveView::Settings => "Back to Apps",
+                        _ => "Settings",
                     };
                     if ui.button(settings_lbl).clicked() {
                         ui_state.active_view = match ui_state.active_view {
-                            ActiveView::Main => ActiveView::Settings,
                             ActiveView::Settings => ActiveView::Main,
+                            _ => ActiveView::Settings,
+                        };
+                    }
+                    let deps_lbl = match ui_state.active_view {
+                        ActiveView::Dependencies => "Back to Apps",
+                        _ => "Dependencies",
+                    };
+                    if ui.button(deps_lbl).clicked() {
+                        ui_state.active_view = match ui_state.active_view {
+                            ActiveView::Dependencies => ActiveView::Main,
+                            _ => ActiveView::Dependencies,
                         };
                     }
                     let rescan_btn = egui::Button::new(
@@ -473,41 +490,55 @@ pub fn draw_app_ui(
             }
         });
 
-    if ui_state.active_view == ActiveView::Main {
-        // Pinned Bottom Groups: Windows & system, Your files, Unattributed + Reconciliation
-        if let Some(rep) = report {
-            egui::TopBottomPanel::bottom("pinned_groups_panel")
+    match ui_state.active_view {
+        ActiveView::Main => {
+            // Pinned Bottom Groups: Windows & system, Shared & system caches, Your files, Unattributed + Reconciliation
+            if let Some(rep) = report {
+                egui::TopBottomPanel::bottom("pinned_groups_panel")
+                    .frame(
+                        egui::Frame::none()
+                            .fill(pal.panel_alt)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
+                    )
+                    .show(ctx, |ui| {
+                        draw_pinned_bottom_groups(ui, ui_state, rep, &pal);
+                    });
+            }
+
+            // Main App List
+            egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(pal.panel_alt)
-                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .fill(pal.bg)
+                        .inner_margin(Margin::symmetric(SPACE_MD, SPACE_XS)),
+                )
+                .show(ctx, |ui| {
+                    draw_main_app_list(ui, ui_state, report, &pal);
+                });
+        }
+        ActiveView::Dependencies => {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal.bg)
                         .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
                 )
                 .show(ctx, |ui| {
-                    draw_pinned_bottom_groups(ui, ui_state, rep, &pal);
+                    draw_dependencies_view(ui, ui_state, report, &pal);
                 });
         }
-
-        // Main App List
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::none()
-                    .fill(pal.bg)
-                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_XS)),
-            )
-            .show(ctx, |ui| {
-                draw_main_app_list(ui, ui_state, report, &pal);
-            });
-    } else {
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::none()
-                    .fill(pal.bg)
-                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
-            )
-            .show(ctx, |ui| {
-                draw_settings_view(ui, ui_state, config, report, system_windows_dir, &pal, emit);
-            });
+        ActiveView::Settings => {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal.bg)
+                        .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
+                )
+                .show(ctx, |ui| {
+                    draw_settings_view(ui, ui_state, config, report, system_windows_dir, &pal, emit);
+                });
+        }
     }
 }
 
@@ -728,6 +759,90 @@ fn draw_main_app_list(
                                         });
                                     });
                             }
+
+                            ui.add_space(SPACE_XS);
+                            ui.label(
+                                RichText::new("Dependencies (not added to app total):")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(pal.muted),
+                            );
+                            if app.dependencies.is_empty() {
+                                ui.label(
+                                    RichText::new(NO_KNOWN_DEPENDENCIES_LABEL)
+                                        .size(11.5)
+                                        .color(pal.muted),
+                                );
+                            } else {
+                                for dep in &app.dependencies {
+                                    egui::Frame::none()
+                                        .fill(pal.panel_alt)
+                                        .rounding(Rounding::same(4.0))
+                                        .inner_margin(Margin::symmetric(8.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                let (c_fill, c_stroke, c_txt) = match dep.confidence {
+                                                    DependencyConfidence::Proven => (
+                                                        pal.pill_blue_fill,
+                                                        pal.accent_line,
+                                                        pal.accent_line,
+                                                    ),
+                                                    DependencyConfidence::Inferred => (
+                                                        pal.pill_lav_fill,
+                                                        LOGO_LAVENDER,
+                                                        LOGO_LAVENDER,
+                                                    ),
+                                                };
+                                                paint_pill(ui, dep.confidence.label(), c_fill, c_stroke, c_txt);
+                                                ui.label(
+                                                    RichText::new(&dep.target_name)
+                                                        .size(12.0)
+                                                        .strong()
+                                                        .color(pal.text),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} · {} · {}",
+                                                        dep.kind.label(),
+                                                        if dep.present { "present" } else { "missing" },
+                                                        if dep.shared { "shared" } else { "private" }
+                                                    ))
+                                                    .size(11.0)
+                                                    .color(if dep.present { pal.muted } else { STATUS_RED }),
+                                                );
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        let own_lbl = dep
+                                                            .own_size_bytes
+                                                            .map(|b| format!("own: {}", format_bytes(b)))
+                                                            .unwrap_or_else(|| "OS / no own folder".into());
+                                                        ui.label(
+                                                            RichText::new(own_lbl)
+                                                                .size(11.5)
+                                                                .color(pal.muted),
+                                                        );
+                                                        ui.with_layout(
+                                                            Layout::left_to_right(Align::Center),
+                                                            |ui| {
+                                                                ui.add(
+                                                                    egui::Label::new(
+                                                                        RichText::new(&dep.basis)
+                                                                            .size(11.0)
+                                                                            .color(pal.muted),
+                                                                    )
+                                                                    .truncate(),
+                                                                )
+                                                                .on_hover_text(&dep.basis);
+                                                            },
+                                                        );
+                                                    },
+                                                );
+                                            });
+                                        });
+                                }
+                            }
                         }
                     });
                 ui.add_space(SPACE_XS);
@@ -750,6 +865,7 @@ fn basis_short(basis: AttributionBasis) -> &'static str {
         AttributionBasis::Token => "[token]",
         AttributionBasis::Publisher => "[publisher]",
         AttributionBasis::PackageFallback => "[package]",
+        AttributionBasis::StandaloneFolder => "[standalone]",
     }
 }
 
@@ -768,6 +884,7 @@ fn draw_pinned_bottom_groups(
     ui.add_space(SPACE_XS);
 
     let any_expanded = ui_state.expand_windows_system
+        || ui_state.expand_shared_caches
         || ui_state.expand_your_files
         || ui_state.expand_unattributed;
 
@@ -798,7 +915,24 @@ fn draw_pinned_bottom_groups(
         );
         ui.add_space(SPACE_XS);
 
-        // 2. Your files
+        // 2. Shared & system caches (GREEN)
+        draw_pinned_group_card(
+            ui,
+            "Shared & system caches (GREEN)",
+            rep.shared_caches_total_bytes,
+            &format!("{} regenerable Temp / DXCache / Package Cache locations", rep.shared_caches.len()),
+            STATUS_GREEN,
+            &mut ui_state.expand_shared_caches,
+            pal,
+            |ui| {
+                for item in rep.shared_caches.iter().take(40) {
+                    draw_simple_item_row(ui, &item.path, item.bytes, Some("GREEN"), pal);
+                }
+            },
+        );
+        ui.add_space(SPACE_XS);
+
+        // 3. Your files
         draw_pinned_group_card(
             ui,
             "Your files",
@@ -815,7 +949,7 @@ fn draw_pinned_bottom_groups(
         );
         ui.add_space(SPACE_XS);
 
-        // 3. Unattributed
+        // 4. Unattributed
         draw_pinned_group_card(
             ui,
             "Unattributed",
@@ -858,15 +992,17 @@ fn draw_pinned_bottom_groups(
     // Reconciliation line per full-walk enabled drive
     for sys in &rep.windows_system {
         let apps_d = rep.total_apps_bytes_on_drive(sys.drive_letter);
+        let cache_d = rep.total_shared_caches_on_drive(sys.drive_letter);
         let yf_d = rep.total_your_files_on_drive(sys.drive_letter);
         let un_d = rep.total_unattributed_on_drive(sys.drive_letter);
-        let sum_all = apps_d + yf_d + un_d + sys.total_bytes + sys.drive_free_bytes;
+        let sum_all = apps_d + cache_d + yf_d + un_d + sys.total_bytes + sys.drive_free_bytes;
         let diff = sum_all as i128 - sys.drive_total_bytes as i128;
         ui.label(
             RichText::new(format!(
-                "{}:\\ reconciliation: Apps {} + Your files {} + Unattributed {} + Win/sys {} + Free {} = {} (diff {} B)",
+                "{}:\\ reconciliation: Apps {} + Caches {} + Your files {} + Unattributed {} + Win/sys {} + Free {} = {} (diff {} B)",
                 sys.drive_letter,
                 format_bytes(apps_d),
+                format_bytes(cache_d),
                 format_bytes(yf_d),
                 format_bytes(un_d),
                 format_bytes(sys.total_bytes),
@@ -955,6 +1091,158 @@ fn draw_simple_item_row(
             });
         });
     });
+}
+
+fn draw_dependencies_view(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    report: Option<&ScanReport>,
+    pal: &ThemePalette,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Reverse Dependencies (\"What else uses this?\")")
+                .size(16.0)
+                .strong()
+                .color(pal.text),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut ui_state.dep_search_query)
+                    .desired_width(260.0)
+                    .hint_text("Filter dependency or app..."),
+            );
+        });
+    });
+    ui.add_space(SPACE_SM);
+
+    let Some(rep) = report else {
+        ui.label(RichText::new("Run a scan first to inspect dependencies.").color(pal.muted));
+        return;
+    };
+
+    let q = ui_state.dep_search_query.trim().to_ascii_lowercase();
+    egui::ScrollArea::vertical()
+        .id_salt("reverse_deps_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for dep in &rep.reverse_dependencies {
+                if !q.is_empty() {
+                    let dep_hit = dep.target_name.to_ascii_lowercase().contains(&q);
+                    let app_hit = dep
+                        .consumers
+                        .iter()
+                        .any(|c| c.app_name.to_ascii_lowercase().contains(&q));
+                    if !dep_hit && !app_hit {
+                        continue;
+                    }
+                }
+                let expanded = ui_state.expanded_deps.contains(&dep.target_id);
+                egui::Frame::none()
+                    .fill(pal.panel)
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if expanded { pal.accent_line } else { pal.border },
+                    ))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::symmetric(10.0, 7.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let resp = ui
+                            .horizontal(|ui| {
+                                draw_chevron(ui, expanded, pal.accent_line);
+                                ui.label(
+                                    RichText::new(&dep.target_name)
+                                        .size(13.5)
+                                        .strong()
+                                        .color(pal.text),
+                                );
+                                ui.label(
+                                    RichText::new(dep.kind.label())
+                                        .size(11.5)
+                                        .color(pal.muted),
+                                );
+                                paint_pill(
+                                    ui,
+                                    if dep.present { "present" } else { "missing" },
+                                    if dep.present { pal.pill_green_fill } else { pal.pill_red_fill },
+                                    if dep.present { STATUS_GREEN } else { STATUS_RED },
+                                    if dep.present { STATUS_GREEN } else { STATUS_RED },
+                                );
+                                if dep.kind == DependencyKind::SharedRuntime || dep.binary_importer_count > 0 {
+                                    paint_pill(
+                                        ui,
+                                        &format!("{} binary importers", dep.binary_importer_count),
+                                        pal.pill_blue_fill,
+                                        pal.accent_line,
+                                        pal.accent_line,
+                                    );
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{} apps", dep.dependent_count))
+                                            .size(13.0)
+                                            .strong()
+                                            .color(pal.text),
+                                    );
+                                    if let Some(own) = dep.own_size_bytes {
+                                        ui.label(
+                                            RichText::new(format!("own: {}", format_bytes(own)))
+                                                .size(11.5)
+                                                .color(pal.muted),
+                                        );
+                                    }
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click());
+                        if resp.clicked() {
+                            if expanded {
+                                ui_state.expanded_deps.remove(&dep.target_id);
+                            } else {
+                                ui_state.expanded_deps.insert(dep.target_id.clone());
+                            }
+                        }
+                        if expanded {
+                            ui.add_space(SPACE_XS);
+                            for c in &dep.consumers {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(16.0);
+                                    paint_pill(
+                                        ui,
+                                        c.confidence.label(),
+                                        if c.confidence == DependencyConfidence::Proven {
+                                            pal.pill_blue_fill
+                                        } else {
+                                            pal.pill_lav_fill
+                                        },
+                                        if c.confidence == DependencyConfidence::Proven {
+                                            pal.accent_line
+                                        } else {
+                                            LOGO_LAVENDER
+                                        },
+                                        if c.confidence == DependencyConfidence::Proven {
+                                            pal.accent_line
+                                        } else {
+                                            LOGO_LAVENDER
+                                        },
+                                    );
+                                    ui.label(RichText::new(&c.app_name).size(12.0).color(pal.text));
+                                    ui.label(RichText::new(&c.basis).size(11.0).color(pal.muted));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(format_bytes(c.app_total_bytes))
+                                                .size(11.5)
+                                                .color(pal.muted),
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    });
+                ui.add_space(SPACE_XS);
+            }
+        });
 }
 
 fn draw_settings_view(
@@ -1173,7 +1461,10 @@ mod tests {
                         drive_letter: 'C',
                     },
                 ],
+                dependencies: vec![],
             }],
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
             your_files: vec![BreakdownItem {
                 path: "C:\\Users\\Win\\Documents".into(),
                 bytes: 10_000,
@@ -1202,6 +1493,7 @@ mod tests {
                 zone_hint: Some(ZoneKind::Green),
             }],
             unattributed_total_bytes: 5_000,
+            reverse_dependencies: vec![],
         };
 
         let ctx = egui::Context::default();
@@ -1209,7 +1501,7 @@ mod tests {
         state.expanded_apps.insert("reg:discord".into());
         let cfg = AppConfig::default();
 
-        for view in [ActiveView::Main, ActiveView::Settings] {
+        for view in [ActiveView::Main, ActiveView::Dependencies, ActiveView::Settings] {
             state.active_view = view;
             let raw = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),

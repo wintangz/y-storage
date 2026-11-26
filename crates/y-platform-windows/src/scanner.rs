@@ -829,18 +829,29 @@ pub fn execute_scan_with_progress(
         });
     }
 
-    let (ts_unix, ts_display) = current_local_timestamp();
-    let duration_ms = start.elapsed().as_millis() as u64;
+    if let Some(cb) = on_progress {
+        cb(ScanProgressSnapshot {
+            phase: "Analyzing dependencies".to_string(),
+            current_path: String::new(),
+            dirs_walked: progress.dirs_walked.load(Ordering::Relaxed),
+            files_counted: progress.files_counted.load(Ordering::Relaxed),
+            bytes_counted: progress.bytes_counted.load(Ordering::Relaxed),
+        });
+    }
 
-    attribute_scan(
+    let (ts_unix, ts_display) = current_local_timestamp();
+    let mut report = attribute_scan(
         ts_unix,
         ts_display,
-        duration_ms,
+        0,
         drives,
         catalog.stats,
         &catalog.apps,
         &catalog.guid_to_app_name,
         &all_units,
         previous_history,
-    )
+    );
+    crate::dep_scan::enrich_report_with_dependencies(&mut report);
+    report.duration_ms = start.elapsed().as_millis() as u64;
+    report
 }

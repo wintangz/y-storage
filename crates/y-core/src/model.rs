@@ -63,6 +63,7 @@ pub enum AttributionBasis {
     Token,
     Publisher,
     PackageFallback,
+    StandaloneFolder,
 }
 
 impl AttributionBasis {
@@ -74,8 +75,84 @@ impl AttributionBasis {
             Self::Token => "token match",
             Self::Publisher => "publisher match",
             Self::PackageFallback => "package name",
+            Self::StandaloneFolder => "standalone folder",
         }
     }
+}
+
+pub const NO_KNOWN_DEPENDENCIES_LABEL: &str = "no known dependencies";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DependencyKind {
+    PlatformLauncher,
+    AntiCheatServiceDriver,
+    SharedRuntime,
+    SharedData,
+}
+
+impl DependencyKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlatformLauncher => "platform/launcher client",
+            Self::AntiCheatServiceDriver => "anti-cheat, service or driver",
+            Self::SharedRuntime => "shared runtime",
+            Self::SharedData => "shared data",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DependencyConfidence {
+    Proven,
+    Inferred,
+}
+
+impl DependencyConfidence {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Proven => "proven",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyRecord {
+    pub target_id: String,
+    pub target_name: String,
+    pub kind: DependencyKind,
+    pub present: bool,
+    pub own_size_bytes: Option<u64>,
+    pub shared: bool,
+    pub basis: String,
+    pub confidence: DependencyConfidence,
+    #[serde(default)]
+    pub imported_by_binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseConsumer {
+    pub app_id: String,
+    pub app_name: String,
+    pub app_total_bytes: u64,
+    pub confidence: DependencyConfidence,
+    pub basis: String,
+    #[serde(default)]
+    pub imported_by_binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseDependencyEntry {
+    pub target_id: String,
+    pub target_name: String,
+    pub kind: DependencyKind,
+    pub present: bool,
+    pub own_size_bytes: Option<u64>,
+    pub dependent_count: usize,
+    pub binary_importer_count: usize,
+    pub consumers: Vec<ReverseConsumer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +268,8 @@ pub struct AttributedApp {
     pub no_touch: Option<NoTouchCategory>,
     pub bases: Vec<AttributionBasis>,
     pub items: Vec<BreakdownItem>,
+    #[serde(default)]
+    pub dependencies: Vec<DependencyRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,12 +300,18 @@ pub struct ScanReport {
     pub drives: Vec<DriveInfo>,
     pub registry_stats: RegistryDiscoveryStats,
     pub apps: Vec<AttributedApp>,
+    #[serde(default)]
+    pub shared_caches: Vec<BreakdownItem>,
+    #[serde(default)]
+    pub shared_caches_total_bytes: u64,
     pub your_files: Vec<BreakdownItem>,
     pub your_files_total_bytes: u64,
     pub windows_system: Vec<SystemDriveBreakdown>,
     pub windows_system_total_bytes: u64,
     pub unattributed: Vec<UnattributedItem>,
     pub unattributed_total_bytes: u64,
+    #[serde(default)]
+    pub reverse_dependencies: Vec<ReverseDependencyEntry>,
 }
 
 impl ScanReport {
@@ -236,6 +321,16 @@ impl ScanReport {
         self.apps
             .iter()
             .flat_map(|a| a.items.iter())
+            .filter(|i| i.drive_letter.to_ascii_uppercase() == target)
+            .map(|i| i.bytes)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn total_shared_caches_on_drive(&self, drive_letter: char) -> u64 {
+        let target = drive_letter.to_ascii_uppercase();
+        self.shared_caches
+            .iter()
             .filter(|i| i.drive_letter.to_ascii_uppercase() == target)
             .map(|i| i.bytes)
             .sum()
