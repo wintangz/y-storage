@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/y-core",
+    "crates/y-platform-windows",
+    "apps/y-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
