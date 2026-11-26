@@ -17,6 +17,8 @@ struct CpuTexture {
 }
 
 struct DibBackBuffer {
+    cap_w: usize,
+    cap_h: usize,
     mem_dc: HDC,
     bitmap: HBITMAP,
     old_bitmap: HGDIOBJ,
@@ -24,8 +26,8 @@ struct DibBackBuffer {
 }
 
 impl DibBackBuffer {
-    fn new(hdc_ref: HDC, width: usize, height: usize) -> Option<Self> {
-        if width == 0 || height == 0 || hdc_ref.is_null() {
+    fn new(hdc_ref: HDC, cap_w: usize, cap_h: usize) -> Option<Self> {
+        if cap_w == 0 || cap_h == 0 || hdc_ref.is_null() {
             return None;
         }
         let mem_dc = unsafe { CreateCompatibleDC(hdc_ref) };
@@ -35,8 +37,8 @@ impl DibBackBuffer {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32), // Top-down DIB
+                biWidth: cap_w as i32,
+                biHeight: -(cap_h as i32), // Top-down DIB
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB,
@@ -63,6 +65,8 @@ impl DibBackBuffer {
         }
         let old_bitmap = unsafe { SelectObject(mem_dc, bitmap) };
         Some(Self {
+            cap_w,
+            cap_h,
             mem_dc,
             bitmap,
             old_bitmap,
@@ -109,7 +113,11 @@ impl SoftwarePainter {
     pub fn has_ready_backbuffer(&self, width: usize, height: usize) -> bool {
         self.width == width
             && self.height == height
-            && (self.dib.is_some() || self.fallback_fb.len() == width * height)
+            && (self
+                .dib
+                .as_ref()
+                .is_some_and(|d| width <= d.cap_w && height <= d.cap_h)
+                || self.fallback_fb.len() == width * height)
     }
 
     pub fn apply_textures(&mut self, delta: &TexturesDelta) {
@@ -147,39 +155,38 @@ impl SoftwarePainter {
         }
     }
 
-    fn ensure_backbuffer(&mut self, hdc_ref: HDC, width: usize, height: usize) {
-        if self.width == width
-            && self.height == height
-            && (self.dib.is_some() || !self.fallback_fb.is_empty())
-        {
-            return;
-        }
+    fn ensure_backbuffer(&mut self, hdc_ref: HDC, width: usize, height: usize) -> usize {
         self.width = width;
         self.height = height;
-        self.dib = DibBackBuffer::new(hdc_ref, width, height);
-        if self.dib.is_none() {
+        if hdc_ref.is_null() {
+            self.dib = None;
             self.fallback_fb.resize(width * height, 0);
-        } else {
+            return width;
+        }
+        let need_alloc = match &self.dib {
+            Some(d) => width > d.cap_w || height > d.cap_h,
+            None => true,
+        };
+        if need_alloc {
+            // Pool capacity in 256px chunks so live window-edge resize dragging avoids per-frame GDI allocations.
+            let prev_w = self.dib.as_ref().map_or(0, |d| d.cap_w);
+            let prev_h = self.dib.as_ref().map_or(0, |d| d.cap_h);
+            let cap_w = ((width.max(prev_w) + 255) & !255).max(256);
+            let cap_h = ((height.max(prev_h) + 255) & !255).max(256);
+            self.dib = DibBackBuffer::new(hdc_ref, cap_w, cap_h);
+        }
+        if let Some(d) = &self.dib {
             self.fallback_fb = Vec::new();
+            d.cap_w
+        } else {
+            self.fallback_fb.resize(width * height, 0);
+            width
         }
     }
 
     pub fn backbuffer_pixels(&self) -> &[u32] {
         let len = self.width * self.height;
-        if let Some(d) = &self.dib {
-            unsafe { slice::from_raw_parts(d.bits, len) }
-        } else {
-            &self.fallback_fb[..len]
-        }
-    }
-
-    fn backbuffer_slice_mut(&mut self) -> &mut [u32] {
-        let len = self.width * self.height;
-        if let Some(d) = &self.dib {
-            unsafe { slice::from_raw_parts_mut(d.bits, len) }
-        } else {
-            &mut self.fallback_fb[..len]
-        }
+        &self.fallback_fb[..len]
     }
 
     pub fn present_rect(&self, hdc: HDC, dirty: Option<RECT>) {
@@ -220,11 +227,28 @@ impl SoftwarePainter {
         if width == 0 || height == 0 {
             return;
         }
-        self.ensure_backbuffer(hdc, width, height);
+        let stride = self.ensure_backbuffer(hdc, width, height);
         {
-            let fb = self.backbuffer_slice_mut();
-            fb.fill(clear_rgb);
+            let fb: &mut [u32] = if let Some(d) = &self.dib {
+                unsafe { slice::from_raw_parts_mut(d.bits, d.cap_w * height) }
+            } else {
+                &mut self.fallback_fb[..width * height]
+            };
+            if stride == width {
+                fb.fill(clear_rgb);
+            } else {
+                for py in 0..height {
+                    let row = py * stride;
+                    fb[row..row + width].fill(clear_rgb);
+                }
+            }
         }
+
+        let fb: &mut [u32] = if let Some(d) = &self.dib {
+            unsafe { slice::from_raw_parts_mut(d.bits, d.cap_w * height) }
+        } else {
+            &mut self.fallback_fb[..width * height]
+        };
 
         for cp in primitives {
             let cmin_x = (cp.clip_rect.min.x * pixels_per_point)
@@ -244,14 +268,7 @@ impl SoftwarePainter {
             }
 
             if let Primitive::Mesh(mesh) = &cp.primitive {
-                let has_tex = self.textures.contains_key(&mesh.texture_id);
-                let len = width * height;
-                let fb = if let Some(d) = &self.dib {
-                    unsafe { slice::from_raw_parts_mut(d.bits, len) }
-                } else {
-                    &mut self.fallback_fb[..len]
-                };
-
+                let tex = self.textures.get(&mesh.texture_id);
                 let mut i = 0usize;
                 while i + 6 <= mesh.indices.len() {
                     let t0 = &mesh.indices[i..i + 6];
@@ -259,20 +276,14 @@ impl SoftwarePainter {
                         detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
                     {
                         fill_solid_rect(
-                            fb, width, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
+                            fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
                         );
-                        i += 6;
                     } else {
-                        let tex = if has_tex {
-                            self.textures.get(&mesh.texture_id)
-                        } else {
-                            None
-                        };
                         for k in 0..2 {
                             let tri = &mesh.indices[i + k * 3..i + k * 3 + 3];
                             rasterize_triangle(
                                 fb,
-                                width,
+                                stride,
                                 cmin_x,
                                 cmin_y,
                                 cmax_x,
@@ -284,19 +295,14 @@ impl SoftwarePainter {
                                 tex,
                             );
                         }
-                        i += 6;
                     }
+                    i += 6;
                 }
                 while i + 3 <= mesh.indices.len() {
-                    let tex = if has_tex {
-                        self.textures.get(&mesh.texture_id)
-                    } else {
-                        None
-                    };
                     let tri = &mesh.indices[i..i + 3];
                     rasterize_triangle(
                         fb,
-                        width,
+                        stride,
                         cmin_x,
                         cmin_y,
                         cmax_x,
@@ -363,7 +369,7 @@ fn detect_solid_quad(
 #[inline]
 fn fill_solid_rect(
     fb: &mut [u32],
-    fb_w: usize,
+    fb_stride: usize,
     clip_min_x: usize,
     clip_min_y: usize,
     clip_max_x: usize,
@@ -387,26 +393,39 @@ fn fill_solid_rect(
     if src[3] == 255 {
         let packed = ((src[0] as u32) << 16) | ((src[1] as u32) << 8) | (src[2] as u32);
         for py in y0..y1 {
-            let row = py * fb_w;
+            let row = py * fb_stride;
             fb[row + x0..row + x1].fill(packed);
         }
     } else {
-        let sr = src[0] as u32;
-        let sg = src[1] as u32;
-        let sb = src[2] as u32;
-        let inv_a = 255 - src[3] as u32;
-        for py in y0..y1 {
-            let row = py * fb_w;
-            for dst in &mut fb[row + x0..row + x1] {
-                let d = *dst;
-                let dr = (d >> 16) & 0xFF;
-                let dg = (d >> 8) & 0xFF;
-                let db = d & 0xFF;
-                let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
-                let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
-                let b = (sb + ((db * inv_a + 127) / 255)).min(255);
-                *dst = (r << 16) | (g << 8) | b;
-            }
+        blend_premultiplied_span_rows(fb, fb_stride, x0, x1, y0, y1, src);
+    }
+}
+
+#[inline]
+fn blend_premultiplied_span_rows(
+    fb: &mut [u32],
+    fb_stride: usize,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+    src: [u8; 4],
+) {
+    let sr = src[0] as u32;
+    let sg = src[1] as u32;
+    let sb = src[2] as u32;
+    let inv_a = 255 - src[3] as u32;
+    for py in y0..y1 {
+        let row = py * fb_stride;
+        for dst in &mut fb[row + x0..row + x1] {
+            let d = *dst;
+            let dr = (d >> 16) & 0xFF;
+            let dg = (d >> 8) & 0xFF;
+            let db = d & 0xFF;
+            let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
+            let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
+            let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+            *dst = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -435,11 +454,69 @@ fn edge_pass(w: f32, ex: f32, ey: f32) -> bool {
     }
 }
 
+/// Computes the exact horizontal `[span_x0 .. span_x1)` covered on scanline `fy` matching `edge_pass`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn scanline_x_span(
+    min_x: usize,
+    max_x: usize,
+    fy: f32,
+    ex: [f32; 3],
+    ey: [f32; 3],
+    vx: [f32; 3],
+    vy: [f32; 3],
+) -> Option<(usize, usize)> {
+    let mut lo = min_x as f32;
+    let mut hi = max_x as f32;
+    // Edge k passes through vertex p[(k+1)%3] with direction (ex[k], ey[k])
+    let c = [
+        ex[0] * (fy - vy[1]) + ey[0] * (vx[1] - 0.5),
+        ex[1] * (fy - vy[2]) + ey[1] * (vx[2] - 0.5),
+        ex[2] * (fy - vy[0]) + ey[2] * (vx[0] - 0.5),
+    ];
+    for k in 0..3 {
+        let slope = -ey[k];
+        if slope > 1e-6 {
+            let x_enter = (-c[k] / slope).floor() - 1.0;
+            lo = lo.max(x_enter);
+        } else if slope < -1e-6 {
+            let x_exit = (-c[k] / slope).ceil() + 2.0;
+            hi = hi.min(x_exit);
+        } else if !edge_pass(c[k], ex[k], ey[k]) {
+            return None;
+        }
+    }
+    let mut sx0 = (lo.max(min_x as f32) as usize).min(max_x);
+    let mut sx1 = (hi.min(max_x as f32) as usize).max(sx0);
+    // Tighten up to 2 boundary pixels using exact edge_pass so every pixel matches scalar evaluation bit-for-bit.
+    while sx0 < sx1 {
+        let px = sx0 as f32;
+        if edge_pass(c[0] - ey[0] * px, ex[0], ey[0])
+            && edge_pass(c[1] - ey[1] * px, ex[1], ey[1])
+            && edge_pass(c[2] - ey[2] * px, ex[2], ey[2])
+        {
+            break;
+        }
+        sx0 += 1;
+    }
+    while sx1 > sx0 {
+        let px = (sx1 - 1) as f32;
+        if edge_pass(c[0] - ey[0] * px, ex[0], ey[0])
+            && edge_pass(c[1] - ey[1] * px, ex[1], ey[1])
+            && edge_pass(c[2] - ey[2] * px, ex[2], ey[2])
+        {
+            break;
+        }
+        sx1 -= 1;
+    }
+    (sx0 < sx1).then_some((sx0, sx1))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn rasterize_triangle(
     fb: &mut [u32],
-    fb_w: usize,
+    fb_stride: usize,
     clip_min_x: usize,
     clip_min_y: usize,
     clip_max_x: usize,
@@ -478,74 +555,95 @@ fn rasterize_triangle(
     };
     let inv_area = 1.0 / area;
 
-    let ex0 = (x2 - x1) * sign;
-    let ey0 = (y2 - y1) * sign;
-    let ex1 = (x0 - x2) * sign;
-    let ey1 = (y0 - y2) * sign;
-    let ex2 = (x1 - x0) * sign;
-    let ey2 = (y1 - y0) * sign;
+    let ex = [(x2 - x1) * sign, (x0 - x2) * sign, (x1 - x0) * sign];
+    let ey = [(y2 - y1) * sign, (y0 - y2) * sign, (y1 - y0) * sign];
+    let vx = [x0, x1, x2];
+    let vy = [y0, y1, y2];
 
     let c0 = v0.color.to_array();
     let c1 = v1.color.to_array();
     let c2 = v2.color.to_array();
 
-    let flat_solid = c0 == c1
-        && c1 == c2
-        && v0.uv == WHITE_UV
-        && v1.uv == WHITE_UV
-        && v2.uv == WHITE_UV;
+    let uniform_col = c0 == c1 && c1 == c2;
     let untextured = v0.uv == WHITE_UV && v1.uv == WHITE_UV && v2.uv == WHITE_UV;
+
+    if uniform_col && untextured {
+        if c0[3] == 0 {
+            return;
+        }
+        if c0[3] == 255 {
+            let packed = ((c0[0] as u32) << 16) | ((c0[1] as u32) << 8) | (c0[2] as u32);
+            for py in min_y..max_y {
+                let fy = py as f32 + 0.5;
+                if let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) {
+                    let row_off = py * fb_stride;
+                    fb[row_off + sx0..row_off + sx1].fill(packed);
+                }
+            }
+        } else {
+            for py in min_y..max_y {
+                let fy = py as f32 + 0.5;
+                if let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) {
+                    blend_premultiplied_span_rows(fb, fb_stride, sx0, sx1, py, py + 1, c0);
+                }
+            }
+        }
+        return;
+    }
+
+    // Barycentric horizontal increments: db_k / d(px) = -ey[k] * inv_area
+    let db0_dx = -ey[0] * inv_area;
+    let db1_dx = -ey[1] * inv_area;
 
     for py in min_y..max_y {
         let fy = py as f32 + 0.5;
-        let row_off = py * fb_w;
-        for px in min_x..max_x {
-            let fx = px as f32 + 0.5;
-            let w0 = ex0 * (fy - y1) - ey0 * (fx - x1);
-            if !edge_pass(w0, ex0, ey0) {
-                continue;
-            }
-            let w1 = ex1 * (fy - y2) - ey1 * (fx - x2);
-            if !edge_pass(w1, ex1, ey1) {
-                continue;
-            }
-            let w2 = ex2 * (fy - y0) - ey2 * (fx - x0);
-            if !edge_pass(w2, ex2, ey2) {
-                continue;
-            }
+        let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) else {
+            continue;
+        };
+        let row_off = py * fb_stride;
+        let fx0 = sx0 as f32 + 0.5;
+        let mut b0 = (ex[0] * (fy - y1) - ey[0] * (fx0 - x1)) * inv_area;
+        let mut b1 = (ex[1] * (fy - y2) - ey[1] * (fx0 - x2)) * inv_area;
 
-            let src = if flat_solid {
-                c0
+        for px in sx0..sx1 {
+            let cb0 = b0.clamp(0.0, 1.0);
+            let cb1 = b1.clamp(0.0, 1.0);
+            let cb2 = (1.0 - cb0 - cb1).max(0.0);
+
+            let (vr, vg, vb, va) = if uniform_col {
+                (c0[0], c0[1], c0[2], c0[3])
             } else {
-                let b0 = (w0 * inv_area).clamp(0.0, 1.0);
-                let b1 = (w1 * inv_area).clamp(0.0, 1.0);
-                let b2 = (1.0 - b0 - b1).max(0.0);
-
-                let vr =
-                    (c0[0] as f32 * b0 + c1[0] as f32 * b1 + c2[0] as f32 * b2 + 0.5) as u8;
-                let vg =
-                    (c0[1] as f32 * b0 + c1[1] as f32 * b1 + c2[1] as f32 * b2 + 0.5) as u8;
-                let vb =
-                    (c0[2] as f32 * b0 + c1[2] as f32 * b1 + c2[2] as f32 * b2 + 0.5) as u8;
-                let va =
-                    (c0[3] as f32 * b0 + c1[3] as f32 * b1 + c2[3] as f32 * b2 + 0.5) as u8;
-
-                if untextured {
-                    [vr, vg, vb, va]
-                } else if let Some(t) = tex {
-                    let u = (v0.uv.x * b0 + v1.uv.x * b1 + v2.uv.x * b2).clamp(0.0, 1.0);
-                    let v = (v0.uv.y * b0 + v1.uv.y * b1 + v2.uv.y * b2).clamp(0.0, 1.0);
-                    let tc = sample_bilinear(t, u, v);
-                    [
-                        ((vr as u16 * tc[0] as u16 + 127) / 255) as u8,
-                        ((vg as u16 * tc[1] as u16 + 127) / 255) as u8,
-                        ((vb as u16 * tc[2] as u16 + 127) / 255) as u8,
-                        ((va as u16 * tc[3] as u16 + 127) / 255) as u8,
-                    ]
-                } else {
-                    [vr, vg, vb, va]
-                }
+                (
+                    (c0[0] as f32 * cb0 + c1[0] as f32 * cb1 + c2[0] as f32 * cb2 + 0.5) as u8,
+                    (c0[1] as f32 * cb0 + c1[1] as f32 * cb1 + c2[1] as f32 * cb2 + 0.5) as u8,
+                    (c0[2] as f32 * cb0 + c1[2] as f32 * cb1 + c2[2] as f32 * cb2 + 0.5) as u8,
+                    (c0[3] as f32 * cb0 + c1[3] as f32 * cb1 + c2[3] as f32 * cb2 + 0.5) as u8,
+                )
             };
+
+            let src = if untextured {
+                [vr, vg, vb, va]
+            } else if let Some(t) = tex {
+                let u = (v0.uv.x * cb0 + v1.uv.x * cb1 + v2.uv.x * cb2).clamp(0.0, 1.0);
+                let v = (v0.uv.y * cb0 + v1.uv.y * cb1 + v2.uv.y * cb2).clamp(0.0, 1.0);
+                let tc = sample_bilinear(t, u, v);
+                if tc[3] == 0 {
+                    b0 += db0_dx;
+                    b1 += db1_dx;
+                    continue;
+                }
+                [
+                    ((vr as u16 * tc[0] as u16 + 127) / 255) as u8,
+                    ((vg as u16 * tc[1] as u16 + 127) / 255) as u8,
+                    ((vb as u16 * tc[2] as u16 + 127) / 255) as u8,
+                    ((va as u16 * tc[3] as u16 + 127) / 255) as u8,
+                ]
+            } else {
+                [vr, vg, vb, va]
+            };
+
+            b0 += db0_dx;
+            b1 += db1_dx;
 
             if src[3] == 0 {
                 continue;
@@ -642,5 +740,51 @@ mod tests {
         let lit100 = fb100.iter().filter(|&&px| px != 0x000A_0A10 && px != 0x001B_1B1B).count();
         let lit150 = fb150.iter().filter(|&&px| px != 0x000A_0A10 && px != 0x001B_1B1B).count();
         assert!(lit150 * 10 > lit100 * 17);
+    }
+
+    #[test]
+    fn scanline_x_span_matches_scalar_edge_pass_for_diagonal_triangles() {
+        let verts = [
+            egui::epaint::Vertex {
+                pos: Pos2::new(10.3, 8.7),
+                uv: WHITE_UV,
+                color: Color32::from_rgba_unmultiplied(84, 185, 242, 200),
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(93.8, 22.1),
+                uv: WHITE_UV,
+                color: Color32::from_rgba_unmultiplied(216, 166, 255, 200),
+            },
+            egui::epaint::Vertex {
+                pos: Pos2::new(34.2, 67.9),
+                uv: WHITE_UV,
+                color: Color32::from_rgba_unmultiplied(247, 168, 216, 200),
+            },
+        ];
+        let x0 = verts[0].pos.x;
+        let y0 = verts[0].pos.y;
+        let x1 = verts[1].pos.x;
+        let y1 = verts[1].pos.y;
+        let x2 = verts[2].pos.x;
+        let y2 = verts[2].pos.y;
+        let area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+        let sign = if area < 0.0 { -1.0 } else { 1.0 };
+        let ex = [(x2 - x1) * sign, (x0 - x2) * sign, (x1 - x0) * sign];
+        let ey = [(y2 - y1) * sign, (y0 - y2) * sign, (y1 - y0) * sign];
+        let vx = [x0, x1, x2];
+        let vy = [y0, y1, y2];
+
+        for py in 0..80usize {
+            let fy = py as f32 + 0.5;
+            let fast = scanline_x_span(0, 120, fy, ex, ey, vx, vy);
+            for px in 0..120usize {
+                let fx = px as f32 + 0.5;
+                let inside_scalar = edge_pass(ex[0] * (fy - y1) - ey[0] * (fx - x1), ex[0], ey[0])
+                    && edge_pass(ex[1] * (fy - y2) - ey[1] * (fx - x2), ex[1], ey[1])
+                    && edge_pass(ex[2] * (fy - y0) - ey[2] * (fx - x0), ex[2], ey[2]);
+                let inside_fast = fast.is_some_and(|(a, b)| px >= a && px < b);
+                assert_eq!(inside_fast, inside_scalar, "mismatch at ({px}, {py})");
+            }
+        }
     }
 }

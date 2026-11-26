@@ -6,7 +6,8 @@ use std::time::Instant;
 use egui::{
     Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2, ViewportId,
 };
-use windows_sys::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use serde::Serialize;
+use windows_sys::Win32::Foundation::{FILETIME, FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
@@ -15,20 +16,22 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow,
     DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowPlacement, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR,
-    LoadCursorW, LoadImageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYSMICON,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SW_SHOWMAXIMIZED,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetWindowPlacement, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, KillTimer,
+    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON,
+    SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
+    SW_SHOWMAXIMIZED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{AppConfig, ThemeMode, WindowPlacementConfig};
@@ -42,8 +45,27 @@ use crate::ui::{StorageUiState, UiAction, configure_fonts_and_theme, draw_app_ui
 
 const WM_APP_SCAN_UPDATE: u32 = 0x8000 + 10;
 const WM_APP_FOLLOWUP_PAINT: u32 = 0x8000 + 11;
+const TIMER_REPAINT_ID: usize = 9000;
+const TIMER_BENCH_DONE_ID: usize = 9001;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SETFOCUS_MSG: u32 = 0x0007;
+const WM_KILLFOCUS_MSG: u32 = 0x0008;
+const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
+const TME_LEAVE_FLAG: u32 = 0x0000_0002;
+
+#[repr(C)]
+struct WinTrackMouseEvent {
+    cb_size: u32,
+    dw_flags: u32,
+    hwnd_track: HWND,
+    dw_hover_time: u32,
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn TrackMouseEvent(lp_event_track: *mut WinTrackMouseEvent) -> i32;
+}
 
 const DEFAULT_LOGICAL_W: i32 = 1020;
 const DEFAULT_LOGICAL_H: i32 = 720;
@@ -70,7 +92,7 @@ pub struct AppController {
     pub cache: FolderSizeCache,
     pub cache_path: std::path::PathBuf,
     pub last_scan_path: std::path::PathBuf,
-    pub report: Option<ScanReport>,
+    pub report: Option<Arc<ScanReport>>,
     pub scanning: bool,
     pub progress: Option<ScanProgressSnapshot>,
     pub system_windows_dir: String,
@@ -105,13 +127,22 @@ impl AppController {
             cache,
             cache_path,
             last_scan_path,
-            report,
+            report: report.map(Arc::new),
             scanning: false,
             progress: None,
             system_windows_dir: sys_win,
             hwnd: 0,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FrameTimingSample {
+    total_ms: f64,
+    lock_clone_ms: f64,
+    egui_run_ms: f64,
+    tessellate_ms: f64,
+    raster_blit_ms: f64,
 }
 
 struct WindowHostState {
@@ -127,8 +158,16 @@ struct WindowHostState {
     pixels_per_point: f32,
     needs_redraw: bool,
     followup_budget: u8,
+    window_focused: bool,
+    last_mouse_px: Option<(i32, i32)>,
+    tracking_mouse_leave: bool,
+    repaint_timer_active: bool,
     smoke_mode: bool,
     start_time: Instant,
+    bench_recording: bool,
+    bench_idle_wm_paints: usize,
+    bench_timer_fired: bool,
+    bench_samples: Vec<FrameTimingSample>,
 }
 
 #[inline]
@@ -306,7 +345,7 @@ fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
         let _ = guard.cache.save_atomic(&guard.cache_path);
         let _ = save_last_scan_atomic(&guard.last_scan_path, &report);
         let _ = guard.config.save_atomic(&guard.config_path);
-        guard.report = Some(report);
+        guard.report = Some(Arc::new(report));
         guard.scanning = false;
         guard.progress = None;
         let hwnd_done = guard.hwnd;
@@ -378,8 +417,16 @@ pub fn run_gui_app(
         pixels_per_point: dpi_to_ppp(init_dpi),
         needs_redraw: true,
         followup_budget: 2,
+        window_focused: true,
+        last_mouse_px: None,
+        tracking_mouse_leave: false,
+        repaint_timer_active: false,
         smoke_mode: smoke_ms.is_some(),
         start_time: Instant::now(),
+        bench_recording: false,
+        bench_idle_wm_paints: 0,
+        bench_timer_fired: false,
+        bench_samples: Vec::new(),
     });
     let state_ptr = Box::into_raw(host_state);
 
@@ -555,8 +602,28 @@ unsafe extern "system" fn wnd_proc(
             unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
+        WM_TIMER => {
+            let tid = wparam as usize;
+            if tid == TIMER_REPAINT_ID {
+                unsafe { KillTimer(hwnd, TIMER_REPAINT_ID) };
+                let st = unsafe { &mut *state_ptr };
+                st.repaint_timer_active = false;
+                st.needs_redraw = true;
+                unsafe { InvalidateRect(hwnd, null(), 0) };
+                return 0;
+            }
+            if tid == TIMER_BENCH_DONE_ID {
+                unsafe { KillTimer(hwnd, TIMER_BENCH_DONE_ID) };
+                let st = unsafe { &mut *state_ptr };
+                st.bench_timer_fired = true;
+                return 0;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_PAINT => {
             let st = unsafe { &mut *state_ptr };
+            let t_paint_start = Instant::now();
+            st.bench_idle_wm_paints += 1;
             let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
@@ -584,7 +651,7 @@ unsafe extern "system" fn wnd_proc(
                     time: Some(elapsed),
                     modifiers: current_modifiers(),
                     events,
-                    focused: true,
+                    focused: st.window_focused,
                     ..Default::default()
                 };
                 raw.viewports
@@ -592,6 +659,7 @@ unsafe extern "system" fn wnd_proc(
                     .or_default()
                     .native_pixels_per_point = Some(ppp);
 
+                let t_lock_start = Instant::now();
                 let (config_snap, report_snap, scanning, progress_snap, sys_win) = {
                     let g = st.controller.lock().unwrap();
                     (
@@ -602,12 +670,14 @@ unsafe extern "system" fn wnd_proc(
                         g.system_windows_dir.clone(),
                     )
                 };
+                let lock_clone_ms = t_lock_start.elapsed().as_secs_f64() * 1000.0;
 
                 if st.applied_titlebar_theme != Some(config_snap.theme_mode) {
                     apply_titlebar_theme(hwnd, config_snap.theme_mode);
                     st.applied_titlebar_theme = Some(config_snap.theme_mode);
                 }
 
+                let t_egui_start = Instant::now();
                 let mut actions: Vec<UiAction> = Vec::new();
                 let ui_state = &mut st.ui_state;
                 let full_out = st.egui_ctx.run(raw, |ctx| {
@@ -615,22 +685,27 @@ unsafe extern "system" fn wnd_proc(
                         ctx,
                         ui_state,
                         &config_snap,
-                        report_snap.as_ref(),
+                        report_snap.as_deref(),
                         scanning,
                         progress_snap.as_ref(),
                         &sys_win,
                         &mut |act| actions.push(act),
                     );
                 });
+                let egui_run_ms = t_egui_start.elapsed().as_secs_f64() * 1000.0;
 
                 let clear_bg = match config_snap.theme_mode {
                     ThemeMode::Dark => CLEAR_BG_DARK_RGB,
                     ThemeMode::Light => CLEAR_BG_LIGHT_RGB,
                 };
-                st.painter.apply_textures(&full_out.textures_delta);
+                let t_tess_start = Instant::now();
                 let clipped = st
                     .egui_ctx
                     .tessellate(full_out.shapes, full_out.pixels_per_point);
+                let tessellate_ms = t_tess_start.elapsed().as_secs_f64() * 1000.0;
+
+                let t_raster_start = Instant::now();
+                st.painter.apply_textures(&full_out.textures_delta);
                 st.painter.paint_and_blit(
                     hdc,
                     st.width,
@@ -640,17 +715,40 @@ unsafe extern "system" fn wnd_proc(
                     clear_bg,
                     Some(ps.rcPaint),
                 );
+                let raster_blit_ms = t_raster_start.elapsed().as_secs_f64() * 1000.0;
                 st.needs_redraw = false;
 
-                let wants_zero_delay = full_out
+                if st.bench_recording {
+                    st.bench_samples.push(FrameTimingSample {
+                        total_ms: t_paint_start.elapsed().as_secs_f64() * 1000.0,
+                        lock_clone_ms,
+                        egui_run_ms,
+                        tessellate_ms,
+                        raster_blit_ms,
+                    });
+                }
+
+                let min_repaint_delay = full_out
                     .viewport_output
                     .values()
-                    .any(|v| v.repaint_delay.is_zero());
-                if wants_zero_delay && st.followup_budget > 0 {
+                    .map(|v| v.repaint_delay)
+                    .min()
+                    .unwrap_or(std::time::Duration::MAX);
+                if min_repaint_delay.is_zero() && st.followup_budget > 0 {
                     st.followup_budget -= 1;
                     unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                 } else {
                     st.followup_budget = 0;
+                    if !st.bench_recording
+                        && min_repaint_delay < std::time::Duration::from_secs(3600)
+                    {
+                        let delay_ms = (min_repaint_delay.as_millis() as u32).clamp(16, 2000);
+                        unsafe { SetTimer(hwnd, TIMER_REPAINT_ID, delay_ms, None) };
+                        st.repaint_timer_active = true;
+                    } else if st.repaint_timer_active {
+                        unsafe { KillTimer(hwnd, TIMER_REPAINT_ID) };
+                        st.repaint_timer_active = false;
+                    }
                 }
 
                 for act in actions {
@@ -703,9 +801,53 @@ unsafe extern "system" fn wnd_proc(
             unsafe { EndPaint(hwnd, &ps) };
             0
         }
+        WM_SETFOCUS_MSG => {
+            let st = unsafe { &mut *state_ptr };
+            st.window_focused = true;
+            st.needs_redraw = true;
+            unsafe { InvalidateRect(hwnd, null(), 0) };
+            0
+        }
+        WM_KILLFOCUS_MSG => {
+            let st = unsafe { &mut *state_ptr };
+            st.window_focused = false;
+            if st.repaint_timer_active {
+                unsafe { KillTimer(hwnd, TIMER_REPAINT_ID) };
+                st.repaint_timer_active = false;
+            }
+            st.needs_redraw = true;
+            unsafe { InvalidateRect(hwnd, null(), 0) };
+            0
+        }
+        WM_MOUSELEAVE_MSG => {
+            let st = unsafe { &mut *state_ptr };
+            st.tracking_mouse_leave = false;
+            st.last_mouse_px = None;
+            st.events.push(Event::PointerGone);
+            st.needs_redraw = true;
+            unsafe { InvalidateRect(hwnd, null(), 0) };
+            0
+        }
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lparam);
+            let ix = x.round() as i32;
+            let iy = y.round() as i32;
             let st = unsafe { &mut *state_ptr };
+            if st.last_mouse_px == Some((ix, iy)) {
+                return 0;
+            }
+            st.last_mouse_px = Some((ix, iy));
+            if !st.tracking_mouse_leave {
+                let mut tme = WinTrackMouseEvent {
+                    cb_size: size_of::<WinTrackMouseEvent>() as u32,
+                    dw_flags: TME_LEAVE_FLAG,
+                    hwnd_track: hwnd,
+                    dw_hover_time: 0,
+                };
+                if unsafe { TrackMouseEvent(&mut tme) } != 0 {
+                    st.tracking_mouse_leave = true;
+                }
+            }
             st.events.push(Event::PointerMoved(Pos2::new(
                 x / st.pixels_per_point.max(0.5),
                 y / st.pixels_per_point.max(0.5),
@@ -890,6 +1032,427 @@ fn save_window_placement(hwnd: HWND, controller: &Arc<Mutex<AppController>>) {
         g.config.window = Some(placement);
         let _ = g.config.save_atomic(&g.config_path);
     }
+}
+
+fn process_cpu_time_ms() -> f64 {
+    let mut create_ft: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit_ft: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel_ft: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user_ft: FILETIME = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut create_ft,
+            &mut exit_ft,
+            &mut kernel_ft,
+            &mut user_ft,
+        )
+    };
+    if ok == 0 {
+        return 0.0;
+    }
+    let to_u64 = |ft: FILETIME| ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+    let ticks_100ns = to_u64(kernel_ft) + to_u64(user_ft);
+    ticks_100ns as f64 / 10_000.0
+}
+
+#[derive(Serialize)]
+struct BenchIdleMetrics {
+    elapsed_ms: f64,
+    cpu_delta_ms: f64,
+    single_core_cpu_pct: f64,
+    system_cpu_pct: f64,
+    wm_paint_count: usize,
+}
+
+#[derive(Serialize)]
+struct BenchPhaseMetrics {
+    elapsed_ms: f64,
+    frames: usize,
+    avg_total_ms: f64,
+    p50_total_ms: f64,
+    p95_total_ms: f64,
+    max_total_ms: f64,
+    avg_lock_clone_ms: f64,
+    avg_egui_run_ms: f64,
+    avg_tessellate_ms: f64,
+    avg_raster_blit_ms: f64,
+}
+
+#[derive(Serialize)]
+struct PerfBenchmarkReport {
+    apps_count: usize,
+    dpi: u32,
+    pixels_per_point: f32,
+    client_width_px: usize,
+    client_height_px: usize,
+    idle_5s: BenchIdleMetrics,
+    scroll_collapsed_5s: BenchPhaseMetrics,
+    scroll_expanded_5s: BenchPhaseMetrics,
+    resize_drag_5s: BenchPhaseMetrics,
+}
+
+fn summarize_samples(elapsed_ms: f64, samples: &[FrameTimingSample]) -> BenchPhaseMetrics {
+    if samples.is_empty() {
+        return BenchPhaseMetrics {
+            elapsed_ms,
+            frames: 0,
+            avg_total_ms: 0.0,
+            p50_total_ms: 0.0,
+            p95_total_ms: 0.0,
+            max_total_ms: 0.0,
+            avg_lock_clone_ms: 0.0,
+            avg_egui_run_ms: 0.0,
+            avg_tessellate_ms: 0.0,
+            avg_raster_blit_ms: 0.0,
+        };
+    }
+    let n = samples.len() as f64;
+    let mut totals: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
+    totals.sort_by(|a, b| a.total_cmp(b));
+    let p50 = totals[(totals.len() - 1) / 2];
+    let p95 = totals[((totals.len() - 1) * 95) / 100];
+    let max_v = *totals.last().unwrap_or(&0.0);
+    BenchPhaseMetrics {
+        elapsed_ms,
+        frames: samples.len(),
+        avg_total_ms: samples.iter().map(|s| s.total_ms).sum::<f64>() / n,
+        p50_total_ms: p50,
+        p95_total_ms: p95,
+        max_total_ms: max_v,
+        avg_lock_clone_ms: samples.iter().map(|s| s.lock_clone_ms).sum::<f64>() / n,
+        avg_egui_run_ms: samples.iter().map(|s| s.egui_run_ms).sum::<f64>() / n,
+        avg_tessellate_ms: samples.iter().map(|s| s.tessellate_ms).sum::<f64>() / n,
+        avg_raster_blit_ms: samples.iter().map(|s| s.raster_blit_ms).sum::<f64>() / n,
+    }
+}
+
+fn drain_messages_and_paint(hwnd: HWND) {
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    unsafe { UpdateWindow(hwnd) };
+}
+
+pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
+    let controller = Arc::new(Mutex::new(AppController::load_initial()));
+    let apps_count = {
+        let mut g = controller.lock().unwrap();
+        let count = g.report.as_ref().map_or(0, |r| r.apps.len());
+        if count == 0 {
+            return Err("no cached scan report found in AppData for benchmark".into());
+        }
+        g.config.sort_mode = y_core::config::AppSortMode::Size;
+        g.config.sort_direction = y_core::config::SortDirection::Desc;
+        g.config.filter_chip = y_core::config::AppFilterChip::All;
+        g.config.search_query.clear();
+        count
+    };
+
+    let hinstance = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
+    let class_name: Vec<u16> = "YStorageBenchWindow\0".encode_utf16().collect();
+    let title: Vec<u16> = "y-storage Perf Benchmark\0".encode_utf16().collect();
+    let (large_icon, small_icon) = load_app_icons(hinstance);
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        style: 0,
+        lpfnWndProc: Some(wnd_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinstance,
+        hIcon: large_icon,
+        hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+        hbrBackground: null_mut(),
+        lpszMenuName: null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: small_icon,
+    };
+    if unsafe { RegisterClassExW(&wc) } == 0 {
+        return Err("RegisterClassExW failed in bench".into());
+    }
+
+    let init_dpi = get_dpi_for_system();
+    let (default_w, default_h) =
+        outer_size_for_dpi(DEFAULT_LOGICAL_W, DEFAULT_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
+    let (init_theme, init_config_snap) = {
+        let g = controller.lock().unwrap();
+        (g.config.theme_mode, g.config.clone())
+    };
+    let egui_ctx = egui::Context::default();
+    configure_fonts_and_theme(&egui_ctx, init_theme);
+
+    let host_state = Box::new(WindowHostState {
+        controller: Arc::clone(&controller),
+        ui_state: StorageUiState::from_config(&init_config_snap),
+        egui_ctx,
+        painter: SoftwarePainter::new(),
+        applied_titlebar_theme: None,
+        events: Vec::new(),
+        width: (DEFAULT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
+        height: (DEFAULT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
+        dpi: init_dpi,
+        pixels_per_point: dpi_to_ppp(init_dpi),
+        needs_redraw: true,
+        followup_budget: 2,
+        window_focused: true,
+        last_mouse_px: None,
+        tracking_mouse_leave: false,
+        repaint_timer_active: false,
+        smoke_mode: true,
+        start_time: Instant::now(),
+        bench_recording: false,
+        bench_idle_wm_paints: 0,
+        bench_timer_fired: false,
+        bench_samples: Vec::new(),
+    });
+    let state_ptr = Box::into_raw(host_state);
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            100,
+            60,
+            default_w,
+            default_h,
+            null_mut(),
+            null_mut(),
+            hinstance,
+            state_ptr.cast(),
+        )
+    };
+    if hwnd.is_null() {
+        unsafe { drop(Box::from_raw(state_ptr)) };
+        return Err("CreateWindowExW failed in bench".into());
+    }
+    controller.lock().unwrap().hwnd = hwnd as usize;
+    apply_titlebar_theme(hwnd, init_theme);
+
+    let actual_dpi = get_dpi_for_window(hwnd);
+    let ppp = dpi_to_ppp(actual_dpi);
+    let (cw, ch) = {
+        let mut crc: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetClientRect(hwnd, &mut crc) };
+        (
+            (crc.right - crc.left).max(0) as usize,
+            (crc.bottom - crc.top).max(0) as usize,
+        )
+    };
+    unsafe {
+        let st = &mut *state_ptr;
+        st.dpi = actual_dpi;
+        st.pixels_per_point = ppp;
+        st.width = cw;
+        st.height = ch;
+        st.applied_titlebar_theme = Some(init_theme);
+        ShowWindow(hwnd, SW_SHOW);
+        InvalidateRect(hwnd, null(), 0);
+        UpdateWindow(hwnd);
+    }
+
+    // Settle startup frames (~500ms)
+    let settle_end = Instant::now() + std::time::Duration::from_millis(500);
+    while Instant::now() < settle_end {
+        drain_messages_and_paint(hwnd);
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+
+    // 1. Idle 5s untouched via real blocking GetMessageW loop + 5s Win32 timer
+    let idle_5s = unsafe {
+        let st = &mut *state_ptr;
+        st.bench_recording = false;
+        st.bench_idle_wm_paints = 0;
+        st.bench_timer_fired = false;
+        let cpu0 = process_cpu_time_ms();
+        let t0 = Instant::now();
+        SetTimer(hwnd, TIMER_BENCH_DONE_ID, 5000, None);
+        let mut msg: MSG = std::mem::zeroed();
+        while !st.bench_timer_fired && GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let cpu_delta_ms = (process_cpu_time_ms() - cpu0).max(0.0);
+        let logical_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as f64;
+        let single_core_pct = (cpu_delta_ms / elapsed_ms.max(1.0)) * 100.0;
+        BenchIdleMetrics {
+            elapsed_ms,
+            cpu_delta_ms,
+            single_core_cpu_pct: single_core_pct,
+            system_cpu_pct: single_core_pct / logical_cpus,
+            wm_paint_count: st.bench_idle_wm_paints,
+        }
+    };
+
+    // Place pointer inside the main app scroll region
+    let ptr_x = (510.0 * ppp).round() as isize;
+    let ptr_y = (420.0 * ppp).round() as isize;
+    let lp_ptr = ((ptr_y & 0xFFFF) << 16) | (ptr_x & 0xFFFF);
+    unsafe {
+        SendMessageW(hwnd, WM_MOUSEMOVE, 0, lp_ptr);
+        drain_messages_and_paint(hwnd);
+    }
+
+    // 2. Scroll collapsed 5s
+    let scroll_collapsed_5s = {
+        let st = unsafe { &mut *state_ptr };
+        st.ui_state.expanded_apps.clear();
+        st.bench_samples.clear();
+        st.bench_recording = true;
+        let t0 = Instant::now();
+        let dur = std::time::Duration::from_secs(5);
+        let mut tick = 0usize;
+        while t0.elapsed() < dur {
+            let dir_down = (tick / 60) % 2 == 0;
+            let wheel_delta: i16 = if dir_down { -120 } else { 120 };
+            let wp = ((wheel_delta as u16) as usize) << 16;
+            unsafe { SendMessageW(hwnd, WM_MOUSEWHEEL, wp, 0) };
+            drain_messages_and_paint(hwnd);
+            tick += 1;
+        }
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        st.bench_recording = false;
+        summarize_samples(elapsed_ms, &st.bench_samples)
+    };
+
+    // Reset to top & expand FIFA 23 (or top app) for phase 3
+    let expand_id = {
+        let g = controller.lock().unwrap();
+        g.report
+            .as_ref()
+            .and_then(|r| {
+                r.apps
+                    .iter()
+                    .find(|a| a.display_name.to_ascii_lowercase().contains("fifa 23"))
+                    .or_else(|| r.apps.first())
+                    .map(|a| a.id.clone())
+            })
+    };
+    {
+        let st = unsafe { &mut *state_ptr };
+        st.bench_recording = false;
+        for _ in 0..40 {
+            let wp = ((1200i16 as u16) as usize) << 16;
+            unsafe { SendMessageW(hwnd, WM_MOUSEWHEEL, wp, 0) };
+            drain_messages_and_paint(hwnd);
+        }
+        if let Some(id) = expand_id {
+            st.ui_state.expanded_apps.insert(id);
+        }
+        st.needs_redraw = true;
+        unsafe {
+            InvalidateRect(hwnd, null(), 0);
+            drain_messages_and_paint(hwnd);
+        }
+    }
+
+    // 3. Scroll expanded 5s
+    let scroll_expanded_5s = {
+        let st = unsafe { &mut *state_ptr };
+        st.bench_samples.clear();
+        st.bench_recording = true;
+        let t0 = Instant::now();
+        let dur = std::time::Duration::from_secs(5);
+        let mut tick = 0usize;
+        while t0.elapsed() < dur {
+            let dir_down = (tick / 60) % 2 == 0;
+            let wheel_delta: i16 = if dir_down { -120 } else { 120 };
+            let wp = ((wheel_delta as u16) as usize) << 16;
+            unsafe { SendMessageW(hwnd, WM_MOUSEWHEEL, wp, 0) };
+            drain_messages_and_paint(hwnd);
+            tick += 1;
+        }
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        st.bench_recording = false;
+        summarize_samples(elapsed_ms, &st.bench_samples)
+    };
+
+    // Reset collapsed + default size before phase 4
+    {
+        let st = unsafe { &mut *state_ptr };
+        st.ui_state.expanded_apps.clear();
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                100,
+                60,
+                default_w,
+                default_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            st.needs_redraw = true;
+            InvalidateRect(hwnd, null(), 0);
+            drain_messages_and_paint(hwnd);
+        }
+    }
+
+    // 4. Resize drag 5s
+    let resize_drag_5s = {
+        let st = unsafe { &mut *state_ptr };
+        st.bench_samples.clear();
+        st.bench_recording = true;
+        let t0 = Instant::now();
+        let dur = std::time::Duration::from_secs(5);
+        let mut step_idx = 0isize;
+        while t0.elapsed() < dur {
+            let phase = (step_idx % 160) as i32;
+            let tri = if phase < 80 { phase } else { 160 - phase };
+            let cur_w = default_w + tri * 4;
+            let cur_h = default_h + tri * 3;
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    100,
+                    60,
+                    cur_w,
+                    cur_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            drain_messages_and_paint(hwnd);
+            step_idx += 1;
+        }
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        st.bench_recording = false;
+        summarize_samples(elapsed_ms, &st.bench_samples)
+    };
+
+    unsafe {
+        DestroyWindow(hwnd);
+        if !small_icon.is_null() {
+            DestroyIcon(small_icon);
+        }
+        if !large_icon.is_null() {
+            DestroyIcon(large_icon);
+        }
+    }
+
+    let rep = PerfBenchmarkReport {
+        apps_count,
+        dpi: actual_dpi,
+        pixels_per_point: ppp,
+        client_width_px: cw,
+        client_height_px: ch,
+        idle_5s,
+        scroll_collapsed_5s,
+        scroll_expanded_5s,
+        resize_drag_5s,
+    };
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(&rep).map_err(|e| e.to_string())?;
+    std::fs::write(out_path, json).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn lp_xy(lparam: LPARAM) -> (f32, f32) {

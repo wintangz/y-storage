@@ -4,7 +4,7 @@
 > **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
 > **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
 
-**Last Updated**: 2026-11-26 (`design-md-complete`)
+**Last Updated**: 2026-11-26 (`perf-pass-1`)
 
 ---
 
@@ -66,14 +66,17 @@ All WT applications share one dual-mode palette calibrated against `z-controller
 
 ## 3. Typography Scale & Luminance Hierarchy
 
-WT applications pair **`Segoe UI`** for proportional interface text with **`Consolas`** monospace numerals for measured quantities, coordinates, and timestamps. Minimum readable type floor across all UI copy: **`10.5pt`**. No rendered text may be smaller than `10.5pt`.
+WT applications pair **`Segoe UI`** for proportional interface text with **`Consolas`** monospace tabular numerals for measured quantities, coordinates, and timestamps. Minimum readable type floor across all UI copy: **`10.5pt`**. No rendered text may be smaller than `10.5pt`.
+
+- **Numeral Weight Rule (`perf-pass-1`)**: **All numerals (`Total size`, `Own size`, drive `free`/`used` figures, pinned ledger sizes, deltas, and counts) are Medium — or Regular (`Consolas Regular`) where Medium is unavailable in the bundled font — NEVER Strong/Bold.** Heavy bold numeral slabs add visual noise without aiding legibility.
+- **Strong Weight Rule**: **`Strong` weight (`Segoe UI Semibold`) is reserved strictly for the app name in a row and an expanded drawer's title line.** Headlines, metadata, badges, and numerals stay Regular or Medium.
 
 | Tier | Size & Weight | Luminance Token | Role |
 |---|---|---|---|
-| **T1 — Instrument Headline** | `16.0pt` Strong (`14.5pt` `Consolas Bold` for primary pod metrics) | `text` | View titles and top-level live readouts (`drive free space`, primary instrument header values) |
-| **T2 — Dominant Row Quantity** | `13.0pt`–`13.5pt` `Consolas Bold` | `text` | Single right-aligned primary quantity on every list row or card |
-| **T3 — Primary Identity & Controls** | `13.0pt` `Segoe UI` (`12.0pt`–`12.5pt` for pinned ledger titles, button labels, input values) | `text` (controls follow button state table `§6`) | Row display names, section group titles, button captions, active filter/input copy |
-| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` (`11.5pt` `Consolas` paths/supporting sizes; `11.0pt` column headers & publishers; `10.5pt` section eyebrows, badges, word-capped `"…"` provenance) | `muted` / `subtle_text` | Sticky column headers, secondary row attributes, sub-table quantities, full-text hover tooltips when capped |
+| **T1 — Instrument Headline** | `16.0pt` `Segoe UI` Regular (`14.5pt` `Consolas Regular` for primary pod metrics) | `text` | View titles and top-level live readouts (`drive free space`, primary instrument header values) |
+| **T2 — Dominant Row Quantity** | `13.0pt`–`13.5pt` `Consolas Regular` (Medium where available; never Strong) | `text` | Single right-aligned primary quantity on every list row or card (dominant by size & brightness, never bold weight) |
+| **T3 — Primary Row Identity & Drawer Title** | `13.0pt`–`14.0pt` `Segoe UI Semibold` (`Strong`) on row app names & expanded drawer titles; `12.0pt`–`12.5pt` Regular for pinned ledger titles, button labels, input values | `text` (controls follow button state table `§6`) | Row app names, expanded drawer titles, pinned section titles, button captions, active filter/input copy |
+| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` Regular (`11.5pt` `Consolas Regular` paths/supporting sizes; `11.0pt` column headers & publishers; `10.5pt` section eyebrows, badges, word-capped `"…"` provenance) | `muted` / `subtle_text` | Sticky column headers, secondary row attributes, sub-table quantities, full-text hover tooltips when capped |
 
 ---
 
@@ -160,7 +163,7 @@ Tabular instruments align numbers in fixed right-aligned monospace columns under
 
 Before accepting screenshots of any WT application, verify **`FC1`–`FC9`**:
 - **FC1 (No Card Soup)**: List rows and summary lines sit inside hairline-divided ledger panels rather than repeating stacked individual cards.
-- **FC2 (One Dominant Row Signal)**: Right-aligned `T2` totals unmistakably outweigh `T3` row identity, which clearly leads `T4` metadata.
+- **FC2 (Restrained Numeral Weight & Clear Row Hierarchy)**: Right-aligned `T2` totals lead cleanly by scale and luminance (`13.0pt`–`13.5pt` Regular/Medium, never heavy Bold slabs) alongside `T3` `Segoe UI Semibold` app names and quiet `T4` metadata.
 - **FC3 (State-Signal Gradient Rim Only)**: Diagonal gradient rims (`#54B9F2 -> #D8A6FF -> #F7A8D8`) appear strictly on active/expanded containers; zero collapsed containers or non-status pills use solid pastel fills.
 - **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, `2px` status badges, and `0px` hairline ledger rows.
 - **FC5 (Saturated Status Discipline)**: Saturated `#28D66C` / `#F04458` (`#0FA84F` / `#E02444` Light) marks appear strictly on live status dots, threshold/battery alerts, signed deltas, safety locks, and zone marks — while metadata, proportions, and qualifiers stay calm pastel/neutral.
@@ -185,7 +188,7 @@ Each section below documents only what is unique to an individual WT application
 
 ## 11. App-Specific: `y-storage`
 
-- **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Bold`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill): `accent_line` when healthy/full-walk, `LOGO_LAVENDER` when install-only, and saturated `STATUS_RED` whenever `>= 85%` used (`<= 15%` headroom remaining).
+- **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Regular`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill): `accent_line` when healthy/full-walk, `LOGO_LAVENDER` when install-only, and saturated `STATUS_RED` whenever `>= 85%` used (`<= 15%` headroom remaining).
 - **Tabular App Footprint Ledger & Inspection Drawer**:
   - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Growth delta · Total size`), clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default).
   - Fixed `18x18 px` extracted Windows app icon (or consistent neutral folder-tile glyph) keeping column x-positions fixed across rows.
@@ -196,5 +199,5 @@ Each section below documents only what is unique to an individual WT application
 - **Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with `2px` colour ticks (`LOGO_LAVENDER`, `LOGO_BLUE`, `STATUS_GREEN`, `LOGO_PINK`) and sizes right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert if `diff != 0`).
 - **`y-storage` Domain Critique Checks (`YS1`–`YS3`)**:
   - **YS1 (Shared Size Column Alignment)**: Sticky header `Total size`, main row totals, expanded `Locations`/`Dependencies` size columns, and pinned summary totals share one exact right vertical edge (accounting for the `14px` `6px + SPACE_8` scrollbar gutter).
-  - **YS2 (Drive Headline Dominance)**: Drive free space (`14.5pt Consolas Bold`) visibly anchors the top strip above app rows (`13.5pt`).
+  - **YS2 (Drive Headline Dominance)**: Drive free space (`14.5pt Consolas Regular`) visibly anchors the top strip above app rows (`13.0pt`).
   - **YS3 (Subordinate Shared Dependencies)**: Inside expanded drawers, `Dependencies` own sizes (`11.5pt` `muted`) visually recede behind the app's own total (`13.5pt` `text`) so shared runtimes never read as additive footprint.

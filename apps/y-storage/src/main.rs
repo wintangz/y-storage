@@ -22,7 +22,7 @@ use y_platform_windows::scanner::execute_scan_with_progress;
 use crate::png::save_bgra_u32_as_png;
 use crate::sw_painter::SoftwarePainter;
 use crate::ui::{ActiveView, StorageUiState, configure_fonts_and_theme, draw_app_ui};
-use crate::win32_host::{AppController, dpi_to_ppp, run_gui_app};
+use crate::win32_host::{AppController, dpi_to_ppp, run_gui_app, run_perf_benchmark};
 
 #[derive(Serialize)]
 struct CliScanOutput {
@@ -45,6 +45,7 @@ fn main() {
     let mut ephemeral = false;
     let mut smoke_gui_ms: Option<u64> = None;
     let mut smoke_gui_out: Option<PathBuf> = None;
+    let mut bench_perf_out: Option<PathBuf> = None;
     let mut screenshot_out: Option<PathBuf> = None;
     let mut screenshot_view = "main".to_string();
     let mut screenshot_theme = ThemeMode::Dark;
@@ -74,6 +75,12 @@ fn main() {
             "--render-screenshot" => {
                 if i + 1 < args.len() {
                     screenshot_out = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
+            "--bench-perf" => {
+                if i + 1 < args.len() {
+                    bench_perf_out = Some(PathBuf::from(&args[i + 1]));
                     i += 1;
                 }
             }
@@ -159,6 +166,14 @@ fn main() {
             &screenshot_search,
         ) {
             eprintln!("render screenshot failed: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(bench_path) = bench_perf_out {
+        if let Err(err) = run_perf_benchmark(&bench_path) {
+            eprintln!("perf benchmark failed: {err}");
             std::process::exit(1);
         }
         return;
