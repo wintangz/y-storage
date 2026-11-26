@@ -20,10 +20,22 @@ pub struct DriveScanTarget {
     pub exclusions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowPlacementConfig {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub version: u32,
     pub theme_mode: ThemeMode,
+    #[serde(default)]
+    pub window: Option<WindowPlacementConfig>,
     pub targets: Vec<DriveScanTarget>,
 }
 
@@ -32,6 +44,7 @@ impl Default for AppConfig {
         Self {
             version: 1,
             theme_mode: ThemeMode::Dark,
+            window: None,
             targets: vec![DriveScanTarget {
                 letter: 'C',
                 enabled: true,
@@ -76,6 +89,7 @@ impl AppConfig {
         Self {
             version: 1,
             theme_mode: ThemeMode::Dark,
+            window: None,
             targets,
         }
     }

@@ -191,18 +191,28 @@ fn render_screenshot(
 
     let mut ui_state = StorageUiState::default();
     match view {
-        "expanded" => {
+        "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
-            for app in report.apps.iter().take(2) {
-                ui_state.expanded_apps.insert(app.id.clone());
-            }
-            if let Some(discord) = report
+            if let Some(fifa) = report
                 .apps
                 .iter()
-                .find(|a| a.display_name.eq_ignore_ascii_case("Discord"))
+                .find(|a| a.display_name.to_ascii_lowercase().contains("fifa 23"))
             {
-                ui_state.expanded_apps.insert(discord.id.clone());
+                ui_state.expanded_apps.insert(fifa.id.clone());
+            } else if let Some(first) = report.apps.first() {
+                ui_state.expanded_apps.insert(first.id.clone());
             }
+        }
+        "reverse-ea-app" => {
+            ui_state.active_view = ActiveView::Main;
+            if let Some(fifa) = report
+                .apps
+                .iter()
+                .find(|a| a.display_name.to_ascii_lowercase().contains("fifa 23"))
+            {
+                ui_state.expanded_apps.insert(fifa.id.clone());
+            }
+            ui_state.open_reverse_dep_id = Some("ea-app".to_string());
         }
         "settings" => {
             ui_state.active_view = ActiveView::Settings;
@@ -226,8 +236,8 @@ fn render_screenshot(
         ThemeMode::Light => 0x00EE_F4FA,
     };
 
-    // Run 2 layout passes so ScrollAreas and panel heights settle crisply.
-    for step in 0..2 {
+    // Run 3 layout passes so ScrollAreas, Areas, and panel heights settle crisply.
+    for step in 0..3 {
         let mut raw = RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -254,7 +264,7 @@ fn render_screenshot(
             );
         });
         painter.apply_textures(&full_out.textures_delta);
-        if step == 1 {
+        if step == 2 {
             let clipped = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
             painter.paint_and_blit(
                 std::ptr::null_mut(),

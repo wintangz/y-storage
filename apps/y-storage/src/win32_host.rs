@@ -20,16 +20,18 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow,
-    DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON,
-    IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, PM_REMOVE, PeekMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CYICON,
-    SM_CYSMICON, SW_SHOW, SWP_NOZORDER, SWP_NOACTIVATE, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowPlacement, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR,
+    LoadCursorW, LoadImageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYSMICON,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SW_SHOWMAXIMIZED,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
-use y_core::config::{AppConfig, ThemeMode};
+use y_core::config::{AppConfig, ThemeMode, WindowPlacementConfig};
 use y_core::history::ScanHistory;
 use y_core::model::ScanReport;
 use y_platform_windows::paths::{enumerate_fixed_drives, get_windows_directory};
@@ -119,6 +121,7 @@ struct WindowHostState {
     pixels_per_point: f32,
     needs_redraw: bool,
     followup_budget: u8,
+    smoke_mode: bool,
     start_time: Instant,
 }
 
@@ -339,9 +342,19 @@ pub fn run_gui_app(
     }
 
     let init_dpi = get_dpi_for_system();
-    let (init_w, init_h) =
+    let (default_w, default_h) =
         outer_size_for_dpi(DEFAULT_LOGICAL_W, DEFAULT_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
-    let init_theme = controller.lock().unwrap().config.theme_mode;
+    let (min_w, min_h) =
+        outer_size_for_dpi(MIN_LOGICAL_W, MIN_LOGICAL_H, WS_OVERLAPPEDWINDOW, init_dpi);
+    let (init_theme, saved_win) = {
+        let g = controller.lock().unwrap();
+        (g.config.theme_mode, g.config.window)
+    };
+    let (win_x, win_y, init_w, init_h, start_max) = if smoke_ms.is_none() {
+        resolve_initial_window_bounds(saved_win, default_w, default_h, min_w, min_h)
+    } else {
+        (100, 60, default_w, default_h, false)
+    };
 
     let egui_ctx = egui::Context::default();
     configure_fonts_and_theme(&egui_ctx, init_theme);
@@ -359,6 +372,7 @@ pub fn run_gui_app(
         pixels_per_point: dpi_to_ppp(init_dpi),
         needs_redraw: true,
         followup_budget: 2,
+        smoke_mode: smoke_ms.is_some(),
         start_time: Instant::now(),
     });
     let state_ptr = Box::into_raw(host_state);
@@ -369,8 +383,8 @@ pub fn run_gui_app(
             class_name.as_ptr(),
             title.as_ptr(),
             WS_OVERLAPPEDWINDOW,
-            100,
-            60,
+            win_x,
+            win_y,
             init_w,
             init_h,
             null_mut(),
@@ -382,6 +396,15 @@ pub fn run_gui_app(
     if hwnd.is_null() {
         unsafe { drop(Box::from_raw(state_ptr)) };
         return Err("CreateWindowExW failed".into());
+    }
+
+    unsafe {
+        if !large_icon.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, large_icon as isize);
+        }
+        if !small_icon.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small_icon as isize);
+        }
     }
 
     controller.lock().unwrap().hwnd = hwnd as usize;
@@ -403,7 +426,7 @@ pub fn run_gui_app(
         st.width = cw;
         st.height = ch;
         st.applied_titlebar_theme = Some(init_theme);
-        ShowWindow(hwnd, SW_SHOW);
+        ShowWindow(hwnd, if start_max { SW_SHOWMAXIMIZED } else { SW_SHOW });
         InvalidateRect(hwnd, null(), 0);
         UpdateWindow(hwnd);
     }
@@ -636,8 +659,10 @@ unsafe extern "system" fn wnd_proc(
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
-                        UiAction::SaveConfig(new_cfg) => {
+                        UiAction::SaveConfig(mut new_cfg) => {
                             let mut g = st.controller.lock().unwrap();
+                            new_cfg.theme_mode = g.config.theme_mode;
+                            new_cfg.window = g.config.window;
                             g.config = new_cfg;
                             let _ = g.config.save_atomic(&g.config_path);
                             st.needs_redraw = true;
@@ -759,7 +784,18 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        0x0232 /* WM_EXITSIZEMOVE */ => {
+            let st = unsafe { &mut *state_ptr };
+            if !st.smoke_mode {
+                save_window_placement(hwnd, &st.controller);
+            }
+            0
+        }
         WM_CLOSE => {
+            let st = unsafe { &mut *state_ptr };
+            if !st.smoke_mode {
+                save_window_placement(hwnd, &st.controller);
+            }
             unsafe { DestroyWindow(hwnd) };
             0
         }
@@ -773,6 +809,57 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn resolve_initial_window_bounds(
+    saved: Option<WindowPlacementConfig>,
+    default_w: i32,
+    default_h: i32,
+    min_w: i32,
+    min_h: i32,
+) -> (i32, i32, i32, i32, bool) {
+    let Some(wp) = saved else {
+        return (100, 60, default_w, default_h, false);
+    };
+    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(800);
+    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(600);
+    let w = wp.width.max(min_w).min(vw);
+    let h = wp.height.max(min_h).min(vh);
+    let visible_x = wp.x < vx + vw - 80 && wp.x + w > vx + 80;
+    let visible_y = wp.y < vy + vh - 60 && wp.y + h > vy + 40;
+    if visible_x && visible_y {
+        (wp.x, wp.y, w, h, wp.maximized)
+    } else {
+        (100, 60, w, h, wp.maximized)
+    }
+}
+
+fn save_window_placement(hwnd: HWND, controller: &Arc<Mutex<AppController>>) {
+    let mut wp: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
+    wp.length = size_of::<WINDOWPLACEMENT>() as u32;
+    if unsafe { GetWindowPlacement(hwnd, &mut wp) } == 0 {
+        return;
+    }
+    let rc = wp.rcNormalPosition;
+    let w = rc.right - rc.left;
+    let h = rc.bottom - rc.top;
+    if w < 400 || h < 300 {
+        return;
+    }
+    let placement = WindowPlacementConfig {
+        x: rc.left,
+        y: rc.top,
+        width: w,
+        height: h,
+        maximized: wp.showCmd == SW_SHOWMAXIMIZED as u32,
+    };
+    let mut g = controller.lock().unwrap();
+    if g.config.window != Some(placement) {
+        g.config.window = Some(placement);
+        let _ = g.config.save_atomic(&g.config_path);
     }
 }
 

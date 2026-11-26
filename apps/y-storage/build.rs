@@ -83,29 +83,29 @@ fn rasterize_icon_rgba(size: usize) -> Vec<u8> {
             let v = (y as f32 + 0.5) / s * 256.0;
             let mut px = [0u8, 0, 0, 0];
 
-            // Outer rounded square (#0A0A10) + pastel rim (#54B9F2 -> #D8A6FF -> #F7A8D8)
-            let d_bg = sdf_round_box(u, v, 128.0, 128.0, 108.0, 108.0, 48.0);
+            // Full-bleed rounded tile (#0A0A10) + pastel rim (#54B9F2 -> #D8A6FF -> #F7A8D8), ~97% width (248/256)
+            let d_bg = sdf_round_box(u, v, 128.0, 128.0, 124.0, 124.0, 52.0);
             if d_bg < 1.5 {
                 let cov = (1.5 - d_bg).clamp(0.0, 1.0);
                 let rim = palette_grad((u + v) / 512.0);
-                if d_bg > -10.5 {
+                if d_bg > -12.0 {
                     blend(&mut px, [rim[0], rim[1], rim[2], (cov * 255.0) as u8]);
                 } else {
                     blend(&mut px, [10, 10, 16, (cov * 255.0) as u8]);
                 }
             }
 
-            // Three stacked storage bars
+            // Three stacked storage bars scaled proportionally inside full-bleed tile
             let bars = [
-                (80.0_f32, [84u8, 185, 242], 94.0_f32, [84u8, 185, 242]),
-                (128.0_f32, [216u8, 166, 255], 122.0_f32, [247u8, 168, 216]),
-                (176.0_f32, [247u8, 168, 216], 66.0_f32, [40u8, 214, 108]),
+                (76.0_f32, [84u8, 185, 242], 118.0_f32, [84u8, 185, 242]),
+                (128.0_f32, [216u8, 166, 255], 152.0_f32, [247u8, 168, 216]),
+                (180.0_f32, [247u8, 168, 216], 84.0_f32, [40u8, 214, 108]),
             ];
             for (cy, stroke_col, fill_w, fill_col) in bars {
-                let d_tray = sdf_round_box(u, v, 128.0, cy, 76.0, 16.0, 8.0);
+                let d_tray = sdf_round_box(u, v, 128.0, cy, 90.0, 19.0, 9.5);
                 if d_tray < 1.2 {
                     let cov = (1.2 - d_tray).clamp(0.0, 1.0);
-                    if d_tray > -4.5 {
+                    if d_tray > -5.0 {
                         blend(
                             &mut px,
                             [stroke_col[0], stroke_col[1], stroke_col[2], (cov * 255.0) as u8],
@@ -114,7 +114,7 @@ fn rasterize_icon_rgba(size: usize) -> Vec<u8> {
                         blend(&mut px, [20, 20, 31, (cov * 255.0) as u8]);
                     }
                 }
-                let d_fill = sdf_round_box(u, v, 64.0 + fill_w * 0.5, cy, fill_w * 0.5, 5.0, 4.0);
+                let d_fill = sdf_round_box(u, v, 49.0 + fill_w * 0.5, cy, fill_w * 0.5, 6.5, 5.0);
                 if d_fill < 1.0 {
                     let cov = (1.0 - d_fill).clamp(0.0, 1.0);
                     blend(
@@ -161,7 +161,7 @@ fn encode_ico_bmp_entry(size: usize, rgba: &[u8]) -> Vec<u8> {
 }
 
 fn build_multi_size_ico() -> Vec<u8> {
-    let sizes = [16usize, 20, 24, 32, 40, 48, 64, 256];
+    let sizes = [16usize, 20, 24, 32, 40, 48, 64, 128, 256];
     let mut entries = Vec::with_capacity(sizes.len());
     for s in sizes {
         let rgba = rasterize_icon_rgba(s);
@@ -193,6 +193,7 @@ fn build_multi_size_ico() -> Vec<u8> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=y-storage.manifest");
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=../../icon.svg");
@@ -202,8 +203,9 @@ fn main() {
     let assets_dir = manifest_dir.join("assets");
     let _ = fs::create_dir_all(&assets_dir);
     let ico_path = assets_dir.join("y-storage.ico");
-    if !ico_path.is_file() {
-        fs::write(&ico_path, build_multi_size_ico()).expect("write y-storage.ico");
+    let ico_bytes = build_multi_size_ico();
+    if fs::read(&ico_path).ok().as_deref() != Some(ico_bytes.as_slice()) {
+        fs::write(&ico_path, &ico_bytes).expect("write y-storage.ico");
     }
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
