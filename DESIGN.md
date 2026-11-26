@@ -1,105 +1,200 @@
 # WT Native Instrument Design System (`DESIGN.md`)
 
-**Applies to**: All WT native desktop utilities (`y-storage`, `z-controller`, and future `WT Manager`).
-**Last Updated**: 2026-11-26 (`visual-identity-addon`)
+> **Canonical Ecosystem Standard**: This document is the canonical design standard for **all WT applications** (`z-controller`, `y-storage`, `WT Manager`, and future WT native utilities).
+> **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
+> **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
+
+**Last Updated**: 2026-11-26 (`design-md-complete`)
 
 ---
 
-## 1. North Star
+# Part I — Shared Core (WT Family Standard)
 
-WT applications are precision instruments, not dashboards: every pixel, colour, border, and type tier must encode real system state or measured quantity, and nothing exists as decoration for its own sake. We design explicitly against the **generic AI UI failure mode** — wrapping every list row in identical bordered cards of equal visual weight, flattening typography until names, metadata, and measurements all shout at the same volume, applying one corner radius to every box, and scattering decorative pill chips on static labels until no badge carries meaning.
+All rules, tokens, geometries, and component behaviours in Part I apply identically across every WT application.
+
+## 1. North Star & Anti-Patterns
+
+WT applications are precision instruments, not dashboards: every pixel, colour, border, and type tier must encode real system state or measured quantity, and nothing exists as decoration for its own sake. We design explicitly against the **generic AI UI failure mode**:
+
+1. Repeating identical bordered cards around every list or ledger row (`cards-inside-cards` when expanded).
+2. Applying a single uniform corner radius (`6px` on panels, badges, tracks, and buttons alike).
+3. Using raw pastel accents (`#54B9F2`, `#D8A6FF`, `#F7A8D8`) or saturated status tones (`#28D66C`, `#F04458`) as large opaque surface fills.
+4. Centring empty-state labels or orphaned section headers in dead vertical space.
+5. Rendering secondary metadata (publishers, provenance/basis strings, kind labels, supporting counts) at equal size and brightness as primary quantities.
+6. Placing badge chips on static labels (`READ-ONLY`, mode banners, descriptors) rather than live states or user decisions.
 
 ---
 
-## 2. Shared Tokens
+## 2. Colour Tokens (Dark & Light Modes)
 
-### 2.1 Pastel & Semantic Palette
-| Token | Dark Mode | Light Mode | Permitted Usage |
+All WT applications share one dual-mode palette calibrated against `z-controller` (`Y:\Repos\z-controller\apps\z-controller\src\ui.rs`).
+
+### 2.1 Surface, Border & Typography Luminance Tokens
+
+| Token | Dark Mode | Light Mode | Role |
 |---|---|---|---|
-| `accent_line` (`LOGO_BLUE`) | `#54B9F2` | `#2F9BE8` | Active borders, active sort/filter outlines, primary meter fills, chevron cues, gradient stop `0.0` |
-| `lavender` (`LOGO_LAVENDER`) | `#D8A6FF` | `#D8A6FF` (`#783EB8` small text) | Secondary/install-only drive meters, `Windows & system` tick, gradient stop `0.5`; `#783EB8` Light chip text |
-| `delta_grew` (`LOGO_PINK`) | `#F7A8D8` | `#F7A8D8` | Active pressed control border, `Unattributed` tick, gradient stop `1.0` |
-| `status_green` (`STATUS_GREEN`) | `#28D66C` | `#0FA84F` (`#28D66C` dots/ticks) | **Saturated semantic status**: shrank (`-`) deltas, steady-state `diff 0 B` dot (`8px`) & text, `● GREEN` zone mark, `Shared caches` tick |
-| `status_red` (`STATUS_RED`) | `#F04458` | `#E02444` (`#F04458` dots/bars) | **Saturated semantic status**: grew (`+`) deltas, `NO-TOUCH` / `LOCKED` / `missing` outline & tint, `● RED` zone mark, critical diff / `<= 15%` free drive bar |
+| `bg` (`S0` Canvas) | `#0A0A10` | `#EEF4FA` | Window backdrop and top header canvas |
+| `panel_alt` (`S1` Recessed) | `#10101A` | `#F4F8FC` | Sticky table headers, expanded active drawers, pinned footer (`z-controller` `faint_bg`) |
+| `panel` (`S2` Primary) | `#14141F` | `#FFFFFF` | Ledger wrappers, summary/instrument pods, Settings cards |
+| `widget` (`S3` Rest) | `#181826` | `#F5F8FC` | Filter pill backgrounds, inactive interactive surfaces |
+| `widget_hover` (`S3` Hover) | `#1F1F31` | `#E9F2FA` | Hovered buttons, theme toggle, interactive toggles, hovered rows |
+| `widget_active` (`S3` Press) | `#182230` | `#DCEBF8` | Pointer-down active buttons and pressed controls |
+| `input_bg` (`Well`) | `#0A0A10` | `#EEF4FA` on `panel` (`#FFFFFF` directly on `bg` canvas) | Text input wells (maintains distinct recess vs `#FFFFFF` cards and `#EEF4FA` canvas) |
+| `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders, SubtleOutline strokes, hairline ledger dividers |
+| `scrollbar_thumb` | `#2E2E46` | `#C0D0E2` | Slim vertical scrollbar thumb at rest |
+| `scrollbar_thumb_hover` | `#54B9F2` | `#2F9BE8` | Slim vertical scrollbar thumb on hover |
+| `text` | `#EDEDF2` | `#1C2733` | Primary headlines, row identities, dominant measurements, button hover/press text |
+| `muted` | `#9A9AB0` | `#5F7186` | Secondary metadata, quiet totals, SubtleOutline labels, disabled text |
+| `subtle_text` | `#82829A` | `#748499` | Low-contrast inline descriptors, publishers, truncated basis copy |
+| `hint_text` | `#64647A` | `#98A6B8` | Unfocused, empty input placeholder hints only (hidden on focus or non-empty value) |
 
-**WT Signature Active Gradient Rim & Pastel Rule**: Pastel accents appear strictly as thin indicators, meter fills, outline borders, and tinted badges (`pill_*_fill` + `1px` outline) — never large solid pastel fills or opaque pastel badges. **Active containers** (`virtual_active` cards in `z-controller`, expanded inspection drawers in `y-storage`) carry the continuous **WT Active Gradient Rim**: `8px` corner radius, diagonal blend from `LOGO_BLUE` (`#54B9F2` at `0.0`) -> `LOGO_LAVENDER` (`#D8A6FF` at `0.5`) -> `LOGO_PINK` (`#F7A8D8` at `1.0`) along `t = 0.65x + 0.35y`, rendered as a `1.2pt` solid perimeter core with a `2.5pt` soft inner glow (`offsets = [-4.5, -2.0, -1.6, -0.4, 0.0]`, `alphas = [0, 52, 255, 255, 0]`). Because the rim signals active selection/expansion state rather than static chrome, it satisfies WT's signal-over-decoration rule (`§1`). Following `z-controller`, interactive buttons use outline language (`PrimaryOutline`: `pill_blue_fill` + `accent_line` outline/text; `SecondaryOutline`: `TRANSPARENT` fill + `72%` blended accent outline + `accent_line` text/glyph; `SubtleOutline`: `TRANSPARENT` fill + `border` outline + `muted` text), and `pill_blue_fill` status badges render text in `pal.text` (`#EDEDF2` / `#1C2733`).
+### 2.2 Accent & Semantic Status Tokens
 
-**Saturated Status vs Quiet Everything Else**: Genuine semantic status elements (`diff` dot & label, `+`/`-` growth deltas, `NO-TOUCH`/`LOCKED`/`missing` badges, `● GREEN`/`RED` zone marks, critical `<= 15%` free drive bars) use fully saturated `STATUS_GREEN` / `STATUS_RED` tokens, while non-status labels, metadata pills (`proven`, `shared`), `BODY` zone pills, and `2px` table proportion bars remain quiet.
-
-### 2.2 Surface Hierarchy
-| Surface | Dark Mode | Light Mode | Role |
+| Token | Dark Mode | Light Mode | Role |
 |---|---|---|---|
-| `bg` (`S0` Canvas) | `#0A0A10` | `#EEF4FA` | Window backdrop and header canvas |
-| `panel_alt` (`S1` Recessed) | `#10101A` | `#F4F8FC` | Sticky table header, expanded drawer, pinned footer (`z-controller` `faint_bg`) |
-| `panel` (`S2` Primary) | `#14141F` | `#FFFFFF` | Ledger containers, drive pods, Settings cards |
-| `widget` / `hover` / `active` (`S3`) | `#181826` / `#1F1F31` / `#182230` | `#F5F8FC` / `#E9F2FA` / `#DCEBF8` | Interactive buttons, sort toggles, filter pills, hovered table rows |
-| `input_bg` (`Well`) | `#0A0A10` | `#EEF4FA` on `panel` (`#FFFFFF` on `bg` canvas) | Text input fields (matches `z-controller` inside white cards while preserving crisp contrast on `#EEF4FA` header canvas) |
-| `border` (`Hairline`) | `#26263A` | `#D9E4F0` | `1px` crisp structural borders and ledger row dividers |
+| `LOGO_BLUE` / `accent_line` | `#54B9F2` | `#2F9BE8` (`#54B9F2` rim stop) | Active outlines, Primary/Secondary button accents, primary meters, chevrons, gradient stop `0.0` |
+| `LOGO_LAVENDER` (`lavender_text`) | `#D8A6FF` | `#D8A6FF` (`#783EB8` small text) | Secondary meters/ticks, qualifier badge stroke, gradient stop `0.5` |
+| `LOGO_PINK` | `#F7A8D8` | `#F7A8D8` | Pressed/latched control outline, subtle unattributed ticks, gradient stop `1.0` |
+| `pill_blue_fill` | `#121C28` | `#EBF6FF` | Subtle fill for `PrimaryOutline` buttons, active filter pills, checkboxes, provenance badges |
+| `pill_lav_fill` | `#20182E` | `#F3ECFF` | Soft backdrop for lavender qualifier badges |
+| `STATUS_GREEN` (`status_green`) | `#28D66C` | `#0FA84F` (`#28D66C` dots/marks) | Saturated positive/healthy semantic status (`§8`) |
+| `pill_green_fill` | `#102E20` | `#E4F9EC` | Soft backdrop for saturated green semantic status pills |
+| `STATUS_RED` (`status_red`) | `#F04458` | `#E02444` (`#F04458` dots/bars) | Saturated alert/growth/locked semantic status (`§8`) |
+| `pill_red_fill` | `#2C121E` | `#FDE8ED` | Soft backdrop for saturated red alerts and `Active-Highlight` latched toggles |
 
-### 2.3 Typography & Luminance Hierarchy (`Segoe UI` + `Consolas` Instrument Numerals)
-Minimum readable type floor across all UI copy: **`10.5pt`**. No text may render smaller than `10.5pt`.
+---
+
+## 3. Typography Scale & Luminance Hierarchy
+
+WT applications pair **`Segoe UI`** for proportional interface text with **`Consolas`** monospace numerals for measured quantities, coordinates, and timestamps. Minimum readable type floor across all UI copy: **`10.5pt`**. No rendered text may be smaller than `10.5pt`.
 
 | Tier | Size & Weight | Luminance Token | Role |
 |---|---|---|---|
-| **T1 — Instrument Headline** | `16.0pt` Strong (`14.5pt` `Consolas Bold` for drive free space) | `text` (`#EDEDF2` / `#1C2733`) | View titles (`y-storage`, Settings title) & **drive free-space headline figures** |
-| **T2 — Dominant Row Quantity** | `13.0pt`–`13.5pt` `Consolas Bold` | `text` | Primary row totals (each app's attributed byte total) |
-| **T3 — Primary Row Identity** | `13.0pt` `Segoe UI` | `text` | App display names; `12.0pt`–`12.5pt` for pinned ledger titles and button labels |
-| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` | `muted` (`#9A9AB0` / `#5F7186`) / `subtle_text` (`#82829A` / `#748499`) | Publishers (`11.0pt subtle_text`), breakdown paths (`11.5pt` `Consolas`), breakdown & shared dependency sizes (`11.5pt` `Consolas`), provenance/basis (`10.5pt subtle_text`, word-capped `…`), section eyebrows (`10.5pt`) |
-
-### 2.4 Spacing Scale (Multiples of 4 Only)
-`SPACE_4 = 4.0`, `SPACE_8 = 8.0`, `SPACE_12 = 12.0`, `SPACE_16 = 16.0`. All margins, row padding, and control gaps come strictly from `{4, 8, 12, 16}`.
-
-### 2.5 Corner-Radius Scale (Differentiated by Role)
-Not everything gets the same corner radius:
-- **`8.0px` (`RADIUS_PANEL`)**: Elevated containers — drive pods, ledger wrapper panels, elevated expanded inspection panel, Settings drive panels, overlays (matches `z-controller` `CARD_ROUNDING = 8.0`).
-- **`6.0px` (`RADIUS_CONTROL`)**: Shared interactive controls synced with `z-controller` — `ThemeToggle`, buttons (`Rescan`, `Settings`, `Clear`, `Add exclusion`, `Remove`, `Close`, `All`), segmented `Sort` controls, text inputs.
-- **`4.0px` (`RADIUS_PILL`)**: Compact single-select filter pills and checkboxes.
-- **`2.0px` (`RADIUS_BADGE`)**: Non-interactive semantic state badges (`GREEN`, `RED`, `BODY`, `NO-TOUCH`, `LOCKED`, `proven`, `inferred`, `shared`) and drive meter tracks.
-- **`0.0px`**: Hairline-divided ledger rows and horizontal rules.
+| **T1 — Instrument Headline** | `16.0pt` Strong (`14.5pt` `Consolas Bold` for primary pod metrics) | `text` | View titles and top-level live readouts (`drive free space`, primary instrument header values) |
+| **T2 — Dominant Row Quantity** | `13.0pt`–`13.5pt` `Consolas Bold` | `text` | Single right-aligned primary quantity on every list row or card |
+| **T3 — Primary Identity & Controls** | `13.0pt` `Segoe UI` (`12.0pt`–`12.5pt` for pinned ledger titles, button labels, input values) | `text` (controls follow button state table `§6`) | Row display names, section group titles, button captions, active filter/input copy |
+| **T4 — Secondary Metadata & Quiet Numbers** | `10.5pt`–`11.5pt` (`11.5pt` `Consolas` paths/supporting sizes; `11.0pt` column headers & publishers; `10.5pt` section eyebrows, badges, word-capped `"…"` provenance) | `muted` / `subtle_text` | Sticky column headers, secondary row attributes, sub-table quantities, full-text hover tooltips when capped |
 
 ---
 
-## 3. Hierarchy & Chip Discipline Rules
+## 4. Spacing Scale & Corner Radii
 
-1. **One Dominant Element Per Row**: The right-aligned measured quantity (`13.5pt` Strong) is the single strongest signal on every row. Identity (`13.0pt` Regular) leads cleanly on the left; inline metadata steps down in both size and contrast (`10.5pt`–`11.0pt subtle_text`).
-2. **Shared Tabular Alignment & Sticky Sortable Headers**: Every primary size number aligns cleanly into one continuous right-aligned column across both main ledger rows and pinned summary rows. Multi-column list views use fixed column x-positions (`Chevron`, `Name`, `Publisher`, `Growth delta`, `Total size` in ledger views) anchored beneath a sticky column-header row (`panel_alt` surface, quiet `T4` `11.0pt` meta tier). Column headers act directly as interactive sort triggers showing the single active sort arrow rather than duplicating sort state into separate segmented control bars.
-3. **Strict Chip Discipline**: A badge exists **only** to encode a user decision or state (`GREEN` / `RED` / `BODY` zone, `NO-TOUCH` / `LOCKED` safety, `proven` / `inferred` / `shared` / `missing` dependency state). **Forbidden decorative chips**: app-wide static modes (`READ-ONLY`), static drive flags (`SYSTEM DRIVE`), descriptive dependency categories (`shared runtime`, `platform/launcher client`), internal spec jargon (`Constitutional`), and normal `diff 0 B` steady-state ledger output.
-4. **Cross-App Control & Signature Parity**: Shared controls (`ThemeToggle`, outline primary/secondary/dismiss buttons, text inputs, checkboxes, slim `6px` `SPACE_8`-gutter scrollbar) and the diagonal `8px` Active Gradient Rim MUST match `z-controller` (`ui-polish-2`, `visual-identity-addon`).
+### 4.1 Spacing Scale (Multiples of 4 Only)
+`SPACE_4 = 4.0`, `SPACE_8 = 8.0`, `SPACE_12 = 12.0`, `SPACE_16 = 16.0`. All outer margins, panel padding, header control gaps, table cell gaps, and vertical section rhythms derive strictly from `{4, 8, 12, 16}`. Rows hug their content cleanly without trailing dead whitespace; empty/sparse states align top-left rather than floating centred in dead vertical space.
 
----
-
-## 4. Anti-Patterns ("The AI Look" Checklist)
-Reject any screen exhibiting:
-1. Repeating identical bordered cards around every list/ledger row (`cards-inside-cards` when expanded).
-2. A single uniform corner radius (`6px` on panels, badges, tracks, and buttons alike).
-3. Raw pastel accents (`#54B9F2`, `#D8A6FF`, `#F7A8D8`) used as solid opaque badge/surface fills.
-4. Centred empty-state labels floating in dead vertical space.
-5. Publishers, dependency kinds, basis strings, or shared dependency sizes rendered at equal weight/brightness with primary totals.
-6. Chips placed on static descriptors rather than state/decisions.
+### 4.2 Corner-Radius Scale (Differentiated by Role)
+Different architectural tiers carry distinct corner radii:
+- **`8.0px` (`RADIUS_PANEL` / `CARD_ROUNDING`)**: Elevated containers — summary pods, ledger wrappers, active/expanded containers & gradient rims, Settings panels, overlays.
+- **`6.0px` (`RADIUS_CONTROL`)**: Shared interactive controls synced with `z-controller` — `ThemeToggle`, outline action buttons, segmented sort controls, text input wells.
+- **`4.0px` (`RADIUS_PILL`)**: Compact single-select filter pills and `16x16` toggle checkboxes.
+- **`3.5px`–`4.0px` (Track Outer) / `2.5px`–`3.0px` (Track Fill)**: Chunky `7px`–`8px` rounded status and capacity meters.
+- **`2.0px` (`RADIUS_BADGE`)**: Non-interactive semantic state badges (`RADIUS_BADGE`).
+- **`0.0px`**: Hairline-divided ledger rows, inline `<= 2px` proportion rules, and horizontal dividers.
 
 ---
 
-## 5. App-Specific: `y-storage`
+## 5. Gradient-Rim State Rule (WT Signature)
 
-- **Signature Element 1 — Drive Instrument Header**: Each physical drive sits in an `8px` pod whose dominant readout is **free space** (`T1`, `14.5pt` `Consolas Bold`) paired with a full-width `7px` chunky rounded capacity meter (`used_bytes / total_bytes`, matching `z-controller`'s chunky rounded bar geometry: `pal.accent_line` when healthy/full-walk, `LOGO_LAVENDER` when install-only, and saturated `STATUS_RED` when `<= 15%` headroom remains). Free space must visually outweigh app-row figures.
-- **Signature Element 2 — Tabular App Footprint Ledger & Sub-Tables**: The main app list renders inside one `8px` ledger panel headed by a sticky `26px` sortable column-header row (`Chevron · App name · Publisher · Growth delta · Total size`). Clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default; active column shows directional sort arrow; clicking again flips asc/desc). Each `App name` cell renders a fixed `18x18 px` Windows app icon extracted once per scan (or one consistent neutral muted folder-tile glyph for standalone/service entries) without shifting column x-positions. All numeric columns (`Total size`, `Growth delta`, `Own size`, drive counters) use `Consolas` monospace numerals; `Total size` includes a quiet `<= 2px` muted proportion bar relative to the largest unfiltered app and exposes exact bytes + `%` share on hover. Expanding a row elevates it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK`), rendering two aligned sub-tables whose right size columns share the exact right edge of the main `Total size` column:
-  - `Locations (N)` table: `Zone · Path · Basis · Size` (`● GREEN` / `● RED` saturated status marks vs quiet `BODY`, `Basis` word-boundary capped `"…"` with full hover tooltip).
-  - `Dependencies` table: `Dependency name · Kind · Confidence · Used by · Own size`, with `dep.basis` capped cleanly to one word-boundary line ending in `"…"` underneath the dependency row (full text on hover).
-- **Signature Element 3 — Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one compact `8px` ledger block with `2px` colour ticks and sizes aligned to the exact same right column as the app list; beneath them sits the exact reconciliation equation ending with a chunky `8px` saturated `STATUS_GREEN` dot + `diff 0 B` (or saturated `STATUS_RED` alert badge if `diff != 0`).
+The signature continuous gradient rim is a **state signal**, never decorative chrome:
+
+- **Where permitted**: Strictly **active or expanded containers** — an active virtual/controller card (`z-controller`) or an expanded inspection drawer (`y-storage`). Collapsed rows, idle cards, meters, and static containers MUST NOT carry gradient rims (`1px border` hairlines only).
+- **Exact geometry (`z-controller` `paint_active_card_gradient_border`)**:
+  - **Outer rounding**: `8.0px` (`CARD_ROUNDING`), **`SEGS = 16`** corner arc segments, **`BANDS = 5`**.
+  - **Edge profile**: `offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.0_f32]`, `alphas = [0_u8, 52_u8, 255_u8, 255_u8, 0_u8]` (`1.2pt` solid perimeter core + `2.5pt` soft inner glow), paired with an inner content fill polygon `rect.shrink(1.0)` at **`7.0px`** rounding (`panel_alt` when expanded over a ledger).
+  - **Diagonal gradient stops**: parameter `t = clamp(((x - rect.left()) / w) * 0.65 + ((y - rect.top()) / h) * 0.35, 0.0, 1.0)` interpolating **`LOGO_BLUE` (`#54B9F2`)** at `0.0` -> **`LOGO_LAVENDER` (`#D8A6FF`)** at `0.5` -> **`LOGO_PINK` (`#F7A8D8`)** at `1.0`.
 
 ---
 
-## 6. Screenshot Critique Checklist (`C1`–`C12`, Pass/Fail From Screenshots Alone)
+## 6. Family Button & Interactive Control Standard
 
-- **C1 (No Uniform Card Soup)**: Collapsed app rows and pinned storage groups sit inside clean hairline-divided ledger surfaces rather than individual stacked bordered cards; expanded rows do not contain nested sub-cards.
-- **C2 (One Dominant Row Number)**: On every app row, the right-aligned total (`13.5pt` Strong) is unmistakably heavier than the app name (`13.0pt` Regular), which is clearly brighter than the inline publisher (`11.0pt` subtle).
-- **C3 (Shared Size Column Alignment)**: Sticky table header `Total size`, main row totals, expanded `Locations`/`Dependencies` size columns, and pinned storage group totals share one exact vertical right edge (accounting for scrollbar gutter).
-- **C4 (Headline Drive Strip)**: Drive free space (`16.0pt` Strong) is visually larger than app row text and immediately anchors each `8px` drive pod above its `2px` proportional capacity bar.
-- **C5 (Quiet Shared Dependency Sizes)**: Inside an expanded app, shared dependency sizes (`11.5pt` muted) are visibly subordinate to the app's own total (`13.5pt` Strong) and never read like additive components.
-- **C6 (Chip Discipline)**: Zero chips appear on static labels (`READ-ONLY`, `SYSTEM DRIVE`, `diff 0 B`, `shared runtime` / `platform/launcher client`, `Constitutional`). Chips exist only for zones, `NO-TOUCH`/`LOCKED`, and dependency verification state (`proven`/`inferred`/`shared`).
-- **C7 (State Signal Gradient Rim, Zero Pastel Card Soup)**: Active gradient rims (`#54B9F2 -> #D8A6FF -> #F7A8D8`) appear ONLY on active/expanded containers; zero non-status badges or collapsed containers use raw solid `#54B9F2`/`#D8A6FF`/`#F7A8D8` fills.
-- **C8 (Multi-Tier Corner Radii)**: Distinct visual hierarchy across `8px` panels/rims, `6px` controls, `4px` filter pills, `2px` state badges, `3.5px` meter tracks, and `0px` hairline ledger rows.
-- **C9 (`>= 10.5pt` Typography Floor & Saturated Status)**: All copy stays `>= 10.5pt`; semantic status (`+`/`-` growth, `diff 0 B` `8px` dot, `NO-TOUCH`, `● GREEN`/`RED` zone marks) renders in saturated `#28D66C` / `#F04458` (`#0FA84F` / `#E02444` Light) while metadata stays quiet.
-- **C10 (Dark & Light Input/Surface Contrast)**: In both Dark and Light screenshots, text inputs sit inside distinct `input_bg` wells and `bg`/`panel_alt`/`panel` separation reads cleanly.
-- **C11 (Content-Hugging Settings & Top-Left Alignment)**: Settings cards with zero exclusions show no orphaned empty headers; non-populated states align top-left cleanly without floating centred whitespace.
-- **C12 (`z-controller` Control Sync Intact)**: Header theme toggle, outline `Rescan`, `Settings`/`Back to Apps`, `Add exclusion`, overlay `All`/`Close`, `used by` buttons, inputs, checkboxes, and slim `6px` `SPACE_8`-gutter scrollbar mirror `z-controller` outline geometry, fill hierarchy, hover/pressed borders, and continuous `1px` outlines.
+All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controller\apps\z-controller\src\ui.rs`) so headers, forms, dialogs, and scrollbars feel built from one binary toolkit.
+
+### 6.1 Crisp Outline Geometry & Padding
+- **Perimeter ring rendering**: Controls use pixel-snapped `RADIUS_CONTROL = 6.0px` geometry via `paint_crisp_bordered_box` / `paint_crisp_ring_mesh` (`1.0px` stroke inset normalized by `pixels_per_point`). When `fill == Color32::TRANSPARENT`, ONLY the unbroken `1px` perimeter mesh is drawn — avoiding solid-fill quad artifacts across 96 DPI and HiDPI scales.
+- **Horizontal padding**: `SPACE_12` (`12px`) for standard controls (`min_size.y > 22.0`); `SPACE_8` (`8px`) for compact table/inline action buttons (`min_size.y <= 22.0`, e.g., row cross-reference triggers).
+
+### 6.2 Outline Button Variants & Interactive States
+
+| Variant / State | Background Fill | `1px` Outline Stroke | Text / Glyph Foreground | Typical Use |
+|---|---|---|---|---|
+| **`PrimaryOutline`** (rest) | `pill_blue_fill` (`#121C28` / `#EBF6FF`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | Primary header/panel CTA (`Rescan`, `Continue`, `Apply`) |
+| **`SecondaryOutline`** (rest) | `TRANSPARENT` | `lerp(border, accent_line, 0.72)` | `accent_line` (`#54B9F2` / `#2F9BE8`) | Navigation, view toggles, secondary actions (`Settings`, `Back to Apps`, `ThemeToggle`, `Add exclusion`, `used by N apps >`) |
+| **`SubtleOutline`** (rest) | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `muted` (`#9A9AB0` / `#5F7186`) | Dismissive, clear, or low-priority utility actions (`Clear`, `Remove`, overlay `Close` / `All`) |
+| **Hovered** (any enabled variant) | `widget_hover` (`#1F1F31` / `#E9F2FA`) | `accent_line` (`#54B9F2` / `#2F9BE8`) | `text` (`#EDEDF2` / `#1C2733`) | Pointer hover across all enabled buttons |
+| **Pressed** (`is_pointer_button_down_on`) | `widget_active` (`#182230` / `#DCEBF8`) | `LOGO_PINK` (`#F7A8D8`) | `text` (`#EDEDF2` / `#1C2733`) | Active pointer press feedback (universal WT press border) |
+| **Active-Highlight** (latched toggle) | `pill_red_fill` (`#2C121E` / `#FDE8ED`) | `LOGO_PINK` (`#F7A8D8`) | `text` (`#EDEDF2` / `#1C2733`) | Latched warning/record/toggle state |
+| **Disabled** | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `muted` (`#9A9AB0` / `#5F7186`) | Unavailable action (inert `Sense::hover`) |
+
+### 6.3 Shared Header & Form Controls
+- **`ThemeToggle` Icon Button**: Square `28x28 px` (`HEADER_CONTROL_H`) `6.0px` `SecondaryOutline` container sharing exact `Hovered`/`Pressed` rules above.
+  - Dark mode draws an 8-ray sun glyph in `accent_line` (`text` on hover/press).
+  - Light mode draws a crescent moon in `accent_line` (`r = 5.3`) punched cleanly by an offset cutout circle (`r = 4.4`) painted in `bg` when rest/transparent, or the active hover/press `fill` during interaction.
+- **Text Inputs**: Recessed `RADIUS_CONTROL = 6.0px` frame filled with `input_bg` (or `header_input_bg` `#FFFFFF` when sitting directly on `#EEF4FA` Light header canvas), `1px` `border` (`accent_line` while focused), `12.0pt` `text` value, `12.0pt` `hint_text` visible **only** when unfocused and empty.
+- **Checkboxes**: `16x16 px` `RADIUS_PILL = 4.0px` box (`pill_blue_fill` + `accent_line` + `1.75pt` `accent_line` check stroke when checked; `widget_hover` + `accent_line` hovered; `input_bg` + `border` unchecked).
+- **Scrollbars**: Non-floating `6.0px` vertical thumb (`scrollbar_thumb` -> `scrollbar_thumb_hover` -> `accent_line`), `handle_min_length = 24.0`, `SPACE_8` (`8px`) inner gutter (`bar_outer_margin = 0.0`).
+
+---
+
+## 7. Chip Discipline
+
+1. **Badges Exist Only for Decisions or State**: `2.0px` (`RADIUS_BADGE`) non-interactive chips (`Margin::symmetric(5.0, 1.0)`, `10.5pt` Strong) render strictly when encoding an actionable constraint, safety boundary, verification confidence, or status mark (`§8`).
+2. **Forbidden Static Chips**: Never wrap persistent modes (`READ-ONLY`), hardware/OS classifications (`SYSTEM DRIVE`), prose category names (`shared runtime`), internal spec terms (`Constitutional`), or quiet steady-state labels in bordered badge chips.
+3. **Filter Pills**: Single-select filter controls use `RADIUS_PILL = 4.0px` (`pill_blue_fill` + `1px accent_line` + `text` when active; `widget` + `1px border` + `muted` when inactive).
+
+---
+
+## 8. Status-Colour Saturation Rule
+
+Across every WT instrument, **saturated green/red (`STATUS_GREEN` / `STATUS_RED`) is reserved exclusively for real semantic status**, while structural accents and metadata stay at calm pastel or neutral contrast levels.
+
+| Category | Element Examples | Palette Treatment |
+|---|---|---|
+| **Takes Saturated Status** | • `8px` (`r = 4.0`) health, device-link, and reconciliation status dots (`diff 0 B`) + paired status text<br>• Critical/threshold-driven capacity & battery meters (`z-controller` battery `> 20%` `STATUS_GREEN` / `<= 20%` `STATUS_RED`; `y-storage` drive bar `>= 85%` full / `<= 15%` free `STATUS_RED`)<br>• Signed change deltas (`-` shrank/favorable green, `+` grew/unfavorable red)<br>• Safety locks, alerts, and missing-resource badges (`NO-TOUCH`, `LOCKED`, `missing`, `diff != 0`) using `status_red` outline/text over `pill_red_fill`<br>• Explicit safety-zone badges (`● GREEN`, `● RED`) featuring a `5px` saturated dot over `pill_green_fill` / `pill_red_fill` | **`STATUS_GREEN`** (`#28D66C` Dark / `#0FA84F` Light text & stroke; `#28D66C` solid dot)<br>**`STATUS_RED`** (`#F04458` Dark / `#E02444` Light text & stroke; `#F04458` solid dot & bar) |
+| **Stays Pastel or Quiet Neutral** | • Healthy non-battery allocation meters (`LOGO_BLUE` / `LOGO_LAVENDER`)<br>• Active container gradient rims (`LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK`) and pressed `LOGO_PINK` borders<br>• Provenance & qualifier badges (`proven` in `pill_blue_fill` + `accent_line` + `text`; qualifiers in `pill_lav_fill` + `LOGO_LAVENDER` + `lavender_text`)<br>• Neutral structural badges (`BODY`, `shared`, `inferred` in `TRANSPARENT`/`border`/`muted`)<br>• Inline `<= 2px` proportional table bars, hairline dividers, and `T4` metadata | **Pastel (`LOGO_BLUE`, `LOGO_LAVENDER`, `LOGO_PINK`)** or **Quiet Neutral (`border`, `muted`, `subtle_text`)** |
+
+---
+
+## 9. Shared Layout & Family Critique Checklist (`FC1`–`FC9`)
+
+Tabular instruments align numbers in fixed right-aligned monospace columns under a sticky `panel_alt` sortable column-header row (`T4` `11.0pt` labels acting directly as sort triggers with a single directional arrow, never duplicated in a separate bar).
+
+Before accepting screenshots of any WT application, verify **`FC1`–`FC9`**:
+- **FC1 (No Card Soup)**: List rows and summary lines sit inside hairline-divided ledger panels rather than repeating stacked individual cards.
+- **FC2 (One Dominant Row Signal)**: Right-aligned `T2` totals unmistakably outweigh `T3` row identity, which clearly leads `T4` metadata.
+- **FC3 (State-Signal Gradient Rim Only)**: Diagonal gradient rims (`#54B9F2 -> #D8A6FF -> #F7A8D8`) appear strictly on active/expanded containers; zero collapsed containers or non-status pills use solid pastel fills.
+- **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, `2px` status badges, and `0px` hairline ledger rows.
+- **FC5 (Saturated Status Discipline)**: Saturated `#28D66C` / `#F04458` (`#0FA84F` / `#E02444` Light) marks appear strictly on live status dots, threshold/battery alerts, signed deltas, safety locks, and zone marks — while metadata, proportions, and qualifiers stay calm pastel/neutral.
+- **FC6 (Outline Button Hierarchy & Crisp `1px` Rings)**: `3x` cropped header/panel buttons show unbroken `1px` rings across Dark and Light modes, clear `PrimaryOutline` / `SecondaryOutline` / `SubtleOutline` hierarchy, and sharp moon/sun icon contrast.
+- **FC7 (`>= 10.5pt` Floor)**: All visible labels, badges, captions, and tooltips meet or exceed `10.5pt`.
+- **FC8 (Dual-Mode Surface & Input Separation)**: Both Dark (`#0A0A10` / `#10101A` / `#14141F`) and Light (`#EEF4FA` / `#F4F8FC` / `#FFFFFF`) preserve distinct surface tiers and recessed `input_bg` wells.
+- **FC9 (Content-Hugging & Top-Left Sparse States)**: Empty or sparse panels align top-left cleanly without floating centred whitespace or orphaned headers.
+
+---
+
+# Part II — App-Specific Sections
+
+Each section below documents only what is unique to an individual WT application beyond Part I.
+
+## 10. App-Specific: `z-controller`
+
+- **Active Controller Cards**: The active virtual controller card renders the `8.0px` Active Gradient Rim (`§5`); inactive/standby cards use standard `panel` surfaces with `1px border`.
+- **Battery Instrument Meter**: `124.0 x 8.0 px` single-colour chunky rounded track (`Rounding 4.0` `bg` + `1px border` outer, `Rounding 3.0` inner fill) using `STATUS_GREEN` (`#28D66C`) above `20%` and `STATUS_RED` (`#F04458`) at or below `20%` (never the 3-stop gradient).
+- **Live Device Status**: Paired with `8px` (`r = 4.0`) saturated `STATUS_GREEN` / `STATUS_RED` connection indicator dots.
+
+---
+
+## 11. App-Specific: `y-storage`
+
+- **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Bold`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill): `accent_line` when healthy/full-walk, `LOGO_LAVENDER` when install-only, and saturated `STATUS_RED` whenever `>= 85%` used (`<= 15%` headroom remaining).
+- **Tabular App Footprint Ledger & Inspection Drawer**:
+  - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Growth delta · Total size`), clicking `App name`, `Growth delta`, or `Total size` sorts (`Size` desc default).
+  - Fixed `18x18 px` extracted Windows app icon (or consistent neutral folder-tile glyph) keeping column x-positions fixed across rows.
+  - `Total size` embeds a quiet `<= 2px` (`PROP_BAR_W = 76.0`, `PROP_BAR_H = 2.0`) proportional bar relative to the largest unfiltered app and exposes exact bytes + `%` share on hover. Missing growth baselines display muted `"new"`.
+  - Expanding an app row converts it into an `8px` `panel_alt` inspection drawer wrapped in the continuous **WT Active Gradient Rim** (`§5`), suppressing the row hairline above it and aligning two sub-tables cleanly to the main `Total size` right edge:
+    - `Locations (N)`: `Zone · Path · Basis · Size` (`● GREEN` / `● RED` saturated zone badges, `BODY` quiet structural badge, `ProgramData (Machine-shared)` lavender qualifier, word-capped `"…"` `Basis` with hover tooltip).
+    - `Dependencies`: `Dependency name · Kind · Confidence · Used by · Own size` (`proven` / `inferred` / `shared` / `missing` chips, `SecondaryOutline` `used by N apps >` overlay buttons, word-capped `basis` underneath).
+- **Reconciliation Ledger Footer**: Pinned storage groups (`Windows & system`, `Your files`, `Shared & system caches`, `Unattributed`) sit in one `8px` ledger block with `2px` colour ticks (`LOGO_LAVENDER`, `LOGO_BLUE`, `STATUS_GREEN`, `LOGO_PINK`) and sizes right-aligned to the main ledger size column. Beneath them sits the live drive reconciliation equation ending with an `8px` (`r = 4.0`) saturated `STATUS_GREEN` dot + green `diff 0 B` text (or `STATUS_RED` alert if `diff != 0`).
+- **`y-storage` Domain Critique Checks (`YS1`–`YS3`)**:
+  - **YS1 (Shared Size Column Alignment)**: Sticky header `Total size`, main row totals, expanded `Locations`/`Dependencies` size columns, and pinned summary totals share one exact right vertical edge (accounting for the `14px` `6px + SPACE_8` scrollbar gutter).
+  - **YS2 (Drive Headline Dominance)**: Drive free space (`14.5pt Consolas Bold`) visibly anchors the top strip above app rows (`13.5pt`).
+  - **YS3 (Subordinate Shared Dependencies)**: Inside expanded drawers, `Dependencies` own sizes (`11.5pt` `muted`) visually recede behind the app's own total (`13.5pt` `text`) so shared runtimes never read as additive footprint.
