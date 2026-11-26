@@ -139,12 +139,12 @@ impl ThemePalette {
                 lavender_text: LOGO_LAVENDER,                  // #D8A6FF
                 status_green: STATUS_GREEN,                    // #28D66C
                 status_red: STATUS_RED,                        // #F04458
-                delta_grew: LOGO_PINK,                         // #F7A8D8
-                no_touch_outline: Color32::from_rgb(206, 92, 108), // #CE5C6C (DESIGN.md exception)
+                delta_grew: STATUS_RED,                        // #F04458 (ADD 3 saturated status)
+                no_touch_outline: STATUS_RED,                  // #F04458 (ADD 3 saturated status)
                 pill_blue_fill: Color32::from_rgb(18, 28, 40), // #121C28 (z-controller pill_blue_fill)
-                pill_green_fill: Color32::from_rgb(16, 38, 26),
+                pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (ADD 3 saturated green tint)
                 pill_lav_fill: Color32::from_rgb(32, 24, 46),
-                pill_red_fill: Color32::from_rgb(38, 22, 34),  // #261622 (z-controller pill_pink_fill)
+                pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (ADD 3 saturated red tint)
                 scrollbar_thumb: Color32::from_rgb(46, 46, 70), // #2E2E46
                 scrollbar_thumb_hover: LOGO_BLUE,
             },
@@ -164,14 +164,14 @@ impl ThemePalette {
                 widget_active: Color32::from_rgb(220, 235, 248), // #DCEBF8 (z-controller widget_active)
                 accent_line: LOGO_BLUE_READABLE,               // #2F9BE8 (z-controller accent_line)
                 lavender_text: Color32::from_rgb(120, 62, 184), // #783EB8 (Light contrast exception)
-                status_green: Color32::from_rgb(20, 138, 68),   // #148A44 (Light text exception)
-                status_red: Color32::from_rgb(206, 40, 64),     // #CE2840 (Light text exception)
-                delta_grew: Color32::from_rgb(196, 48, 88),     // #C43058 (Light text exception)
-                no_touch_outline: Color32::from_rgb(188, 64, 80), // #BC4050 (DESIGN.md exception)
+                status_green: Color32::from_rgb(15, 168, 79),   // #0FA84F (ADD 3 saturated Light green)
+                status_red: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light red)
+                delta_grew: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light delta)
+                no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444 (ADD 3 saturated Light NO-TOUCH)
                 pill_blue_fill: Color32::from_rgb(235, 246, 255), // #EBF6FF (z-controller pill_blue_fill)
-                pill_green_fill: Color32::from_rgb(230, 248, 237),
+                pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (ADD 3 saturated Light green tint)
                 pill_lav_fill: Color32::from_rgb(243, 236, 255),
-                pill_red_fill: Color32::from_rgb(253, 241, 249), // #FDF1F9 (z-controller pill_pink_fill)
+                pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (ADD 3 saturated Light red tint)
                 scrollbar_thumb: Color32::from_rgb(192, 208, 226), // #C0D0E2
                 scrollbar_thumb_hover: LOGO_BLUE_READABLE,
             },
@@ -463,7 +463,144 @@ fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
 }
 
-/// Paints an unbroken rounded rectangle border by layering pixel-snapped outer (border) and inner (fill) filled rects, eliminating 96-DPI horizontal stroke dropout in SoftwarePainter.
+fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec2)>) {
+    let r = radius.clamp(0.0, 0.5 * rect.width().min(rect.height()));
+    const SEGS: usize = 16;
+    let corners = [
+        (Pos2::new(rect.left() + r, rect.top() + r), std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+        (Pos2::new(rect.right() - r, rect.top() + r), 1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
+        (Pos2::new(rect.right() - r, rect.bottom() - r), 0.0, 0.5 * std::f32::consts::PI),
+        (Pos2::new(rect.left() + r, rect.bottom() - r), 0.5 * std::f32::consts::PI, std::f32::consts::PI),
+    ];
+    for (center, a0, a1) in corners {
+        for k in 0..=SEGS {
+            let theta = a0 + (a1 - a0) * (k as f32 / SEGS as f32);
+            let n = Vec2::new(theta.cos(), theta.sin());
+            let p = center + n * r;
+            if let Some(&(prev_p, _)) = out.last() {
+                if (p - prev_p).length_sq() < 1e-5 {
+                    continue;
+                }
+            }
+            out.push((p, n));
+        }
+    }
+    if out.len() >= 2 && (out[0].0 - out[out.len() - 1].0).length_sq() < 1e-5 {
+        out.pop();
+    }
+}
+
+fn build_rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<Pos2> {
+    let mut ring = Vec::with_capacity(68);
+    push_rounded_rect_perimeter(rect, radius, &mut ring);
+    ring.into_iter().map(|(p, _)| p).collect()
+}
+
+/// Paints an unbroken 1px perimeter ring strictly inside `rect` (safe even when fill is `TRANSPARENT`).
+fn paint_crisp_ring_mesh(
+    painter: &egui::Painter,
+    rect: Rect,
+    inset: f32,
+    rounding: f32,
+    border_color: Color32,
+) {
+    if border_color == Color32::TRANSPARENT || rect.width() <= 2.0 || rect.height() <= 2.0 {
+        return;
+    }
+    let mut ring = Vec::with_capacity(68);
+    push_rounded_rect_perimeter(rect, rounding, &mut ring);
+    let n = ring.len();
+    if n < 8 {
+        return;
+    }
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.reserve(n * 2);
+    mesh.indices.reserve(n * 6);
+    for &(p, norm) in &ring {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: p,
+            uv: egui::epaint::WHITE_UV,
+            color: border_color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: p - norm * inset,
+            uv: egui::epaint::WHITE_UV,
+            color: border_color,
+        });
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let o0 = (i * 2) as u32;
+        let i0 = o0 + 1;
+        let o1 = (j * 2) as u32;
+        let i1 = o1 + 1;
+        mesh.indices.extend_from_slice(&[o0, o1, i0, i0, o1, i1]);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Ported verbatim from z-controller (`ui.rs:398-458`): diagonal gradient rim (LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK) bounded strictly inside `rect`.
+fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, rounding: f32) {
+    if rect.width() <= 4.0 || rect.height() <= 4.0 {
+        return;
+    }
+    let mut ring = Vec::with_capacity(68);
+    push_rounded_rect_perimeter(rect, rounding, &mut ring);
+    let n = ring.len();
+    if n < 8 {
+        return;
+    }
+
+    const BANDS: usize = 5;
+    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.0_f32];
+    let alphas = [0_u8, 52_u8, 255_u8, 255_u8, 0_u8];
+
+    let w = rect.width().max(1.0);
+    let h = rect.height().max(1.0);
+
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.reserve(n * BANDS);
+    mesh.indices.reserve(n * (BANDS - 1) * 6);
+
+    for (p, norm) in &ring {
+        let t = (((p.x - rect.left()) / w) * 0.65 + ((p.y - rect.top()) / h) * 0.35).clamp(0.0, 1.0);
+        let c = if t <= 0.5 {
+            lerp_color(LOGO_BLUE, LOGO_LAVENDER, t * 2.0)
+        } else {
+            lerp_color(LOGO_LAVENDER, LOGO_PINK, (t - 0.5) * 2.0)
+        };
+        for (&off, &a) in offsets.iter().zip(alphas.iter()) {
+            let color = if a == 0 {
+                Color32::TRANSPARENT
+            } else {
+                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+            };
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: *p + *norm * off,
+                uv: egui::epaint::WHITE_UV,
+                color,
+            });
+        }
+    }
+
+    let stride = BANDS as u32;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let b0 = (i as u32) * stride;
+        let b1 = (j as u32) * stride;
+        for band in 0..(stride - 1) {
+            let i0 = b0 + band;
+            let i1 = b0 + band + 1;
+            let i2 = b1 + band;
+            let i3 = b1 + band + 1;
+            mesh.indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+        }
+    }
+
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Paints an unbroken rounded rectangle border & optional fill, safe for `Color32::TRANSPARENT` fills at 96 DPI.
 fn paint_crisp_bordered_box(
     painter: &egui::Painter,
     rect: Rect,
@@ -475,9 +612,6 @@ fn paint_crisp_bordered_box(
 ) -> Rect {
     let snapped = snap_rect_to_pixels(rect, ppp);
     let inset = (border_px / ppp.max(0.5)).max(1.0 / ppp.max(0.5));
-    if border_color != Color32::TRANSPARENT {
-        painter.rect_filled(snapped, Rounding::same(rounding), border_color);
-    }
     let inner = snapped.shrink(inset);
     if inner.width() > 0.0 && inner.height() > 0.0 && fill != Color32::TRANSPARENT {
         painter.rect_filled(
@@ -486,6 +620,7 @@ fn paint_crisp_bordered_box(
             fill,
         );
     }
+    paint_crisp_ring_mesh(painter, snapped, inset, rounding, border_color);
     snapped
 }
 
@@ -529,7 +664,15 @@ fn draw_crisp_frame<R>(
     res
 }
 
-/// Renders a button whose states and continuous 1px rounded outline mirror z-controller across both themes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonVariant {
+    PrimaryOutline,
+    SecondaryOutline,
+    SubtleOutline,
+}
+
+/// Renders an outline button whose states, accent outlines, and foreground colours match z-controller across both themes.
+#[allow(clippy::too_many_arguments)]
 fn draw_z_button(
     ui: &mut egui::Ui,
     label: &str,
@@ -538,35 +681,40 @@ fn draw_z_button(
     rounding: f32,
     enabled: bool,
     active_highlight: bool,
+    variant: ButtonVariant,
     pal: &ThemePalette,
 ) -> egui::Response {
-    let font_id = FontId::new(font_size, FontFamily::Proportional);
-    let text_color = if !enabled {
-        pal.muted
-    } else {
-        pal.text
-    };
     let h_pad = if min_size.y <= 22.0 { SPACE_8 } else { SPACE_12 };
-    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
-    let desired_w = (galley.size().x + h_pad * 2.0).max(min_size.x).round();
+    let font_id = FontId::new(font_size, FontFamily::Proportional);
+    let measure_galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), pal.text));
+    let desired_w = (measure_galley.size().x + h_pad * 2.0).max(min_size.x).round();
     let desired_h = min_size.y.round();
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, desired_h), sense);
 
-    let (fill, border_col) = if !enabled {
-        (pal.panel_alt, pal.border)
+    let (fill, border_col, text_color) = if !enabled {
+        (Color32::TRANSPARENT, pal.border, pal.muted)
     } else if resp.is_pointer_button_down_on() {
-        (pal.widget_active, LOGO_PINK)
+        (pal.widget_active, LOGO_PINK, pal.text)
     } else if resp.hovered() {
-        (pal.widget_hover, pal.accent_line)
+        (pal.widget_hover, pal.accent_line, pal.text)
     } else if active_highlight {
-        (pal.pill_blue_fill, pal.accent_line)
+        (pal.pill_red_fill, LOGO_PINK, pal.text)
     } else {
-        (pal.widget, pal.border)
+        match variant {
+            ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
+            ButtonVariant::SecondaryOutline => (
+                Color32::TRANSPARENT,
+                lerp_color(pal.border, pal.accent_line, 0.72),
+                pal.accent_line,
+            ),
+            ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, pal.border, pal.muted),
+        }
     };
 
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
     let text_pos = Pos2::new(
         (snapped.center().x - galley.size().x * 0.5).round(),
         (snapped.center().y - galley.size().y * 0.5).round(),
@@ -731,6 +879,43 @@ fn paint_chip(ui: &mut egui::Ui, label: &str, style: ChipStyle, container_bg: Co
     .response
 }
 
+fn paint_zone_chip(
+    ui: &mut egui::Ui,
+    zone: ZoneKind,
+    pal: &ThemePalette,
+    container_bg: Color32,
+) -> egui::Response {
+    if matches!(zone, ZoneKind::Body) {
+        return paint_chip(ui, zone.short_label(), zone_chip_style(zone, pal), container_bg);
+    }
+    let (fill, stroke, text_col, dot_col) = match zone {
+        ZoneKind::Green => (pal.pill_green_fill, pal.status_green, pal.status_green, STATUS_GREEN),
+        ZoneKind::Red => (pal.pill_red_fill, pal.status_red, pal.status_red, STATUS_RED),
+        ZoneKind::Body => unreachable!(),
+    };
+    draw_crisp_frame(
+        ui,
+        fill,
+        stroke,
+        RADIUS_BADGE,
+        Margin::symmetric(5.0, 1.0),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                ui.painter().circle_filled(dot_r.center(), 2.5, dot_col);
+                ui.label(
+                    RichText::new(zone.short_label())
+                        .size(10.5)
+                        .color(text_col)
+                        .strong(),
+                );
+            });
+        },
+    )
+    .response
+}
+
 fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
     match zone {
         ZoneKind::Green => ChipStyle {
@@ -761,7 +946,7 @@ fn qualifier_chip_style(pal: &ThemePalette) -> ChipStyle {
 
 fn no_touch_chip_style(pal: &ThemePalette) -> ChipStyle {
     ChipStyle {
-        fill: Color32::TRANSPARENT,
+        fill: pal.pill_red_fill,
         stroke: pal.no_touch_outline,
         text: pal.no_touch_outline,
     }
@@ -1028,20 +1213,24 @@ fn draw_chevron(ui: &mut egui::Ui, expanded: bool, color: Color32) {
 fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalette) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(HEADER_CONTROL_H), Sense::click());
     let hovered = resp.hovered();
-    let (fill, border) = if resp.is_pointer_button_down_on() {
+    let pressed = resp.is_pointer_button_down_on();
+    let (fill, border) = if pressed {
         (pal.widget_active, LOGO_PINK)
     } else if hovered {
         (pal.widget_hover, pal.accent_line)
     } else {
-        (pal.widget, pal.border)
+        (
+            Color32::TRANSPARENT,
+            lerp_color(pal.border, pal.accent_line, 0.72),
+        )
     };
     let ppp = ui.ctx().pixels_per_point();
     let snapped = paint_crisp_bordered_box(ui.painter(), rect, 6.0, fill, border, 1.0, ppp);
     let c = snapped.center();
     match mode {
         ThemeMode::Dark => {
-            // Sun glyph synced with z-controller
-            let fg = if hovered { pal.accent_line } else { pal.text };
+            // Sun glyph synced with z-controller outline icon button
+            let fg = if pressed || hovered { pal.text } else { pal.accent_line };
             ui.painter()
                 .circle_stroke(c, 3.2, Stroke::new(1.3_f32, fg));
             for i in 0..8 {
@@ -1054,11 +1243,12 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
             }
         }
         ThemeMode::Light => {
-            // Crescent moon glyph synced with z-controller
+            // Crescent moon glyph synced with z-controller (cutout matches transparent header canvas)
+            let cutout = if pressed || hovered { fill } else { pal.bg };
             ui.painter()
                 .circle_filled(c + Vec2::new(-0.5, 0.2), 5.3, pal.accent_line);
             ui.painter()
-                .circle_filled(c + Vec2::new(2.2, -1.9), 4.4, fill);
+                .circle_filled(c + Vec2::new(2.2, -1.9), 4.4, cutout);
         }
     }
     let clicked = resp.clicked();
@@ -1147,7 +1337,7 @@ struct LocationsTableColumns {
 impl LocationsTableColumns {
     fn compute(origin_x: f32, sub_w: f32) -> Self {
         let gap = SPACE_12;
-        let zone_w = 64.0;
+        let zone_w = 74.0;
         let basis_w = 170.0;
         let size_w = SIZE_COL_W;
         let fixed_w = zone_w + basis_w + size_w + gap * 3.0;
@@ -1420,6 +1610,7 @@ pub fn draw_app_ui(
                         RADIUS_CONTROL,
                         true,
                         false,
+                        ButtonVariant::SecondaryOutline,
                         &pal,
                     )
                     .clicked()
@@ -1440,6 +1631,7 @@ pub fn draw_app_ui(
                         RADIUS_CONTROL,
                         !scanning,
                         false,
+                        ButtonVariant::PrimaryOutline,
                         &pal,
                     )
                     .clicked()
@@ -1543,17 +1735,17 @@ pub fn draw_app_ui(
                                             },
                                         );
 
-                                        // Line 2: Full-width 6px 2px-radius bordered track filled proportionally: fill_px = round(inner_px * (used / total))
+                                        // Line 2: Chunky 7px rounded capacity bar (z-controller battery-bar geometry: STATUS_RED if >= 85% full, else healthy token)
                                         let bar_w = inner_w.floor().max(80.0);
                                         let (bar_rect, bar_resp) = ui.allocate_exact_size(
-                                            Vec2::new(bar_w, 6.0),
+                                            Vec2::new(bar_w, 7.0),
                                             Sense::hover(),
                                         );
                                         let snapped_bar = paint_crisp_bordered_box(
                                             ui.painter(),
                                             bar_rect,
-                                            RADIUS_BADGE,
-                                            pal.input_bg,
+                                            3.5,
+                                            pal.bg,
                                             pal.border,
                                             1.0,
                                             ppp,
@@ -1566,21 +1758,23 @@ pub fn draw_app_ui(
                                         } else {
                                             ((inner_px as f64) * ratio)
                                                 .round()
-                                                .clamp(1.0, inner_px as f64) as f32
+                                                .clamp(3.0, inner_px as f64) as f32
                                         };
                                         if fill_px > 0.0 && inner_track.height() > 0.0 {
                                             let fill_rect = Rect::from_min_size(
                                                 inner_track.min,
                                                 Vec2::new(fill_px / ppp.max(0.5), inner_track.height()),
                                             );
-                                            let bar_col = if drv.full_walk_enabled {
+                                            let bar_col = if ratio >= 0.85 {
+                                                STATUS_RED
+                                            } else if drv.full_walk_enabled {
                                                 pal.accent_line
                                             } else {
                                                 LOGO_LAVENDER
                                             };
                                             ui.painter().rect_filled(
                                                 fill_rect,
-                                                Rounding::ZERO,
+                                                Rounding::same(2.5),
                                                 bar_col,
                                             );
                                         }
@@ -1656,6 +1850,7 @@ pub fn draw_app_ui(
                                 6.0,
                                 true,
                                 false,
+                                ButtonVariant::SubtleOutline,
                                 &pal,
                             )
                             .clicked()
@@ -1998,7 +2193,6 @@ fn draw_main_app_list(
             for (row_idx, app) in visible_apps.iter().enumerate() {
                 let expanded = ui_state.expanded_apps.contains(&app.id);
                 let row_slot = ui.painter().add(egui::Shape::Noop);
-                let accent_bar_slot = ui.painter().add(egui::Shape::Noop);
 
                 let row_outer_rect = ui
                     .allocate_ui_with_layout(
@@ -2006,6 +2200,9 @@ fn draw_main_app_list(
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
+                            if expanded {
+                                ui.add_space(3.0);
+                            }
                             let (sum_rect, _) = ui.allocate_exact_size(
                                 Vec2::new(panel_w, APP_ROW_H + SPACE_4 * 2.0),
                                 Sense::hover(),
@@ -2376,12 +2573,7 @@ fn draw_main_app_list(
                                             loc_cols.zone.rect(ry0, ry1),
                                             Layout::left_to_right(Align::Center),
                                         );
-                                        paint_chip(
-                                            &mut z_ui,
-                                            zone.short_label(),
-                                            zone_chip_style(zone, pal),
-                                            pal.panel_alt,
-                                        );
+                                        paint_zone_chip(&mut z_ui, zone, pal, pal.panel_alt);
                                     }
 
                                     {
@@ -2725,6 +2917,7 @@ fn draw_main_app_list(
                                                     RADIUS_PILL,
                                                     true,
                                                     is_open_rev,
+                                                    ButtonVariant::SecondaryOutline,
                                                     pal,
                                                 )
                                                 .on_hover_text("Open reverse dependency list (\"What else uses this?\")")
@@ -2802,7 +2995,7 @@ fn draw_main_app_list(
                                         );
                                     }
                                 }
-                                ui.add_space(SPACE_8);
+                                ui.add_space(SPACE_8 + 3.0);
                             }
                             row_hovered
                         },
@@ -2814,29 +3007,16 @@ fn draw_main_app_list(
                     Pos2::new(panel_left + panel_w - inset, r_full.max.y),
                 );
                 if expanded {
+                    let drawer_rect = inner_row_rect.shrink2(Vec2::new(2.0, 1.0));
+                    let fill_poly = build_rounded_rect_polygon(
+                        drawer_rect.shrink(1.0),
+                        (RADIUS_PANEL - 1.0).max(0.0),
+                    );
                     ui.painter().set(
                         row_slot,
-                        egui::Shape::rect_filled(inner_row_rect, Rounding::ZERO, pal.panel_alt),
+                        egui::Shape::convex_polygon(fill_poly, pal.panel_alt, Stroke::NONE),
                     );
-                    let bar_rect =
-                        Rect::from_min_size(inner_row_rect.min, Vec2::new(2.0, inner_row_rect.height()));
-                    ui.painter().set(
-                        accent_bar_slot,
-                        egui::Shape::rect_filled(bar_rect, Rounding::ZERO, pal.accent_line),
-                    );
-                    ui.painter().rect_filled(
-                        Rect::from_min_size(inner_row_rect.min, Vec2::new(inner_row_rect.width(), 1.0)),
-                        Rounding::ZERO,
-                        pal.border,
-                    );
-                    ui.painter().rect_filled(
-                        Rect::from_min_size(
-                            Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
-                            Vec2::new(inner_row_rect.width(), 1.0),
-                        ),
-                        Rounding::ZERO,
-                        pal.border,
-                    );
+                    paint_active_card_gradient_border(ui.painter(), drawer_rect, RADIUS_PANEL);
                 } else if row_outer_rect.inner {
                     ui.painter().set(
                         row_slot,
@@ -2844,7 +3024,10 @@ fn draw_main_app_list(
                     );
                 }
 
-                if !expanded && row_idx + 1 < shown {
+                let next_expanded = visible_apps
+                    .get(row_idx + 1)
+                    .is_some_and(|next| ui_state.expanded_apps.contains(&next.id));
+                if !expanded && row_idx + 1 < shown && !next_expanded {
                     let sep = Rect::from_min_size(
                         Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
                         Vec2::new(inner_row_rect.width(), 1.0),
@@ -2955,6 +3138,7 @@ fn draw_reverse_dependency_overlay(
                                 6.0,
                                 true,
                                 false,
+                                ButtonVariant::SecondaryOutline,
                                 pal,
                             )
                             .clicked()
@@ -2969,6 +3153,7 @@ fn draw_reverse_dependency_overlay(
                                 6.0,
                                 true,
                                 false,
+                                ButtonVariant::PrimaryOutline,
                                 pal,
                             )
                             .on_hover_text("Open full Reverse Dependencies view")
@@ -3306,17 +3491,18 @@ fn draw_pinned_bottom_groups(
                     },
                     |ui| {
                         if diff == 0 {
-                            ui.add_space(SPACE_12);
+                            ui.add_space(SPACE_8);
                             ui.add(
                                 egui::Label::new(
                                     RichText::new("diff 0 B")
                                         .size(11.0)
-                                        .color(pal.muted),
+                                        .strong()
+                                        .color(pal.status_green),
                                 )
                                 .selectable(false),
                             );
-                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                            ui.painter().circle_filled(dot_r.center(), 3.0, STATUS_GREEN);
+                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
                         } else {
                             paint_chip(
                                 ui,
@@ -3766,6 +3952,7 @@ fn draw_settings_view(
                                     RADIUS_CONTROL,
                                     true,
                                     false,
+                                    ButtonVariant::SubtleOutline,
                                     pal,
                                 )
                                 .clicked()
@@ -3809,6 +3996,7 @@ fn draw_settings_view(
                                 RADIUS_CONTROL,
                                 true,
                                 false,
+                                ButtonVariant::PrimaryOutline,
                                 pal,
                             )
                             .clicked()

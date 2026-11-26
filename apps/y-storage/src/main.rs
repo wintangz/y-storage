@@ -255,6 +255,7 @@ fn render_screenshot(
     ui_state.filter_chip = filter_chip;
     ui_state.search_query = search_query.to_string();
     let hover_size_mode = view == "hover-size";
+    let header_zoom_mode = view == "header-buttons-zoom";
     match view {
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
@@ -385,6 +386,28 @@ fn render_screenshot(
                 None,
             );
         }
+    }
+
+    if header_zoom_mode {
+        let crop_x0 = (756.0 * ppp).round() as usize;
+        let crop_y0 = 0usize;
+        let crop_w = phys_w.saturating_sub(crop_x0).max(1);
+        let crop_h = ((52.0 * ppp).round() as usize).clamp(1, phys_h);
+        let scale = 3usize;
+        let out_w = crop_w * scale;
+        let out_h = crop_h * scale;
+        let src = painter.backbuffer_pixels();
+        let mut zoomed = vec![0u32; out_w * out_h];
+        for y in 0..crop_h {
+            for x in 0..crop_w {
+                let px = src[(crop_y0 + y) * phys_w + (crop_x0 + x)];
+                for dy in 0..scale {
+                    let row = (y * scale + dy) * out_w + (x * scale);
+                    zoomed[row..row + scale].fill(px);
+                }
+            }
+        }
+        return save_bgra_u32_as_png(out_path, out_w, out_h, &zoomed);
     }
 
     save_bgra_u32_as_png(out_path, phys_w, phys_h, painter.backbuffer_pixels())
