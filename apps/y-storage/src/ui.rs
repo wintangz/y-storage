@@ -8,9 +8,9 @@ use egui::{
     Order, Pos2, Rect, RichText, Rounding, Sense, Stroke, TextStyle, UiBuilder, Vec2,
 };
 use y_core::config::{
-    AppConfig, AppFilterChip, AppSortMode, ContainerRulebook, DEFAULT_CONTAINER_NAMES,
-    DepStateFilter, FacetFilters, FootprintZoneFilter, GrowthFacetFilter, NO_PUBLISHER_FACET_KEY,
-    SizeBandFilter, SortDirection, ThemeMode, UnattributedFacetFilters, UnattributedLocationZone,
+    AppConfig, AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
+    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, PinKind, SizeBandFilter, SortDirection, ThemeMode,
+    UnattributedFacetFilters, UnattributedLocationZone, ZoneRuleKind, ZoneRulebook,
 };
 use y_core::discovery::{normalize_app_token, normalize_path_key};
 use y_core::model::{
@@ -264,7 +264,11 @@ pub struct StorageUiState {
     pub unattrib_sort: UnattributedSortMode,
     pub open_pod_scope_drive: Option<char>,
     pub new_container_name_input: String,
+    pub new_container_name_kind: ZoneRuleKind,
     pub new_container_path_input: String,
+    pub new_container_path_kind: ZoneRuleKind,
+    pub new_pin_path_input: String,
+    pub new_pin_kind: PinKind,
     pub settings_focus_containers: bool,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
@@ -312,7 +316,11 @@ impl Default for StorageUiState {
             unattrib_sort: UnattributedSortMode::SizeDesc,
             open_pod_scope_drive: None,
             new_container_name_input: String::new(),
+            new_container_name_kind: ZoneRuleKind::AppContainer,
             new_container_path_input: String::new(),
+            new_container_path_kind: ZoneRuleKind::PersonalFiles,
+            new_pin_path_input: String::new(),
+            new_pin_kind: PinKind::App,
             settings_focus_containers: false,
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
@@ -2669,9 +2677,15 @@ fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
     } else {
         0.0
     };
+    let carved_h = if app.carved_out_apps.is_empty() {
+        0.0
+    } else {
+        (app.carved_out_apps.len() as f32) * (18.0 + SPACE_4)
+    };
     3.0 + COLLAPSED_ROW_OUTER_H
         + SPACE_4
         + 18.0
+        + carved_h
         + shared_banner_h
         + SPACE_4
         + 18.0
@@ -5088,6 +5102,30 @@ fn draw_main_app_list(
                                     truncate_cache,
                                 );
 
+                                // Carved-out child install roots note (Part B(1): e.g. "contains Genshin Impact — counted under Genshin Impact").
+                                for child_name in &app.carved_out_apps {
+                                    ui.add_space(SPACE_4);
+                                    let (carve_rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(panel_w, 18.0),
+                                        Sense::hover(),
+                                    );
+                                    let mut carve_ui = table_cell_ui(
+                                        ui,
+                                        Rect::from_min_max(
+                                            Pos2::new(sub_x0, carve_rect.min.y),
+                                            Pos2::new(cols.size.max_x, carve_rect.max.y),
+                                        ),
+                                        Layout::left_to_right(Align::Center),
+                                    );
+                                    carve_ui.label(
+                                        RichText::new(format!(
+                                            "contains {child_name} — counted under {child_name}"
+                                        ))
+                                        .size(11.5)
+                                        .color(pal.muted),
+                                    );
+                                }
+
                                 // First-class Shared Runtime reverse-usage line in drawer (FIX B).
                                 if let Some((opt_rev_id, rev_cnt)) = rev_info {
                                     ui.add_space(SPACE_4);
@@ -5264,6 +5302,10 @@ fn draw_main_app_list(
                                                 LocationQualifier::MachineShared => {
                                                     "ProgramData · shared"
                                                 }
+                                                LocationQualifier::InstallLooseFiles => {
+                                                    "loose files in the install folder"
+                                                }
+                                                LocationQualifier::LooseFiles => "loose files",
                                             };
                                             let mut p_ui = table_cell_ui(
                                                 ui,
@@ -6493,11 +6535,15 @@ fn draw_pinned_bottom_groups(
                             });
                         } else {
                             for (vis_idx, (_, item)) in filtered_unattrib.iter().enumerate() {
-                                draw_unattributed_item_row(
+                                let chip = item
+                                    .is_loose_files
+                                    .then(|| ("loose files", qualifier_chip_style(pal)));
+                                draw_ledger_folder_item_row(
                                     ui,
                                     vis_idx,
                                     &item.path,
                                     item.bytes,
+                                    chip,
                                     pal,
                                     unattrib_exists_cache,
                                     first_unattrib_web_search_rect,
@@ -6712,32 +6758,6 @@ fn draw_simple_item_row(
         );
     }
     row_resp
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_unattributed_item_row(
-    ui: &mut egui::Ui,
-    row_idx: usize,
-    path: &str,
-    bytes: u64,
-    pal: &ThemePalette,
-    exists_cache: &mut HashMap<String, bool>,
-    first_web_search_rect: &mut Option<Rect>,
-    mid_row_rect: &mut Option<Rect>,
-    emit: &mut dyn FnMut(UiAction),
-) {
-    draw_ledger_folder_item_row(
-        ui,
-        row_idx,
-        path,
-        bytes,
-        None,
-        pal,
-        exists_cache,
-        first_web_search_rect,
-        mid_row_rect,
-        emit,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7280,8 +7300,30 @@ fn draw_settings_view(
                 );
             }
 
-            // App Container Rulebook (FIX 6): drive-root container folder names & explicit container paths.
+            // Unified Attribution Zone Rulebook (Part A & B(7)): AppContainer, PersonalFiles, Drive Root Rule, and Manual Pins.
             ui.add_space(SPACE_4);
+            let zone_kind_chip_style = |kind: ZoneRuleKind| -> ChipStyle {
+                match kind {
+                    ZoneRuleKind::AppContainer => ChipStyle {
+                        fill: pal.pill_blue_fill,
+                        stroke: pal.accent_line,
+                        text: pal.proven_text,
+                    },
+                    ZoneRuleKind::PersonalFiles => qualifier_chip_style(pal),
+                }
+            };
+            let pin_kind_chip_style = |kind: PinKind| -> ChipStyle {
+                match kind {
+                    PinKind::App => ChipStyle {
+                        fill: pal.pill_blue_fill,
+                        stroke: pal.accent_line,
+                        text: pal.proven_text,
+                    },
+                    PinKind::Group => qualifier_chip_style(pal),
+                    PinKind::Personal => zone_chip_style(ZoneKind::Green, pal),
+                    PinKind::Ignore => no_touch_chip_style(pal),
+                }
+            };
             let rulebook_frame = draw_crisp_frame(
                 ui,
                 pal.panel,
@@ -7299,21 +7341,13 @@ fn draw_settings_view(
                         Sense::hover(),
                         |ui| {
                             ui.label(
-                                RichText::new("App Container Rulebook")
+                                RichText::new("Attribution Zone Rulebook")
                                     .size(13.5)
                                     .color(pal.text),
                             );
                         },
                         |ui| {
-                            let is_default_names = draft.containers.root_folder_names.len()
-                                == DEFAULT_CONTAINER_NAMES.len()
-                                && draft
-                                    .containers
-                                    .root_folder_names
-                                    .iter()
-                                    .zip(DEFAULT_CONTAINER_NAMES.iter())
-                                    .all(|(a, b)| a.eq_ignore_ascii_case(b));
-                            if !is_default_names
+                            if draft.zones != ZoneRulebook::default()
                                 && draw_z_button(
                                     ui,
                                     "Reset defaults",
@@ -7327,37 +7361,48 @@ fn draw_settings_view(
                                 )
                                 .clicked()
                             {
-                                draft.containers.root_folder_names =
-                                    ContainerRulebook::default().root_folder_names;
+                                draft.zones = ZoneRulebook::default();
                                 changed = true;
                             }
                         },
                     );
                     ui.label(
                         RichText::new(
-                            "Immediate subfolders inside drive-root container folders (e.g. D:\\Games\\<App>, Y:\\Apps\\<App>) or explicit container paths are promoted as individual folder-only apps when no stronger registry or Steam rule owns them.",
+                            "One rulebook governs drive-root folder names and explicit paths: App container (immediate folders become candidate apps), Personal files (grouped into Your files — never app-hunted or Unattributed), Drive Root Rule (top-level drive folders are also tested cleanly), and Manual folder pins overriding inference. Registered install roots keep priority.",
                         )
                         .size(11.5)
                         .color(pal.muted),
                     );
 
                     ui.label(
-                        RichText::new("Drive-root container folder names:")
+                        RichText::new("Drive-root folder zones:")
                             .size(11.5)
                             .color(pal.muted),
                     );
                     let mut remove_name_idx: Option<usize> = None;
                     let max_row_w = (ui.available_width() - SPACE_16).max(200.0);
                     let name_font = FontId::new(11.5, FontFamily::Monospace);
-                    let mut name_rows: Vec<Vec<(usize, String)>> = Vec::new();
-                    let mut cur_row: Vec<(usize, String)> = Vec::new();
+                    let badge_font = FontId::new(10.5, FontFamily::Proportional);
+                    let mut name_rows: Vec<Vec<(usize, String, ZoneRuleKind)>> = Vec::new();
+                    let mut cur_row: Vec<(usize, String, ZoneRuleKind)> = Vec::new();
                     let mut cur_row_w = 0.0_f32;
-                    for (idx, name) in draft.containers.root_folder_names.iter().enumerate() {
+                    for (idx, rz) in draft.zones.root_zones.iter().enumerate() {
                         let text_w = ui
-                            .fonts(|f| f.layout_no_wrap(name.clone(), name_font.clone(), pal.text))
+                            .fonts(|f| f.layout_no_wrap(rz.name.clone(), name_font.clone(), pal.text))
                             .size()
                             .x;
-                        let chip_w = text_w + SPACE_8 * 2.0 + SPACE_4 + 56.0 + 4.0;
+                        let badge_w = ui
+                            .fonts(|f| {
+                                f.layout_no_wrap(
+                                    rz.kind.label().to_string(),
+                                    badge_font.clone(),
+                                    pal.text,
+                                )
+                            })
+                            .size()
+                            .x
+                            + 14.0;
+                        let chip_w = text_w + badge_w + SPACE_8 * 2.0 + SPACE_4 * 2.0 + 56.0 + 4.0;
                         let next_w = if cur_row.is_empty() {
                             chip_w
                         } else {
@@ -7369,7 +7414,7 @@ fn draw_settings_view(
                         } else {
                             cur_row_w = next_w;
                         }
-                        cur_row.push((idx, name.clone()));
+                        cur_row.push((idx, rz.name.clone(), rz.kind));
                     }
                     if !cur_row.is_empty() {
                         name_rows.push(cur_row);
@@ -7378,7 +7423,7 @@ fn draw_settings_view(
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_8;
                             ui.add_space(SPACE_8);
-                            for (idx, name) in row {
+                            for (idx, name, kind) in row {
                                 draw_crisp_frame(
                                     ui,
                                     pal.panel_alt,
@@ -7392,6 +7437,12 @@ fn draw_settings_view(
                                                 RichText::new(&name)
                                                     .font(name_font.clone())
                                                     .color(pal.text),
+                                            );
+                                            paint_chip(
+                                                ui,
+                                                kind.label(),
+                                                zone_kind_chip_style(kind),
+                                                pal.panel_alt,
                                             );
                                             if draw_z_button(
                                                 ui,
@@ -7415,26 +7466,32 @@ fn draw_settings_view(
                         });
                     }
                     if let Some(idx) = remove_name_idx {
-                        if draft.containers.remove_root_name(idx) {
+                        if draft.zones.remove_root_zone(idx) {
                             changed = true;
                         }
                     }
 
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
                         draw_crisp_text_input(
                             ui,
-                            "container_name_input",
+                            "zone_name_input",
                             &mut ui_state.new_container_name_input,
-                            240.0,
-                            "Folder name (e.g. Tools, Emulators)...",
+                            210.0,
+                            "Folder name (e.g. Tools, Media)...",
                             pal.input_bg,
                             pal,
                         );
+                        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                            let selected = ui_state.new_container_name_kind == kind;
+                            if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
+                                ui_state.new_container_name_kind = kind;
+                            }
+                        }
                         if draw_z_button(
                             ui,
-                            "Add name",
-                            Vec2::new(92.0, HEADER_CONTROL_H),
+                            "Add root zone",
+                            Vec2::new(108.0, HEADER_CONTROL_H),
                             12.0,
                             RADIUS_CONTROL,
                             true,
@@ -7445,7 +7502,10 @@ fn draw_settings_view(
                         .clicked()
                         {
                             let candidate = ui_state.new_container_name_input.clone();
-                            if draft.containers.add_root_name(&candidate) {
+                            if draft
+                                .zones
+                                .add_root_zone(&candidate, ui_state.new_container_name_kind)
+                            {
                                 ui_state.new_container_name_input.clear();
                                 changed = true;
                             }
@@ -7453,31 +7513,37 @@ fn draw_settings_view(
                     });
 
                     ui.label(
-                        RichText::new("Explicit container folder paths:")
+                        RichText::new("Explicit folder zones:")
                             .size(11.5)
                             .color(pal.muted),
                     );
-                    if draft.containers.explicit_paths.is_empty() {
+                    if draft.zones.explicit_zones.is_empty() {
                         ui.horizontal(|ui| {
                             ui.add_space(SPACE_8);
                             ui.label(
-                                RichText::new("No custom explicit paths configured.")
+                                RichText::new("No explicit folder zones configured (e.g. D:\\Media -> Personal files).")
                                     .size(11.0)
                                     .color(pal.subtle_text),
                             );
                         });
                     } else {
                         let mut remove_path_idx: Option<usize> = None;
-                        for (idx, ep) in draft.containers.explicit_paths.iter().enumerate() {
+                        for (idx, ez) in draft.zones.explicit_zones.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = SPACE_8;
                                 ui.add_space(SPACE_8);
                                 draw_truncated_text(
                                     ui,
-                                    ep,
+                                    &ez.path,
                                     FontId::new(11.5, FontFamily::Monospace),
                                     pal.text,
                                     false,
+                                );
+                                paint_chip(
+                                    ui,
+                                    ez.kind.label(),
+                                    zone_kind_chip_style(ez.kind),
+                                    pal.panel,
                                 );
                                 if draw_z_button(
                                     ui,
@@ -7497,27 +7563,33 @@ fn draw_settings_view(
                             });
                         }
                         if let Some(idx) = remove_path_idx {
-                            if draft.containers.remove_explicit_path(idx) {
+                            if draft.zones.remove_explicit_zone(idx) {
                                 changed = true;
                             }
                         }
                     }
 
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
                         draw_crisp_text_input(
                             ui,
-                            "container_path_input",
+                            "zone_path_input",
                             &mut ui_state.new_container_path_input,
-                            280.0,
-                            r"D:\Work\PortableTools",
+                            236.0,
+                            r"D:\Media or D:\Work\PortableTools",
                             pal.input_bg,
                             pal,
                         );
+                        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                            let selected = ui_state.new_container_path_kind == kind;
+                            if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
+                                ui_state.new_container_path_kind = kind;
+                            }
+                        }
                         if draw_z_button(
                             ui,
-                            "Add path",
-                            Vec2::new(92.0, HEADER_CONTROL_H),
+                            "Add path zone",
+                            Vec2::new(108.0, HEADER_CONTROL_H),
                             12.0,
                             RADIUS_CONTROL,
                             true,
@@ -7528,8 +7600,111 @@ fn draw_settings_view(
                         .clicked()
                         {
                             let candidate = ui_state.new_container_path_input.clone();
-                            if draft.containers.add_explicit_path(&candidate) {
+                            if draft
+                                .zones
+                                .add_explicit_zone(&candidate, ui_state.new_container_path_kind)
+                            {
                                 ui_state.new_container_path_input.clear();
+                                changed = true;
+                            }
+                        }
+                    });
+
+                    ui.label(
+                        RichText::new("Manual folder pins (override inference):")
+                            .size(11.5)
+                            .color(pal.muted),
+                    );
+                    if draft.zones.pins.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(SPACE_8);
+                            ui.label(
+                                RichText::new("No manual pins configured (App / Group / Personal / Ignore).")
+                                    .size(11.0)
+                                    .color(pal.subtle_text),
+                            );
+                        });
+                    } else {
+                        let mut remove_pin_idx: Option<usize> = None;
+                        for (idx, pin) in draft.zones.pins.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add_space(SPACE_8);
+                                draw_truncated_text(
+                                    ui,
+                                    &pin.path,
+                                    FontId::new(11.5, FontFamily::Monospace),
+                                    pal.text,
+                                    false,
+                                );
+                                paint_chip(
+                                    ui,
+                                    pin.kind.label(),
+                                    pin_kind_chip_style(pin.kind),
+                                    pal.panel,
+                                );
+                                if draw_z_button(
+                                    ui,
+                                    "Remove",
+                                    Vec2::new(60.0, 22.0),
+                                    11.0,
+                                    RADIUS_CONTROL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                )
+                                .clicked()
+                                {
+                                    remove_pin_idx = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_pin_idx {
+                            if draft.zones.remove_pin(idx) {
+                                changed = true;
+                            }
+                        }
+                    }
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                        draw_crisp_text_input(
+                            ui,
+                            "zone_pin_input",
+                            &mut ui_state.new_pin_path_input,
+                            236.0,
+                            r"D:\Apps\CustomSuite or D:\Games\Orphan",
+                            pal.input_bg,
+                            pal,
+                        );
+                        for pk in [
+                            PinKind::App,
+                            PinKind::Group,
+                            PinKind::Personal,
+                            PinKind::Ignore,
+                        ] {
+                            let selected = ui_state.new_pin_kind == pk;
+                            if draw_filter_radio_chip(ui, pk.short_label(), selected, pal) {
+                                ui_state.new_pin_kind = pk;
+                            }
+                        }
+                        if draw_z_button(
+                            ui,
+                            "Pin folder",
+                            Vec2::new(92.0, HEADER_CONTROL_H),
+                            12.0,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            ButtonVariant::SecondaryOutline,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            let candidate = ui_state.new_pin_path_input.clone();
+                            if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
+                                ui_state.new_pin_path_input.clear();
                                 changed = true;
                             }
                         }
@@ -7582,6 +7757,7 @@ fn draw_settings_view(
 
 #[cfg(test)]
 mod tests {
+    use y_core::config::ContainerRulebook;
     use super::*;
     use egui::{Pos2, RawInput, Rect, Vec2};
     use y_core::model::{
@@ -7647,6 +7823,7 @@ mod tests {
                         drive_letter: 'C',
                     },
                 ],
+                carved_out_apps: vec![],
                 dependencies: vec![DependencyRecord {
                     target_id: "ea-app".into(),
                     target_name: "EA App".into(),
@@ -7694,6 +7871,7 @@ mod tests {
                 bytes: 5_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             }],
             unattributed_total_bytes: 5_000,
             reverse_dependencies: vec![ReverseDependencyEntry {
@@ -7715,6 +7893,7 @@ mod tests {
             }],
             installed_registry_names: vec![],
             applied_containers: None,
+            applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -7867,6 +8046,7 @@ mod tests {
                     no_touch: None,
                     drive_letter: 'C',
                 }],
+                carved_out_apps: vec![],
                 dependencies: deps,
                 display_icon: None,
                 icon_rgba: None,
@@ -7921,6 +8101,7 @@ mod tests {
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
             applied_containers: None,
+            applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -8026,18 +8207,21 @@ mod tests {
                     bytes: 6_000,
                     drive_letter: 'C',
                     zone_hint: None,
+                    is_loose_files: false,
                 },
                 UnattributedItem {
                     path: missing_dir.into(),
                     bytes: 4_000,
                     drive_letter: 'C',
                     zone_hint: None,
+                    is_loose_files: false,
                 },
             ],
             unattributed_total_bytes: 10_000,
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
             applied_containers: None,
+            applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -8178,7 +8362,8 @@ mod tests {
                     no_touch: None,
                     drive_letter: 'C',
                 }],
-                dependencies: vec![],
+                carved_out_apps: vec!["Child App".into()],
+            dependencies: vec![],
                 display_icon: None,
                 icon_rgba: None,
                 category: y_core::model::AppCategory::default(),
@@ -8206,6 +8391,7 @@ mod tests {
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
             applied_containers: None,
+            applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -8351,9 +8537,13 @@ mod tests {
             }
         }
         let containers = ContainerRulebook::default();
+        let mut zones = ZoneRulebook::default();
+        let _ = zones.add_explicit_zone(r"D:\Media", ZoneRuleKind::PersonalFiles);
+        let _ = zones.set_pin(r"D:\Games\Orphan", PinKind::Ignore);
         let mut cfg = AppConfig::default();
         cfg.targets = targets;
         cfg.containers = containers.clone();
+        cfg.zones = zones.clone();
         let report = ScanReport {
             scan_timestamp_unix: 4_000,
             scan_timestamp_display: "2026-11-27 18:10:00".into(),
@@ -8387,7 +8577,8 @@ mod tests {
                     no_touch: None,
                     drive_letter: 'C',
                 }],
-                dependencies: vec![],
+                carved_out_apps: vec!["Child App".into()],
+            dependencies: vec![],
                 display_icon: None,
                 icon_rgba: None,
                 category: y_core::model::AppCategory::Utilities,
@@ -8404,6 +8595,7 @@ mod tests {
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
             applied_containers: Some(containers),
+            applied_zones: Some(zones),
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -8479,7 +8671,7 @@ mod tests {
         assert!(!report.is_scope_stale(&cfg));
 
         let mut modified_cfg = cfg.clone();
-        assert!(modified_cfg.containers.add_root_name("CustomTools"));
+        assert!(modified_cfg.zones.add_root_zone("CustomTools", ZoneRuleKind::AppContainer));
         assert!(report.is_scope_stale(&modified_cfg));
 
         state.active_view = ActiveView::Settings;
@@ -8583,6 +8775,7 @@ mod tests {
                     drive_letter: 'C',
                 },
             ],
+            carved_out_apps: vec!["Child App".into()],
             dependencies: vec![],
             display_icon: None,
             icon_rgba: None,

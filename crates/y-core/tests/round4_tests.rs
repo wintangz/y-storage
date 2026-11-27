@@ -4,7 +4,7 @@ use std::io::Cursor;
 use y_core::attribution::{
     AttributionOptions, RootExeCandidate, attribute_scan_with_options, merge_drive_rescan,
 };
-use y_core::config::{AppConfig, ContainerRulebook, DEFAULT_CONTAINER_NAMES};
+use y_core::config::{AppConfig, ContainerRulebook, DEFAULT_CONTAINER_NAMES, ZoneRuleKind};
 use y_core::dependencies::{parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf};
 use y_core::history::{ScanHistory, ScanScopeKind, recompute_report_growth_from_history};
 use y_core::model::{
@@ -202,6 +202,7 @@ fn container_rule_claims_unowned_children_and_registry_beats_container_without_d
             containers: Some(&containers),
             steam_library_roots: &[],
             root_exe_candidates: None,
+            ..AttributionOptions::default()
         },
     );
 
@@ -310,6 +311,7 @@ fn steam_vdf_and_appmanifest_discover_unregistered_steam_game() {
             containers: Some(&ContainerRulebook::default()),
             steam_library_roots: &libs,
             root_exe_candidates: None,
+            ..AttributionOptions::default()
         },
     );
     let sw = report.apps.iter().find(|a| a.display_name == "Spacewar").unwrap();
@@ -381,6 +383,7 @@ fn executable_inference_pe_product_name_and_os_folder_exclusion_behave_conservat
             containers: Some(&ContainerRulebook::default()),
             steam_library_roots: &[],
             root_exe_candidates: Some(&cands),
+            ..AttributionOptions::default()
         },
     );
 
@@ -556,7 +559,8 @@ fn per_drive_rescan_merges_cleanly_and_computes_deltas_only_against_same_drive_h
     // Scope staleness check
     let mut cfg = AppConfig::default();
     assert!(!r1_c.is_scope_stale(&cfg));
-    cfg.containers.add_root_name("PortableTools");
+    cfg.zones
+        .add_root_zone("PortableTools", ZoneRuleKind::AppContainer);
     assert!(merged_2.is_scope_stale(&cfg));
 }
 

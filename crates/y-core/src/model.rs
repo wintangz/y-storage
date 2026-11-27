@@ -46,6 +46,8 @@ impl ZoneKind {
 pub enum LocationQualifier {
     RoamingConfig,
     MachineShared,
+    InstallLooseFiles,
+    LooseFiles,
 }
 
 impl LocationQualifier {
@@ -54,6 +56,8 @@ impl LocationQualifier {
         match self {
             Self::RoamingConfig => "Roaming · Config",
             Self::MachineShared => "ProgramData · Machine-shared",
+            Self::InstallLooseFiles => "loose files in the install folder",
+            Self::LooseFiles => "loose files",
         }
     }
 }
@@ -64,11 +68,14 @@ pub enum AttributionBasis {
     ExactName,
     Token,
     Publisher,
+    PublisherProduct,
     PackageFallback,
     StandaloneFolder,
     SteamManifest,
+    LauncherManifest,
     ContainerRule,
     ExecutableScan,
+    ManualPin,
 }
 
 impl AttributionBasis {
@@ -79,11 +86,14 @@ impl AttributionBasis {
             Self::ExactName => "exact name match",
             Self::Token => "token match",
             Self::Publisher => "publisher match",
+            Self::PublisherProduct => "publisher+folder match",
             Self::PackageFallback => "package name",
             Self::StandaloneFolder => "standalone folder",
             Self::SteamManifest => "Steam manifest",
+            Self::LauncherManifest => "launcher manifest",
             Self::ContainerRule => "layout rule",
             Self::ExecutableScan => "executable scan (inferred)",
+            Self::ManualPin => "manual pin",
         }
     }
 }
@@ -390,6 +400,20 @@ pub enum ScannedUnitKind {
     PersonalShell,
     RootSystemFile,
     RegistryUserHive,
+    ContainerLooseFiles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAppEntry {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    pub install_dir: String,
+    pub container_dir: String,
+    pub basis: AttributionBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,6 +469,8 @@ pub struct AttributedApp {
     pub no_touch: Option<NoTouchCategory>,
     pub bases: Vec<AttributionBasis>,
     pub items: Vec<BreakdownItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carved_out_apps: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<DependencyRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -511,6 +537,8 @@ pub struct UnattributedItem {
     pub bytes: u64,
     pub drive_letter: char,
     pub zone_hint: Option<ZoneKind>,
+    #[serde(default)]
+    pub is_loose_files: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,10 +569,12 @@ pub struct ScanReport {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_containers: Option<crate::config::ContainerRulebook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_zones: Option<crate::config::ZoneRulebook>,
 }
 
 impl ScanReport {
-    /// Returns `true` when drive scope, drive exclusions, or container rules in `config`
+    /// Returns `true` when drive scope, drive exclusions, or zone rules in `config`
     /// differ from the configuration that produced this report.
     #[must_use]
     pub fn is_scope_stale(&self, config: &crate::config::AppConfig) -> bool {
@@ -573,7 +603,11 @@ impl ScanReport {
                 return true;
             }
         }
-        if let Some(ref applied) = self.applied_containers {
+        if let Some(ref applied_zones) = self.applied_zones {
+            if applied_zones != &config.zones {
+                return true;
+            }
+        } else if let Some(ref applied) = self.applied_containers {
             if applied != &config.containers {
                 return true;
             }

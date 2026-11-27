@@ -164,7 +164,7 @@ pub fn is_plausible_main_exe_name(file_name: &str) -> bool {
     let Some(stem) = lower.strip_suffix(".exe") else {
         return false;
     };
-    if stem.is_empty() || stem.starts_with('.') {
+    if stem.is_empty() || stem.starts_with('.') || stem.starts_with('_') {
         return false;
     }
     if stem.starts_with("unins")
@@ -183,6 +183,7 @@ pub fn is_plausible_main_exe_name(file_name: &str) -> bool {
         || stem == "update"
         || stem.starts_with("updater")
         || stem.starts_with("autoupdate")
+        || stem.contains("create shortcut")
         || stem.contains("__selfdelete__")
         || stem.contains("__relocated__")
     {

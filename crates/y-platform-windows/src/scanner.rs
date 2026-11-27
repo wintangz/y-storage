@@ -20,16 +20,23 @@ use y_core::attribution::{
     AttributionOptions, RootExeCandidate, attribute_scan_with_options,
     classify_drive_root_os_folder, merge_drive_rescan,
 };
-use y_core::config::AppConfig;
-use y_core::dependencies::{parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf};
+use y_core::config::{AppConfig, DEFAULT_PERSONAL_NAMES, PinKind, ZoneRuleKind, ZoneRulebook};
+use y_core::dependencies::{
+    parse_epic_manifest_item, parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf,
+};
 use y_core::discovery::{
     build_registry_catalog, is_subpath_of, normalize_app_token, normalize_path_key,
     normalize_windows_path, path_drive_letter,
 };
 use y_core::history::{HistoryEntryRef, ScanHistory, recompute_report_growth_from_history};
-use y_core::model::{DriveInfo, FolderNode, InstalledApp, ScanReport, ScannedUnit};
+use y_core::model::{
+    AttributionBasis, DriveInfo, FolderNode, InstalledApp, ManifestAppEntry, ScanReport,
+    ScannedUnit,
+};
 use y_core::pe::{is_plausible_main_exe_name, parse_pe_version_product_name};
-use y_core::tree::{decompose_scanned_tree_with_containers, is_root_system_file_name};
+use y_core::tree::{
+    DecompositionOptions, decompose_scanned_tree_with_options, is_root_system_file_name,
+};
 
 use crate::paths::{
     current_local_timestamp, enumerate_fixed_drives, get_windows_directory,
@@ -271,7 +278,15 @@ struct SubtreeTask {
     is_drive_root: bool,
 }
 
-fn should_retain_children(path_lower: &str, depth: usize, shell_keys: &HashSet<String>) -> bool {
+fn should_retain_children(
+    path_lower: &str,
+    depth: usize,
+    shell_keys: &HashSet<String>,
+    retain_ancestors: &HashSet<String>,
+) -> bool {
+    if retain_ancestors.contains(path_lower) {
+        return true;
+    }
     if shell_keys.contains(path_lower) {
         return false;
     }
@@ -283,11 +298,12 @@ fn scan_node_recursive(
     exclusions: &[String],
     sys_win_key: &str,
     shell_keys: &HashSet<String>,
+    retain_ancestors: &HashSet<String>,
     progress: &ProgressCounters,
     root_system_files_out: Option<&Mutex<Vec<(String, u64)>>>,
 ) -> FolderNode {
     let path_lower = normalize_path_key(&task.path);
-    if !should_retain_children(&path_lower, task.depth, shell_keys) {
+    if !should_retain_children(&path_lower, task.depth, shell_keys, retain_ancestors) {
         if progress.dirs_walked.load(Ordering::Relaxed) % 256 == 0 {
             if let Ok(mut cp) = progress.current_path.try_lock() {
                 *cp = task.path.clone();
@@ -377,6 +393,7 @@ fn scan_node_recursive(
             exclusions,
             sys_win_key,
             shell_keys,
+            retain_ancestors,
             progress,
             None,
         ));
@@ -420,6 +437,7 @@ fn parallel_scan_drive_root(
     exclusions: &[String],
     sys_win_key: &str,
     shell_keys: &HashSet<String>,
+    retain_ancestors: &HashSet<String>,
     progress: &ProgressCounters,
 ) -> (FolderNode, Vec<(String, u64)>) {
     // First enumerate depth 0..=2 on coordinator so we get ~100-300 independent work items
@@ -429,6 +447,7 @@ fn parallel_scan_drive_root(
         exclusions,
         sys_win_key,
         shell_keys,
+        retain_ancestors,
         progress,
     );
     root_node_shell
@@ -439,6 +458,7 @@ fn scan_drive_parallel_tier(
     exclusions: &[String],
     sys_win_key: &str,
     shell_keys: &HashSet<String>,
+    retain_ancestors: &HashSet<String>,
     progress: &ProgressCounters,
 ) -> (FolderNode, Vec<(String, u64)>) {
     let root_sys = Mutex::new(Vec::<(String, u64)>::new());
@@ -473,10 +493,12 @@ fn scan_drive_parallel_tier(
                 let attrs = fd.dwFileAttributes;
                 if (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
                     if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+                        let pk = normalize_path_key(&full);
                         let leaf_lower = name.to_ascii_lowercase();
                         if !is_excluded_path(&full, exclusions, sys_win_key, &leaf_lower) {
                             top_dirs.push((full, name));
                         }
+                        let _ = pk;
                     }
                 } else {
                     let sz = file_size_from_find_data(&full, &fd);
@@ -526,7 +548,7 @@ fn scan_drive_parallel_tier(
                 || pk.ends_with("\\program files")
                 || pk.ends_with("\\program files (x86)")
                 || pk.ends_with("\\programdata");
-            if is_major && !shell_keys.contains(&pk) {
+            if is_major && (!shell_keys.contains(&pk) || retain_ancestors.contains(&pk)) {
                 let slot_idx = expanded_slots.len();
                 let mut direct_b = 0u64;
                 let mut sub_items = Vec::new();
@@ -635,6 +657,7 @@ fn scan_drive_parallel_tier(
                         exclusions,
                         sys_win_key,
                         shell_keys,
+                        retain_ancestors,
                         &progress,
                         None,
                     );
@@ -695,7 +718,7 @@ fn discover_steam_libraries_and_apps(
     enabled_letters: &HashSet<char>,
     steam_path: Option<&str>,
     apps: &mut Vec<InstalledApp>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<ManifestAppEntry>) {
     let mut steamapps_dirs: BTreeSet<String> = BTreeSet::new();
     let mut seed_steamapps: Vec<String> = Vec::new();
 
@@ -753,6 +776,7 @@ fn discover_steam_libraries_and_apps(
     }
 
     let mut steam_lib_roots: Vec<String> = Vec::new();
+    let mut steam_manifest_entries: Vec<ManifestAppEntry> = Vec::new();
     let mut seen_libs: HashSet<String> = HashSet::new();
     for sa in &steamapps_dirs {
         let lib_root = sa
@@ -819,6 +843,16 @@ fn discover_steam_libraries_and_apps(
             }
             let gk = normalize_path_key(&game_dir);
             let man_tok = normalize_app_token(&man.name);
+            let container_dir = format!("{}\\common", sa.trim_end_matches('\\'));
+            steam_manifest_entries.push(ManifestAppEntry {
+                id: format!("steam:app:{}", man.appid),
+                display_name: man.name.clone(),
+                publisher: None,
+                install_dir: game_dir.clone(),
+                container_dir,
+                basis: AttributionBasis::SteamManifest,
+                display_icon: None,
+            });
 
             let matched_pos = apps.iter().position(|a| {
                 a.all_install_locations
@@ -858,93 +892,317 @@ fn discover_steam_libraries_and_apps(
         }
     }
 
-    steam_lib_roots
+    (steam_lib_roots, steam_manifest_entries)
 }
 
-fn probe_drive_root_executables(
+fn discover_epic_manifest_apps(
+    enabled_letters: &HashSet<char>,
+    manifest_entries: &mut Vec<ManifestAppEntry>,
+) {
+    let prog_data = std::env::var_os("ProgramData")
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| r"C:\ProgramData".to_string());
+    let manifests_dir = Path::new(&prog_data)
+        .join("Epic")
+        .join("EpicGamesLauncher")
+        .join("Data")
+        .join("Manifests");
+    let Ok(rd) = std::fs::read_dir(&manifests_dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.ends_with(".item") {
+            continue;
+        }
+        let Ok(txt) = std::fs::read_to_string(ent.path()) else {
+            continue;
+        };
+        let Some(epic) = parse_epic_manifest_item(&txt) else {
+            continue;
+        };
+        let Some(dl) = path_drive_letter(&epic.install_location) else {
+            continue;
+        };
+        if !enabled_letters.contains(&dl.to_ascii_uppercase()) {
+            continue;
+        }
+        if !Path::new(&epic.install_location).is_dir() {
+            continue;
+        }
+        let container_dir = Path::new(&epic.install_location)
+            .parent()
+            .map(|p| normalize_windows_path(&p.to_string_lossy()))
+            .unwrap_or_default();
+        let display_icon = if epic.launch_executable.is_empty() {
+            None
+        } else {
+            let joined = Path::new(&epic.install_location)
+                .join(epic.launch_executable.replace('/', "\\"));
+            Some(normalize_windows_path(&joined.to_string_lossy()))
+        };
+        manifest_entries.push(ManifestAppEntry {
+            id: format!("epic:{}", epic.app_name),
+            display_name: epic.display_name,
+            publisher: None,
+            install_dir: epic.install_location,
+            container_dir,
+            basis: AttributionBasis::LauncherManifest,
+            display_icon,
+        });
+    }
+}
+
+fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCandidate> {
+    let rd = std::fs::read_dir(dir_path).ok()?;
+    let folder_tok = normalize_app_token(folder_name);
+    let mut best: Option<(i32, u64, String, Option<String>)> = None;
+    for ent in rd.flatten() {
+        let Ok(ft) = ent.file_type() else {
+            continue;
+        };
+        if !ft.is_file() {
+            continue;
+        }
+        let fname = ent.file_name().to_string_lossy().to_string();
+        if !is_plausible_main_exe_name(&fname) {
+            continue;
+        }
+        let p = ent.path();
+        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        if size < 16_384 {
+            continue;
+        }
+        let Ok(mut f) = File::open(&p) else {
+            continue;
+        };
+        let mut mz = [0u8; 2];
+        if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
+            continue;
+        }
+        let product_name = parse_pe_version_product_name(&mut f);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let stem_tok = normalize_app_token(stem);
+        let mut score = 0i32;
+        if !folder_tok.is_empty() && stem_tok == folder_tok {
+            score += 100;
+        }
+        if product_name.is_some() {
+            score += 30;
+        }
+        if size >= 200_000 {
+            score += 10;
+        }
+        let exe_str = normalize_windows_path(&p.to_string_lossy());
+        if best
+            .as_ref()
+            .is_none_or(|(bs, bsz, _, _)| (score, size) > (*bs, *bsz))
+        {
+            best = Some((score, size, exe_str, product_name));
+        }
+    }
+    best.map(|(_, _, exe_path, product_name)| RootExeCandidate {
+        exe_path,
+        product_name,
+    })
+}
+
+fn probe_candidate_executables(
     walked_roots: &[FolderNode],
     config: &AppConfig,
     catalog_apps: &[InstalledApp],
+    manifest_entries: &[ManifestAppEntry],
     steam_lib_roots: &[String],
+    shell_folders: &[String],
 ) -> HashMap<String, RootExeCandidate> {
     let mut out = HashMap::new();
     let known_loc_keys: HashSet<String> = catalog_apps
         .iter()
         .flat_map(|a| a.all_install_locations.iter())
+        .chain(manifest_entries.iter().map(|m| &m.install_dir))
         .chain(steam_lib_roots.iter())
         .map(|p| normalize_path_key(p))
         .collect();
+    let mut probed: HashSet<String> = HashSet::new();
+
+    let mut try_probe = |path: &str, name: &str| {
+        let pk = normalize_path_key(path);
+        if pk.len() <= 3
+            || !probed.insert(pk.clone())
+            || known_loc_keys.contains(&pk)
+            || config.zones.matches_personal_dir(path, shell_folders)
+            || config.zones.matches_app_container_dir(path).is_some()
+        {
+            return;
+        }
+        if let Some(cand) = probe_dir_for_main_exe(path, name) {
+            out.insert(pk, cand);
+        }
+    };
 
     for root in walked_roots {
         for child in &root.children {
             let pk = normalize_path_key(&child.path);
             let leaf_lower = child.name.to_ascii_lowercase();
             if classify_drive_root_os_folder(&pk, &leaf_lower).is_some()
-                || config.containers.matches_container_dir(&child.path).is_some()
-                || known_loc_keys.contains(&pk)
+                || config.zones.matches_personal_dir(&child.path, shell_folders)
             {
                 continue;
             }
-            let Ok(rd) = std::fs::read_dir(&child.path) else {
-                continue;
-            };
-            let folder_tok = normalize_app_token(&child.name);
-            let mut best: Option<(i32, u64, String, Option<String>)> = None;
-            for ent in rd.flatten() {
-                let Ok(ft) = ent.file_type() else {
-                    continue;
-                };
-                if !ft.is_file() {
-                    continue;
+            if config.zones.matches_app_container_dir(&child.path).is_some() {
+                for gc in &child.children {
+                    let gpk = normalize_path_key(&gc.path);
+                    let g_lower = gc.name.to_ascii_lowercase();
+                    if y_core::tree::is_program_files_inbox_folder(&gpk, &g_lower)
+                        || known_loc_keys.contains(&gpk)
+                    {
+                        continue;
+                    }
+                    try_probe(&gc.path, &gc.name);
+                    for ggc in &gc.children {
+                        try_probe(&ggc.path, &ggc.name);
+                    }
                 }
-                let fname = ent.file_name().to_string_lossy().to_string();
-                if !is_plausible_main_exe_name(&fname) {
-                    continue;
+            } else if !known_loc_keys.contains(&pk) {
+                try_probe(&child.path, &child.name);
+                for gc in &child.children {
+                    try_probe(&gc.path, &gc.name);
                 }
-                let p = ent.path();
-                let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
-                if size < 16_384 {
-                    continue;
-                }
-                let Ok(mut f) = File::open(&p) else {
-                    continue;
-                };
-                let mut mz = [0u8; 2];
-                if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
-                    continue;
-                }
-                let product_name = parse_pe_version_product_name(&mut f);
-                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                let stem_tok = normalize_app_token(stem);
-                let mut score = 0i32;
-                if !folder_tok.is_empty() && stem_tok == folder_tok {
-                    score += 100;
-                }
-                if product_name.is_some() {
-                    score += 30;
-                }
-                if size >= 200_000 {
-                    score += 10;
-                }
-                let exe_str = normalize_windows_path(&p.to_string_lossy());
-                if best
-                    .as_ref()
-                    .is_none_or(|(bs, bsz, _, _)| (score, size) > (*bs, *bsz))
-                {
-                    best = Some((score, size, exe_str, product_name));
-                }
-            }
-            if let Some((_, _, exe_path, product_name)) = best {
-                out.insert(
-                    pk,
-                    RootExeCandidate {
-                        exe_path,
-                        product_name,
-                    },
-                );
             }
         }
     }
+
+    for pin in &config.zones.pins {
+        let Some(dl) = path_drive_letter(&pin.path) else {
+            continue;
+        };
+        if !config.is_drive_enabled(dl) {
+            continue;
+        }
+        let leaf = Path::new(&pin.path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        match pin.kind {
+            PinKind::App => {
+                let pk = normalize_path_key(&pin.path);
+                if let Some(cand) = probe_dir_for_main_exe(&pin.path, leaf) {
+                    out.insert(pk, cand);
+                }
+            }
+            PinKind::Group => {
+                if let Ok(rd) = std::fs::read_dir(&pin.path) {
+                    for ent in rd.flatten() {
+                        if ent.file_type().is_ok_and(|ft| ft.is_dir()) {
+                            let child_p = normalize_windows_path(&ent.path().to_string_lossy());
+                            let child_n = ent.file_name().to_string_lossy().to_string();
+                            let cpk = normalize_path_key(&child_p);
+                            if let Some(cand) = probe_dir_for_main_exe(&child_p, &child_n) {
+                                out.insert(cpk, cand);
+                            }
+                        }
+                    }
+                }
+            }
+            PinKind::Personal | PinKind::Ignore => {}
+        }
+    }
+
+    out
+}
+
+fn collect_retain_ancestors(
+    catalog_apps: &[InstalledApp],
+    manifest_entries: &[ManifestAppEntry],
+    zones: &ZoneRulebook,
+) -> HashSet<String> {
+    let mut ancestors = HashSet::new();
+    let add_ancestors_of = |raw: &str, out: &mut HashSet<String>| {
+        let pk = normalize_path_key(raw);
+        let mut cur = pk.as_str();
+        while let Some((parent, _)) = cur.trim_end_matches('\\').rsplit_once('\\') {
+            if parent.len() <= 2 && parent.ends_with(':') {
+                break;
+            }
+            out.insert(parent.to_string());
+            cur = parent;
+        }
+    };
+    for app in catalog_apps {
+        for loc in &app.all_install_locations {
+            add_ancestors_of(loc, &mut ancestors);
+        }
+    }
+    for m in manifest_entries {
+        add_ancestors_of(&m.install_dir, &mut ancestors);
+        add_ancestors_of(&m.container_dir, &mut ancestors);
+    }
+    for ez in &zones.explicit_zones {
+        add_ancestors_of(&ez.path, &mut ancestors);
+    }
+    for pin in &zones.pins {
+        add_ancestors_of(&pin.path, &mut ancestors);
+    }
+    ancestors
+}
+
+fn resolve_effective_shell_folders(drives: &[DriveInfo], zones: &ZoneRulebook) -> Vec<String> {
+    let os_shells = resolve_personal_shell_folders(drives);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in os_shells {
+        let leaf = Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let is_default_personal = DEFAULT_PERSONAL_NAMES
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(leaf));
+        let allowed = if is_default_personal {
+            zones.root_zones.iter().any(|r| {
+                r.kind == ZoneRuleKind::PersonalFiles && r.name.trim().eq_ignore_ascii_case(leaf)
+            })
+        } else {
+            true
+        };
+        if allowed && zones.pin_for_path(&path).is_none_or(|p| p == PinKind::Personal) {
+            let pk = normalize_path_key(&path);
+            if seen.insert(pk) {
+                out.push(path);
+            }
+        }
+    }
+
+    for drv in drives.iter().filter(|d| d.full_walk_enabled) {
+        for rz in zones
+            .root_zones
+            .iter()
+            .filter(|r| r.kind == ZoneRuleKind::PersonalFiles)
+        {
+            let cand = format!("{}{}", drv.root, rz.name.trim());
+            if Path::new(&cand).is_dir() {
+                let pk = normalize_path_key(&cand);
+                if seen.insert(pk) {
+                    out.push(cand);
+                }
+            }
+        }
+    }
+
+    for ez in zones
+        .explicit_zones
+        .iter()
+        .filter(|e| e.kind == ZoneRuleKind::PersonalFiles)
+    {
+        if Path::new(&ez.path).is_dir() {
+            let pk = normalize_path_key(&ez.path);
+            if seen.insert(pk) {
+                out.push(ez.path.clone());
+            }
+        }
+    }
+
     out
 }
 
@@ -965,6 +1223,7 @@ pub fn scan_directory_tree_for_test(
         exclusions,
         &sys_win_key,
         &HashSet::new(),
+        &HashSet::new(),
         &progress,
         None,
     )
@@ -981,6 +1240,7 @@ pub fn execute_scoped_fixture_scan_for_test(
     let sys_win_key = normalize_path_key(sys_win_dir);
     let progress = ProgressCounters::new(Arc::new(AtomicBool::new(false)));
     let shell_keys: HashSet<String> = HashSet::new();
+    let retain_ancestors = collect_retain_ancestors(&installed_apps, &[], &config.zones);
 
     let mut walked_letters = Vec::new();
     let mut all_units = Vec::new();
@@ -1012,6 +1272,7 @@ pub fn execute_scoped_fixture_scan_for_test(
                 &drv.exclusions,
                 &sys_win_key,
                 &shell_keys,
+                &retain_ancestors,
                 &progress,
             );
             fn rewrite_tree(node: &mut FolderNode, src_root: &str, dl: char) {
@@ -1033,12 +1294,16 @@ pub fn execute_scoped_fixture_scan_for_test(
             for (rp, _) in &mut root_sys {
                 *rp = replace_root_prefix(rp, &root_dir, dl);
             }
-            let units = decompose_scanned_tree_with_containers(
+            let units = decompose_scanned_tree_with_options(
                 &tree,
                 &installed_apps,
                 &[],
                 &root_sys,
-                &config.containers,
+                &DecompositionOptions {
+                    zones: Some(&config.zones),
+                    manifest_entries: &[],
+                    exe_candidates: None,
+                },
             );
             all_units.extend(units);
         }
@@ -1070,6 +1335,8 @@ pub fn execute_scoped_fixture_scan_for_test(
         None,
         &AttributionOptions {
             containers: Some(&config.containers),
+            zones: Some(&config.zones),
+            manifest_entries: &[],
             steam_library_roots: &[],
             root_exe_candidates: None,
         },
@@ -1142,11 +1409,22 @@ fn execute_scan_internal(
     let raw_reg = enumerate_uninstall_registry();
     let steam_path = read_steam_install_path();
     let mut catalog = build_registry_catalog(&raw_reg, steam_path.as_deref());
-    let shell_folders = resolve_personal_shell_folders(&drives);
+    let shell_folders = resolve_effective_shell_folders(&drives, &config.zones);
     let shell_keys: HashSet<String> = shell_folders
         .iter()
         .map(|p| normalize_path_key(p))
         .collect();
+    let enabled_letters_pre: HashSet<char> = drives
+        .iter()
+        .filter(|drv| {
+            let dl = drv.letter.to_ascii_uppercase();
+            config.is_drive_enabled(dl) && only_drive.is_none_or(|only| only.to_ascii_uppercase() == dl)
+        })
+        .map(|drv| drv.letter.to_ascii_uppercase())
+        .collect();
+    let mut manifest_entries: Vec<ManifestAppEntry> = Vec::new();
+    discover_epic_manifest_apps(&enabled_letters_pre, &mut manifest_entries);
+    let retain_ancestors = collect_retain_ancestors(&catalog.apps, &manifest_entries, &config.zones);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = ProgressCounters::new(cancel);
@@ -1189,6 +1467,7 @@ fn execute_scan_internal(
                     &drv.exclusions,
                     &sys_win_key,
                     &shell_keys,
+                    &retain_ancestors,
                     &progress,
                 );
                 walked_trees.push((root_tree, root_sys));
@@ -1198,27 +1477,35 @@ fn execute_scan_internal(
     });
 
     let walked_roots: Vec<FolderNode> = walked_trees.iter().map(|(n, _)| n.clone()).collect();
-    let steam_lib_roots = discover_steam_libraries_and_apps(
+    let (steam_lib_roots, steam_manifests) = discover_steam_libraries_and_apps(
         &walked_roots,
         &enabled_letters,
         steam_path.as_deref(),
         &mut catalog.apps,
     );
-    let root_exe_candidates = probe_drive_root_executables(
+    manifest_entries.extend(steam_manifests);
+    let root_exe_candidates = probe_candidate_executables(
         &walked_roots,
         config,
         &catalog.apps,
+        &manifest_entries,
         &steam_lib_roots,
+        &shell_folders,
     );
 
     let mut all_units: Vec<ScannedUnit> = Vec::new();
+    let decomp_opts = DecompositionOptions {
+        zones: Some(&config.zones),
+        manifest_entries: &manifest_entries,
+        exe_candidates: Some(&root_exe_candidates),
+    };
     for (root_tree, root_sys) in &walked_trees {
-        let units = decompose_scanned_tree_with_containers(
+        let units = decompose_scanned_tree_with_options(
             root_tree,
             &catalog.apps,
             &shell_folders,
             root_sys,
-            &config.containers,
+            &decomp_opts,
         );
         all_units.extend(units);
     }
@@ -1247,6 +1534,8 @@ fn execute_scan_internal(
 
     let options = AttributionOptions {
         containers: Some(&config.containers),
+        zones: Some(&config.zones),
+        manifest_entries: &manifest_entries,
         steam_library_roots: &steam_lib_roots,
         root_exe_candidates: Some(&root_exe_candidates),
     };

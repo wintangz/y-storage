@@ -269,11 +269,373 @@ pub const DEFAULT_CONTAINER_NAMES: &[&str] = &[
     "PortableApps",
 ];
 
+pub const DEFAULT_PERSONAL_NAMES: &[&str] = &[
+    "Documents",
+    "Downloads",
+    "Pictures",
+    "Videos",
+    "Music",
+    "Desktop",
+];
+
 fn default_container_names() -> Vec<String> {
     DEFAULT_CONTAINER_NAMES
         .iter()
         .map(|s| (*s).to_string())
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneRuleKind {
+    AppContainer,
+    PersonalFiles,
+}
+
+impl ZoneRuleKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AppContainer => "App container",
+            Self::PersonalFiles => "Personal files",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneRootEntry {
+    pub name: String,
+    pub kind: ZoneRuleKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZonePathEntry {
+    pub path: String,
+    pub kind: ZoneRuleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PinKind {
+    App,
+    Group,
+    Personal,
+    Ignore,
+}
+
+impl PinKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::App => "Pin: App",
+            Self::Group => "Pin: Group",
+            Self::Personal => "Pin: Personal",
+            Self::Ignore => "Pin: Ignore",
+        }
+    }
+
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::App => "App",
+            Self::Group => "Group",
+            Self::Personal => "Personal",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderPin {
+    pub path: String,
+    pub kind: PinKind,
+}
+
+fn default_root_zones() -> Vec<ZoneRootEntry> {
+    let mut entries: Vec<ZoneRootEntry> = DEFAULT_CONTAINER_NAMES
+        .iter()
+        .map(|name| ZoneRootEntry {
+            name: (*name).to_string(),
+            kind: ZoneRuleKind::AppContainer,
+        })
+        .collect();
+    entries.extend(DEFAULT_PERSONAL_NAMES.iter().map(|name| ZoneRootEntry {
+        name: (*name).to_string(),
+        kind: ZoneRuleKind::PersonalFiles,
+    }));
+    entries
+}
+
+/// Unified user-editable attribution rulebook: combines root/explicit `AppContainer` and
+/// `PersonalFiles` zones plus per-folder `PinKind` overrides (`App`, `Group`, `Personal`, `Ignore`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneRulebook {
+    #[serde(default = "default_root_zones")]
+    pub root_zones: Vec<ZoneRootEntry>,
+    #[serde(default)]
+    pub explicit_zones: Vec<ZonePathEntry>,
+    #[serde(default)]
+    pub pins: Vec<FolderPin>,
+}
+
+impl Default for ZoneRulebook {
+    fn default() -> Self {
+        Self {
+            root_zones: default_root_zones(),
+            explicit_zones: Vec::new(),
+            pins: Vec::new(),
+        }
+    }
+}
+
+impl ZoneRulebook {
+    #[must_use]
+    pub fn from_legacy_containers(c: &ContainerRulebook) -> Self {
+        let mut root_zones: Vec<ZoneRootEntry> = c
+            .root_folder_names
+            .iter()
+            .map(|name| ZoneRootEntry {
+                name: name.clone(),
+                kind: ZoneRuleKind::AppContainer,
+            })
+            .collect();
+        for name in DEFAULT_PERSONAL_NAMES {
+            if !root_zones
+                .iter()
+                .any(|rz| rz.name.eq_ignore_ascii_case(name))
+            {
+                root_zones.push(ZoneRootEntry {
+                    name: (*name).to_string(),
+                    kind: ZoneRuleKind::PersonalFiles,
+                });
+            }
+        }
+        let explicit_zones = c
+            .explicit_paths
+            .iter()
+            .map(|p| ZonePathEntry {
+                path: normalize_windows_path(p),
+                kind: ZoneRuleKind::AppContainer,
+            })
+            .collect();
+        Self {
+            root_zones,
+            explicit_zones,
+            pins: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn pin_for_path(&self, path: &str) -> Option<PinKind> {
+        let pk = normalize_path_key(path);
+        if pk.is_empty() {
+            return None;
+        }
+        self.pins
+            .iter()
+            .find(|p| normalize_path_key(&p.path) == pk)
+            .map(|p| p.kind)
+    }
+
+    /// Returns the matching app-container label if `path` is either an explicit `AppContainer`
+    /// path (`Some("D:\\Tools")`) or a drive-root folder matching an `AppContainer` entry
+    /// (`D:\Games` -> `Some("Games")`). Explicit zones and pins override root defaults cleanly.
+    #[must_use]
+    pub fn matches_app_container_dir(&self, path: &str) -> Option<String> {
+        let norm = normalize_windows_path(path);
+        let pk = normalize_path_key(&norm);
+        if pk.is_empty() || pk.len() <= 3 {
+            return None;
+        }
+        if let Some(pin) = self.pin_for_path(&norm) {
+            if pin != PinKind::Group {
+                return None;
+            }
+        }
+        if let Some(ez) = self
+            .explicit_zones
+            .iter()
+            .find(|ep| normalize_path_key(&ep.path) == pk)
+        {
+            return (ez.kind == ZoneRuleKind::AppContainer)
+                .then(|| normalize_windows_path(&ez.path));
+        }
+        let trimmed = norm.trim_end_matches('\\');
+        let parts: Vec<&str> = trimmed.split('\\').collect();
+        if parts.len() == 2 && path_drive_letter(trimmed).is_some() {
+            let folder_name = parts[1];
+            if let Some(matched) = self.root_zones.iter().find(|rz| {
+                rz.kind == ZoneRuleKind::AppContainer
+                    && rz.name.trim().eq_ignore_ascii_case(folder_name)
+            }) {
+                return Some(matched.name.trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// Returns true if `path` belongs to a `PersonalFiles` zone (via pin, explicit zone path,
+    /// drive-root personal folder name, user profile subfolder, or active OS shell folder).
+    #[must_use]
+    pub fn matches_personal_dir(&self, path: &str, os_shell_folders: &[String]) -> bool {
+        let norm = normalize_windows_path(path);
+        let pk = normalize_path_key(&norm);
+        if pk.is_empty() || pk.len() <= 3 {
+            return false;
+        }
+        if let Some(pin) = self.pin_for_path(&norm) {
+            return pin == PinKind::Personal;
+        }
+        if let Some(ez) = self
+            .explicit_zones
+            .iter()
+            .find(|ep| normalize_path_key(&ep.path) == pk)
+        {
+            return ez.kind == ZoneRuleKind::PersonalFiles;
+        }
+        let trimmed = pk.trim_end_matches('\\');
+        let parts: Vec<&str> = trimmed.split('\\').collect();
+        if parts.len() == 2 && path_drive_letter(trimmed).is_some() {
+            let folder_name = parts[1];
+            if let Some(rz) = self
+                .root_zones
+                .iter()
+                .find(|r| r.name.trim().eq_ignore_ascii_case(folder_name))
+            {
+                return rz.kind == ZoneRuleKind::PersonalFiles;
+            }
+        }
+        if parts.len() == 4 && parts[1] == "users" {
+            let folder_name = parts[3];
+            if let Some(rz) = self
+                .root_zones
+                .iter()
+                .find(|r| r.name.trim().eq_ignore_ascii_case(folder_name))
+            {
+                return rz.kind == ZoneRuleKind::PersonalFiles;
+            }
+        }
+        if os_shell_folders
+            .iter()
+            .any(|sf| normalize_path_key(sf) == pk)
+        {
+            let leaf = parts.last().copied().unwrap_or("");
+            if DEFAULT_PERSONAL_NAMES
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(leaf))
+            {
+                return self.root_zones.iter().any(|r| {
+                    r.kind == ZoneRuleKind::PersonalFiles && r.name.trim().eq_ignore_ascii_case(leaf)
+                });
+            }
+            return true;
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn is_strict_ancestor_of_rule_or_pin(&self, path: &str) -> bool {
+        let pk = normalize_path_key(path);
+        if pk.is_empty() {
+            return false;
+        }
+        self.explicit_zones
+            .iter()
+            .map(|ep| normalize_path_key(&ep.path))
+            .chain(self.pins.iter().map(|p| normalize_path_key(&p.path)))
+            .any(|tk| !tk.is_empty() && tk != pk && is_subpath_of(&tk, &pk))
+    }
+
+    pub fn add_root_zone(&mut self, raw: &str, kind: ZoneRuleKind) -> bool {
+        let clean = raw
+            .trim()
+            .trim_matches(['\\', '/', '"'])
+            .trim()
+            .to_string();
+        if clean.is_empty() || clean.contains('\\') || clean.contains('/') || clean.contains(':') {
+            return false;
+        }
+        if let Some(existing) = self
+            .root_zones
+            .iter_mut()
+            .find(|z| z.name.eq_ignore_ascii_case(&clean))
+        {
+            if existing.kind == kind {
+                return false;
+            }
+            existing.kind = kind;
+            return true;
+        }
+        self.root_zones.push(ZoneRootEntry { name: clean, kind });
+        true
+    }
+
+    pub fn remove_root_zone(&mut self, idx: usize) -> bool {
+        if idx < self.root_zones.len() {
+            self.root_zones.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_explicit_zone(&mut self, raw: &str, kind: ZoneRuleKind) -> bool {
+        let norm = normalize_windows_path(raw);
+        let pk = normalize_path_key(&norm);
+        if norm.len() <= 3 || path_drive_letter(&norm).is_none() {
+            return false;
+        }
+        if let Some(existing) = self
+            .explicit_zones
+            .iter_mut()
+            .find(|p| normalize_path_key(&p.path) == pk)
+        {
+            if existing.kind == kind {
+                return false;
+            }
+            existing.kind = kind;
+            return true;
+        }
+        self.explicit_zones.push(ZonePathEntry { path: norm, kind });
+        true
+    }
+
+    pub fn remove_explicit_zone(&mut self, idx: usize) -> bool {
+        if idx < self.explicit_zones.len() {
+            self.explicit_zones.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_pin(&mut self, raw: &str, kind: PinKind) -> bool {
+        let norm = normalize_windows_path(raw);
+        let pk = normalize_path_key(&norm);
+        if norm.len() <= 3 || path_drive_letter(&norm).is_none() {
+            return false;
+        }
+        if let Some(existing) = self
+            .pins
+            .iter_mut()
+            .find(|p| normalize_path_key(&p.path) == pk)
+        {
+            if existing.kind == kind {
+                return false;
+            }
+            existing.kind = kind;
+            return true;
+        }
+        self.pins.push(FolderPin { path: norm, kind });
+        true
+    }
+
+    pub fn remove_pin(&mut self, idx: usize) -> bool {
+        if idx < self.pins.len() {
+            self.pins.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// User-editable app container rulebook: matches top-level drive-root folder names or explicit full paths.
@@ -502,6 +864,8 @@ pub struct AppConfig {
     pub ledger_height_px: Option<f32>,
     #[serde(default)]
     pub containers: ContainerRulebook,
+    #[serde(default)]
+    pub zones: ZoneRulebook,
     pub targets: Vec<DriveScanTarget>,
 }
 
@@ -519,6 +883,7 @@ impl Default for AppConfig {
             ledger_collapsed: false,
             ledger_height_px: None,
             containers: ContainerRulebook::default(),
+            zones: ZoneRulebook::default(),
             targets: vec![DriveScanTarget {
                 letter: 'C',
                 enabled: true,
@@ -572,6 +937,7 @@ impl AppConfig {
             ledger_collapsed: false,
             ledger_height_px: None,
             containers: ContainerRulebook::default(),
+            zones: ZoneRulebook::default(),
             targets,
         }
     }
@@ -641,8 +1007,18 @@ impl AppConfig {
 
     pub fn load_or_default(path: &Path, drives: &[DriveInfo], system_windows_dir: &str) -> Self {
         let mut cfg = match fs::read_to_string(path) {
-            Ok(raw) => toml::from_str::<Self>(&raw)
-                .unwrap_or_else(|_| Self::for_detected_drives(drives, system_windows_dir)),
+            Ok(raw) => {
+                let has_zones_section = raw.lines().any(|line| {
+                    let t = line.trim();
+                    t == "[zones]" || t.starts_with("[[zones.")
+                });
+                let mut parsed = toml::from_str::<Self>(&raw)
+                    .unwrap_or_else(|_| Self::for_detected_drives(drives, system_windows_dir));
+                if !has_zones_section {
+                    parsed.zones = ZoneRulebook::from_legacy_containers(&parsed.containers);
+                }
+                parsed
+            }
             Err(_) => Self::for_detected_drives(drives, system_windows_dir),
         };
         cfg.sync_with_drives(drives, system_windows_dir);

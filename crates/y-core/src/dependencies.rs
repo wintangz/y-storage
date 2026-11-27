@@ -441,6 +441,73 @@ pub struct SteamAppManifest {
     pub has_ea_script: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicManifestApp {
+    pub app_name: String,
+    pub display_name: String,
+    pub install_location: String,
+    pub launch_executable: String,
+}
+
+/// Parses an Epic Games Launcher `.item` JSON manifest, ignoring incomplete installs and
+/// pure DLC entries that share a base game's `InstallLocation`.
+#[must_use]
+pub fn parse_epic_manifest_item(json_text: &str) -> Option<EpicManifestApp> {
+    let val: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let obj = val.as_object()?;
+    if obj
+        .get("bIsIncompleteInstall")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let app_name = obj
+        .get("AppName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let main_game = obj
+        .get("MainGameAppName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if !main_game.is_empty() && !main_game.eq_ignore_ascii_case(app_name) {
+        return None;
+    }
+    let display_name = obj
+        .get("DisplayName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let install_raw = obj
+        .get("InstallLocation")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let install_location = crate::discovery::normalize_windows_path(install_raw);
+    if install_location.len() <= 3 {
+        return None;
+    }
+    let launch_executable = obj
+        .get("LaunchExecutable")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    Some(EpicManifestApp {
+        app_name: if app_name.is_empty() {
+            display_name.clone()
+        } else {
+            app_name.to_string()
+        },
+        display_name,
+        install_location,
+        launch_executable,
+    })
+}
+
 #[must_use]
 pub fn parse_steam_appmanifest_full(acf_text: &str) -> Option<SteamAppManifest> {
     let mut installdir: Option<String> = None;

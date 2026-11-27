@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{
     AppConfig, AppFilterChip, AppSortMode, ContainerRulebook, DriveScanTarget, SizeBandFilter,
-    SortDirection, ThemeMode, UnattributedLocationZone,
+    SortDirection, ThemeMode, UnattributedLocationZone, ZoneRuleKind, ZoneRulebook,
 };
 use y_core::history::{ScanHistory, ScanScopeKind};
 use y_core::model::{
@@ -467,6 +467,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
                 drive_letter: *dl,
             }],
             dependencies: vec![],
+            carved_out_apps: vec![],
             display_icon: None,
             icon_rgba: None,
             category: *cat,
@@ -496,6 +497,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
                 drive_letter: 'D',
             }],
             dependencies: vec![],
+            carved_out_apps: vec![],
             display_icon: None,
             icon_rgba: None,
             category: AppCategory::Games,
@@ -509,6 +511,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
         bytes: 184_000_000,
         drive_letter: 'C',
         zone_hint: Some(ZoneKind::Red),
+        is_loose_files: false,
     }];
     let unattrib_total: u64 = unattributed.iter().map(|u| u.bytes).sum();
 
@@ -607,9 +610,231 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
         reverse_dependencies: vec![],
         installed_registry_names: vec![],
         applied_containers: Some(containers),
+        applied_zones: Some(ZoneRulebook::default()),
         catalog_source: "synthetic-layout".to_string(),
         warnings: vec![],
     };
+    (report, cfg)
+}
+
+fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
+    use std::collections::HashMap;
+    use y_core::attribution::{AttributionOptions, RootExeCandidate, attribute_scan_with_options};
+    use y_core::config::DriveScanTarget;
+    use y_core::model::{FolderNode, InstalledApp};
+    use y_core::tree::{DecompositionOptions, decompose_scanned_tree_with_options};
+
+    let zones = ZoneRulebook::default();
+    let apps_catalog = vec![
+        InstalledApp {
+            id: "reg:hoyoplay".into(),
+            display_name: "HoYoPlay".into(),
+            display_version: "1.19".into(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["COGNOSPHERE PTE. LTD.".into()],
+            direct_install_location: Some(r"C:\Program Files\HoYoPlay".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"C:\Program Files\HoYoPlay".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+        InstalledApp {
+            id: "reg:genshin-impact".into(),
+            display_name: "Genshin Impact".into(),
+            display_version: "5.4".into(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["COGNOSPHERE PTE. LTD.".into()],
+            direct_install_location: Some(r"C:\Program Files\HoYoPlay\Genshin Impact Game".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"C:\Program Files\HoYoPlay\Genshin Impact Game".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+    ];
+
+    let tree_c = FolderNode {
+        path: r"C:\".into(),
+        name: r"C:\".into(),
+        direct_file_bytes: 0,
+        total_bytes: 97_200_000_000,
+        children: vec![FolderNode {
+            path: r"C:\Program Files".into(),
+            name: "Program Files".into(),
+            direct_file_bytes: 0,
+            total_bytes: 97_200_000_000,
+            children: vec![FolderNode {
+                path: r"C:\Program Files\HoYoPlay".into(),
+                name: "HoYoPlay".into(),
+                direct_file_bytes: 1_200_000_000,
+                total_bytes: 97_200_000_000,
+                children: vec![
+                    FolderNode {
+                        path: r"C:\Program Files\HoYoPlay\LauncherData".into(),
+                        name: "LauncherData".into(),
+                        direct_file_bytes: 500_000_000,
+                        total_bytes: 500_000_000,
+                        children: vec![],
+                    },
+                    FolderNode {
+                        path: r"C:\Program Files\HoYoPlay\Genshin Impact Game".into(),
+                        name: "Genshin Impact Game".into(),
+                        direct_file_bytes: 95_500_000_000,
+                        total_bytes: 95_500_000_000,
+                        children: vec![],
+                    },
+                ],
+            }],
+        }],
+    };
+    let tree_d = FolderNode {
+        path: r"D:\".into(),
+        name: r"D:\".into(),
+        direct_file_bytes: 0,
+        total_bytes: 14_400_000_000,
+        children: vec![FolderNode {
+            path: r"D:\Apps".into(),
+            name: "Apps".into(),
+            direct_file_bytes: 0,
+            total_bytes: 14_400_000_000,
+            children: vec![FolderNode {
+                path: r"D:\Apps\Adobe".into(),
+                name: "Adobe".into(),
+                direct_file_bytes: 0,
+                total_bytes: 14_400_000_000,
+                children: vec![
+                    FolderNode {
+                        path: r"D:\Apps\Adobe\Photoshop 2025".into(),
+                        name: "Photoshop 2025".into(),
+                        direct_file_bytes: 4_800_000_000,
+                        total_bytes: 4_800_000_000,
+                        children: vec![],
+                    },
+                    FolderNode {
+                        path: r"D:\Apps\Adobe\Illustrator 2025".into(),
+                        name: "Illustrator 2025".into(),
+                        direct_file_bytes: 3_400_000_000,
+                        total_bytes: 3_400_000_000,
+                        children: vec![],
+                    },
+                    FolderNode {
+                        path: r"D:\Apps\Adobe\Premiere Pro 2025".into(),
+                        name: "Premiere Pro 2025".into(),
+                        direct_file_bytes: 6_200_000_000,
+                        total_bytes: 6_200_000_000,
+                        children: vec![],
+                    },
+                ],
+            }],
+        }],
+    };
+
+    let mut exe_map = HashMap::new();
+    exe_map.insert(
+        r"d:\apps\adobe\photoshop 2025".to_string(),
+        RootExeCandidate {
+            exe_path: r"D:\Apps\Adobe\Photoshop 2025\Photoshop.exe".into(),
+            product_name: Some("Adobe Photoshop 2025".into()),
+        },
+    );
+    exe_map.insert(
+        r"d:\apps\adobe\illustrator 2025".to_string(),
+        RootExeCandidate {
+            exe_path: r"D:\Apps\Adobe\Illustrator 2025\Illustrator.exe".into(),
+            product_name: Some("Adobe Illustrator 2025".into()),
+        },
+    );
+    exe_map.insert(
+        r"d:\apps\adobe\premiere pro 2025".to_string(),
+        RootExeCandidate {
+            exe_path: r"D:\Apps\Adobe\Premiere Pro 2025\Premiere.exe".into(),
+            product_name: Some("Adobe Premiere Pro 2025".into()),
+        },
+    );
+
+    let decomp_opts = DecompositionOptions {
+        zones: Some(&zones),
+        manifest_entries: &[],
+        exe_candidates: Some(&exe_map),
+    };
+    let mut units = decompose_scanned_tree_with_options(&tree_c, &apps_catalog, &[], &[], &decomp_opts);
+    units.extend(decompose_scanned_tree_with_options(
+        &tree_d,
+        &apps_catalog,
+        &[],
+        &[],
+        &decomp_opts,
+    ));
+
+    let drives = vec![
+        DriveInfo {
+            letter: 'C',
+            root: r"C:\".into(),
+            total_bytes: 250_000_000_000,
+            free_bytes: 110_000_000_000,
+            used_bytes: 140_000_000_000,
+            is_system_drive: true,
+            full_walk_enabled: true,
+            exclusions: vec![r"C:\WINDOWS".into()],
+            last_scanned_unix: Some(1_795_775_000),
+            last_scanned_display: Some("2026-11-27 19:55:00".into()),
+        },
+        DriveInfo {
+            letter: 'D',
+            root: r"D:\".into(),
+            total_bytes: 500_000_000_000,
+            free_bytes: 400_000_000_000,
+            used_bytes: 100_000_000_000,
+            is_system_drive: false,
+            full_walk_enabled: true,
+            exclusions: vec![],
+            last_scanned_unix: Some(1_795_775_000),
+            last_scanned_display: Some("2026-11-27 19:55:00".into()),
+        },
+    ];
+    let mut report = attribute_scan_with_options(
+        1_795_775_000,
+        "2026-11-27 19:55:00".into(),
+        120,
+        drives,
+        RegistryDiscoveryStats {
+            raw_display_name_entries: 2,
+            raw_with_install_location: 2,
+            canonical_apps: 2,
+            canonical_with_direct_install_location: 2,
+            canonical_with_inferred_install_location: 0,
+        },
+        &apps_catalog,
+        &HashMap::new(),
+        &units,
+        None,
+        &AttributionOptions {
+            containers: None,
+            zones: Some(&zones),
+            manifest_entries: &[],
+            steam_library_roots: &[],
+            root_exe_candidates: Some(&exe_map),
+        },
+    );
+    y_core::categories::classify_report_apps(&mut report, |_| false);
+
+    let mut cfg = AppConfig::default();
+    cfg.zones = zones;
+    cfg.targets = vec![
+        DriveScanTarget {
+            letter: 'C',
+            enabled: true,
+            exclusions: vec![r"C:\WINDOWS".into()],
+        },
+        DriveScanTarget {
+            letter: 'D',
+            enabled: true,
+            exclusions: vec![],
+        },
+    ];
     (report, cfg)
 }
 
@@ -804,9 +1029,26 @@ fn render_screenshot_frame(
         "settings" => {
             ui_state.active_view = ActiveView::Settings;
         }
-        "settings-containers" => {
+        "settings-containers" | "settings-zones" => {
             ui_state.active_view = ActiveView::Settings;
             ui_state.settings_focus_containers = true;
+        }
+        "your-files-media" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_your_files = true;
+            ui_state.ledger_height_px = Some(280.0);
+        }
+        "group-node-fixture" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            if let Some(hl) = report
+                .apps
+                .iter()
+                .find(|a| a.display_name.eq_ignore_ascii_case("HoYoPlay"))
+            {
+                ui_state.expanded_apps.insert(hl.id.clone());
+            }
         }
         "settings-typed" => {
             ui_state.active_view = ActiveView::Settings;
@@ -877,7 +1119,7 @@ fn render_screenshot_frame(
 
     let steps = if hover_size_mode || hover_web_search_tooltip {
         4
-    } else if view == "settings-containers" {
+    } else if view == "settings-containers" || view == "settings-zones" {
         8
     } else if hover_web_search_btn || hover_unattrib_row {
         3
@@ -1031,7 +1273,9 @@ fn render_screenshot(
 ) -> Result<(), String> {
     let drives = enumerate_fixed_drives();
     let sys_win = get_windows_directory();
-    let (mut report, mut config) = if let Some(n) = sim_drives {
+    let (mut report, mut config) = if view == "group-node-fixture" {
+        build_group_node_fixture_screenshot_report()
+    } else if let Some(n) = sim_drives {
         build_synthetic_screenshot_report(n)
     } else {
         let cfg = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
@@ -1050,6 +1294,14 @@ fn render_screenshot(
         };
         (rep, cfg)
     };
+    if view == "settings-zones" {
+        let _ = config
+            .zones
+            .add_explicit_zone(r"D:\Media", ZoneRuleKind::PersonalFiles);
+        let _ = config
+            .zones
+            .set_pin(r"D:\Games\OrphanMod", y_core::config::PinKind::Ignore);
+    }
     if all_drives_enabled {
         for t in &mut config.targets {
             t.enabled = true;

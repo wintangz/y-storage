@@ -1,17 +1,18 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::config::ContainerRulebook;
+use crate::config::{ContainerRulebook, PinKind, ZoneRulebook};
 use crate::discovery::{
     AppTokenMatchKind, contains_whole_token_sequence, extract_guid, is_subpath_of,
     match_app_predicate, normalize_app_token, normalize_path_key, path_drive_letter,
-    versioned_family_identity_key,
+    split_alnum_words, versioned_family_identity_key,
 };
 use crate::history::{HistoryEntryRef, ScanHistory, compute_growth, recompute_report_growth_from_history};
 use crate::model::{
     AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, GrowthDelta, InstalledApp,
-    LocationQualifier, NoTouchCategory, RegistryDiscoveryStats, ScanReport, ScannedUnit,
-    ScannedUnitKind, SystemDriveBreakdown, UnattributedItem, ZoneKind,
+    LocationQualifier, ManifestAppEntry, NoTouchCategory, RegistryDiscoveryStats, ScanReport,
+    ScannedUnit, ScannedUnitKind, SystemDriveBreakdown, UnattributedItem, ZoneKind,
 };
+use crate::tree::{is_non_app_internal_subdir_name, is_program_files_inbox_folder};
 use crate::zones::classify_zone;
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,8 @@ pub struct RootExeCandidate {
 #[derive(Debug, Clone, Default)]
 pub struct AttributionOptions<'a> {
     pub containers: Option<&'a ContainerRulebook>,
+    pub zones: Option<&'a ZoneRulebook>,
+    pub manifest_entries: &'a [ManifestAppEntry],
     pub steam_library_roots: &'a [String],
     pub root_exe_candidates: Option<&'a HashMap<String, RootExeCandidate>>,
 }
@@ -91,7 +94,85 @@ pub fn attribute_scan_with_options(
         .map(|d| d.letter.to_ascii_uppercase())
         .collect();
 
+    let effective_zones: ZoneRulebook = if let Some(z) = options.zones {
+        z.clone()
+    } else if let Some(c) = options.containers {
+        ZoneRulebook::from_legacy_containers(c)
+    } else {
+        ZoneRulebook::default()
+    };
+
     let mut store_buckets: HashMap<String, usize> = HashMap::new();
+    let mut manifest_buckets_by_dir: HashMap<String, (usize, AttributionBasis)> = HashMap::new();
+    for m in options.manifest_entries {
+        let mk = normalize_path_key(&m.install_dir);
+        if mk.len() <= 3 {
+            continue;
+        }
+        let m_tok = normalize_app_token(&m.display_name);
+        let existing_idx = buckets.iter().position(|b| {
+            b.app
+                .all_install_locations
+                .iter()
+                .any(|loc| normalize_path_key(loc) == mk)
+                || (!m_tok.is_empty() && normalize_app_token(&b.app.display_name) == m_tok)
+                || (!m_tok.is_empty()
+                    && b.app
+                        .aliases
+                        .iter()
+                        .any(|al| normalize_app_token(al) == m_tok))
+        });
+        let idx = if let Some(pos) = existing_idx {
+            if !buckets[pos]
+                .app
+                .all_install_locations
+                .iter()
+                .any(|loc| normalize_path_key(loc) == mk)
+            {
+                buckets[pos]
+                    .app
+                    .all_install_locations
+                    .push(m.install_dir.clone());
+            }
+            if buckets[pos].app.direct_install_location.is_none() {
+                buckets[pos].app.direct_install_location = Some(m.install_dir.clone());
+            }
+            if buckets[pos].app.publishers.is_empty() {
+                if let Some(ref pub_name) = m.publisher {
+                    buckets[pos].app.publishers.push(pub_name.clone());
+                }
+            }
+            if buckets[pos].app.display_icon.is_none() && m.display_icon.is_some() {
+                buckets[pos].app.display_icon = m.display_icon.clone();
+            }
+            pos
+        } else {
+            let idx = buckets.len();
+            buckets.push(AppBucket {
+                app: InstalledApp {
+                    id: m.id.clone(),
+                    display_name: m.display_name.clone(),
+                    display_version: String::new(),
+                    uninstall_guids: Vec::new(),
+                    aliases: Vec::new(),
+                    publishers: m.publisher.clone().into_iter().collect(),
+                    direct_install_location: Some(m.install_dir.clone()),
+                    inferred_install_location: None,
+                    all_install_locations: vec![m.install_dir.clone()],
+                    no_touch: None,
+                    is_store_fallback: false,
+                    display_icon: m.display_icon.clone(),
+                },
+                bases: Vec::new(),
+                items: Vec::new(),
+                total_bytes: 0,
+            });
+            store_buckets.insert(m.id.clone(), idx);
+            idx
+        };
+        manifest_buckets_by_dir.insert(mk, (idx, m.basis));
+    }
+
     let mut shared_caches: Vec<BreakdownItem> = Vec::new();
     let mut your_files: Vec<BreakdownItem> = Vec::new();
     let mut unattributed: Vec<UnattributedItem> = Vec::new();
@@ -104,6 +185,32 @@ pub fn attribute_scan_with_options(
         .map(|p| normalize_path_key(p))
         .filter(|s| !s.is_empty())
         .collect();
+    let mut manifest_container_keys: HashSet<String> = HashSet::new();
+    for lk in &steam_lib_keys {
+        manifest_container_keys.insert(lk.clone());
+        manifest_container_keys.insert(format!("{lk}\\steamapps"));
+        manifest_container_keys.insert(format!("{lk}\\steamapps\\common"));
+    }
+    for m in options.manifest_entries {
+        let ck = normalize_path_key(&m.container_dir);
+        if ck.len() > 3 {
+            manifest_container_keys.insert(ck);
+        }
+    }
+    let mut exe_children_by_parent: HashMap<String, Vec<(&String, &RootExeCandidate)>> =
+        HashMap::new();
+    if let Some(exe_map) = options.root_exe_candidates {
+        for (pk, cand) in exe_map {
+            if let Some((parent, _)) = pk.trim_end_matches('\\').rsplit_once('\\') {
+                let p_key = if parent.len() == 2 && parent.ends_with(':') {
+                    format!("{parent}\\")
+                } else {
+                    parent.to_string()
+                };
+                exe_children_by_parent.entry(p_key).or_default().push((pk, cand));
+            }
+        }
+    }
 
     for unit in scanned_units {
         if unit.bytes == 0 && unit.kind != ScannedUnitKind::RootSystemFile {
@@ -114,6 +221,7 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
+        let is_loose = unit.kind == ScannedUnitKind::ContainerLooseFiles;
         match unit.kind {
             ScannedUnitKind::RootSystemFile => {
                 root_sys_by_drive
@@ -156,14 +264,14 @@ pub fn attribute_scan_with_options(
                     Some(NoTouchCategory::Registry),
                     false,
                 );
-                let (zone, qual) = classify_zone(&unit.path, false);
+                let (zone, _) = classify_zone(&unit.path, false);
                 push_item_to_bucket(
                     &mut buckets[reg_idx],
                     BreakdownItem {
                         path: unit.path.clone(),
                         bytes: unit.bytes,
                         zone: Some(zone),
-                        qualifier: qual,
+                        qualifier: Some(LocationQualifier::LooseFiles),
                         basis: Some(AttributionBasis::Token),
                         basis_detail: None,
                         no_touch: Some(NoTouchCategory::Registry),
@@ -194,15 +302,18 @@ pub fn attribute_scan_with_options(
                 }
                 *scanned_non_system_by_drive.entry(d_letter).or_default() += unit.bytes;
             }
+            ScannedUnitKind::ContainerLooseFiles => {
+                *scanned_non_system_by_drive.entry(d_letter).or_default() += unit.bytes;
+            }
         }
 
-        // Regular attribution pipeline.
+        // Bottom-up attribution pipeline.
         let path_lower = normalize_path_key(&unit.path);
         let leaf = leaf_name(&unit.path);
         let leaf_lower = leaf.to_ascii_lowercase();
 
-        // Rule 2(a): Known shared/system GREEN caches belong to a labelled cache group, not Unattributed and not any app.
-        if is_shared_green_cache(&path_lower) {
+        // Shared/system GREEN caches (including Steam shader/download temp caches when not installed game roots).
+        if !is_loose && (is_shared_green_cache(&path_lower) || is_manifest_green_cache(&path_lower, &steam_lib_keys)) {
             let qual = if path_lower.contains(":\\programdata\\") {
                 Some(LocationQualifier::MachineShared)
             } else {
@@ -221,44 +332,34 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
-        // Steam library root/steamapps loose files (`steamapps\[files]`, `Steam\[files]`) belong to Steam.
-        if is_steam_library_loose_files(&path_lower, &steam_lib_keys) {
-            if let Some(idx) = find_app_matching(&buckets, &["steam"]) {
-                let (zone, qual) = classify_zone(&unit.path, true);
-                let nt = buckets[idx].app.no_touch;
-                push_item_to_bucket(
-                    &mut buckets[idx],
-                    BreakdownItem {
-                        path: unit.path.clone(),
-                        bytes: unit.bytes,
-                        zone: Some(zone),
-                        qualifier: qual,
-                        basis: Some(AttributionBasis::SteamManifest),
-                        basis_detail: None,
-                        no_touch: nt,
-                        drive_letter: d_letter,
-                    },
-                    AttributionBasis::SteamManifest,
-                );
-                continue;
-            }
-        }
-
-        // Exclude OS metadata like $Recycle.Bin, Config.Msi, System Volume Information, [root files] from force-matching.
-        if is_unattributable_os_noise(&path_lower, &leaf_lower) {
-            let (zone, _) = classify_zone(&unit.path, false);
-            unattributed.push(UnattributedItem {
+        // Part B(7) early pin check: PinKind::Personal beats even unowned attribution.
+        let pin_here = if is_loose {
+            None
+        } else {
+            effective_zones.pin_for_path(&unit.path)
+        };
+        if pin_here == Some(PinKind::Personal) {
+            your_files.push(BreakdownItem {
                 path: unit.path.clone(),
                 bytes: unit.bytes,
+                zone: None,
+                qualifier: None,
+                basis: None,
+                basis_detail: None,
+                no_touch: None,
                 drive_letter: d_letter,
-                zone_hint: Some(zone),
             });
             continue;
         }
 
-        // 1. InstallLocation match (prefer longest / most specific matching install location).
-        if let Some((idx, is_install_loc)) = find_by_install_location(&buckets, &path_lower) {
-            let (zone, qual) = classify_zone(&unit.path, is_install_loc || unit.is_direct_install_root);
+        // Step (1): Exact Registered Install Root (deepest exact path first; subtrees claimed later in Step 6).
+        if let Some(idx) = find_by_exact_install_root(&buckets, &path_lower) {
+            let (zone, default_qual) = classify_zone(&unit.path, true);
+            let qual = if is_loose {
+                Some(LocationQualifier::InstallLooseFiles)
+            } else {
+                default_qual
+            };
             let nt = buckets[idx].app.no_touch;
             let basis = if buckets[idx].app.id.starts_with("steam:") {
                 AttributionBasis::SteamManifest
@@ -282,7 +383,217 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
-        // 2. ExactName match.
+        // Step (2): Manifest Container Entries (Steam ACF / Epic .item) + Steam library loose files.
+        if let Some(&(idx, m_basis)) = manifest_buckets_by_dir.get(&path_lower) {
+            let (zone, default_qual) = classify_zone(&unit.path, true);
+            let qual = if is_loose {
+                Some(LocationQualifier::InstallLooseFiles)
+            } else {
+                default_qual
+            };
+            let nt = buckets[idx].app.no_touch;
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(zone),
+                    qualifier: qual,
+                    basis: Some(m_basis),
+                    basis_detail: None,
+                    no_touch: nt,
+                    drive_letter: d_letter,
+                },
+                m_basis,
+            );
+            continue;
+        }
+
+        if is_loose && is_steam_library_loose_dir(&path_lower, &steam_lib_keys) {
+            if let Some(idx) = find_app_matching(&buckets, &["steam"]) {
+                let (zone, _) = classify_zone(&unit.path, true);
+                let nt = buckets[idx].app.no_touch;
+                push_item_to_bucket(
+                    &mut buckets[idx],
+                    BreakdownItem {
+                        path: unit.path.clone(),
+                        bytes: unit.bytes,
+                        zone: Some(zone),
+                        qualifier: Some(LocationQualifier::LooseFiles),
+                        basis: Some(AttributionBasis::SteamManifest),
+                        basis_detail: None,
+                        no_touch: nt,
+                        drive_letter: d_letter,
+                    },
+                    AttributionBasis::SteamManifest,
+                );
+                continue;
+            }
+        }
+
+        // Part B(3): Remainder loose files of a non-install-root container never pretend to be apps,
+        // keep their real path, check curated single-app containers (e.g. ProgramData\NVIDIA) or Step (6)
+        // enclosing install root, and otherwise stay honestly Unattributed with `is_loose_files = true`.
+        if is_loose {
+            if !is_generic_container_path_for_loose(&path_lower, &effective_zones) {
+                if let Some((idx, is_install_override)) = find_by_token(
+                    &mut buckets,
+                    &mut store_buckets,
+                    guid_to_app_name,
+                    &path_lower,
+                    &leaf,
+                    &leaf_lower,
+                ) {
+                    let (zone, _) = classify_zone(&unit.path, is_install_override);
+                    let nt = buckets[idx].app.no_touch;
+                    push_item_to_bucket(
+                        &mut buckets[idx],
+                        BreakdownItem {
+                            path: unit.path.clone(),
+                            bytes: unit.bytes,
+                            zone: Some(zone),
+                            qualifier: Some(LocationQualifier::LooseFiles),
+                            basis: Some(AttributionBasis::Token),
+                            basis_detail: None,
+                            no_touch: nt,
+                            drive_letter: d_letter,
+                        },
+                        AttributionBasis::Token,
+                    );
+                    continue;
+                }
+            }
+            if let Some(idx) = find_by_enclosing_install_location(&buckets, &path_lower) {
+                let (zone, _) = classify_zone(&unit.path, true);
+                let nt = buckets[idx].app.no_touch;
+                let basis = if buckets[idx].app.id.starts_with("steam:") {
+                    AttributionBasis::SteamManifest
+                } else {
+                    AttributionBasis::InstallLocation
+                };
+                push_item_to_bucket(
+                    &mut buckets[idx],
+                    BreakdownItem {
+                        path: unit.path.clone(),
+                        bytes: unit.bytes,
+                        zone: Some(zone),
+                        qualifier: Some(LocationQualifier::InstallLooseFiles),
+                        basis: Some(basis),
+                        basis_detail: None,
+                        no_touch: nt,
+                        drive_letter: d_letter,
+                    },
+                    basis,
+                );
+                continue;
+            }
+            let (zone, _) = classify_zone(&unit.path, false);
+            unattributed.push(UnattributedItem {
+                path: unit.path.clone(),
+                bytes: unit.bytes,
+                drive_letter: d_letter,
+                zone_hint: Some(zone),
+                is_loose_files: true,
+            });
+            continue;
+        }
+
+        // Part B(7): Manual Pin = App (when no registered/manifest entry already claimed exact root).
+        if pin_here == Some(PinKind::App) {
+            let clean_name = clean_container_folder_name(&leaf);
+            let app_key = format!("pin:{path_lower}");
+            let icon = options
+                .root_exe_candidates
+                .and_then(|m| m.get(&path_lower))
+                .map(|c| c.exe_path.clone());
+            let idx = ensure_folder_only_app(
+                &mut buckets,
+                &mut store_buckets,
+                &app_key,
+                &clean_name,
+                &unit.path,
+                icon,
+            );
+            let (zone, qual) = classify_zone(&unit.path, true);
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(zone),
+                    qualifier: qual,
+                    basis: Some(AttributionBasis::ManualPin),
+                    basis_detail: Some("manual pin: App".to_string()),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::ManualPin,
+            );
+            continue;
+        }
+
+        // Exclude OS metadata like $Recycle.Bin, Config.Msi, System Volume Information from force-matching.
+        if is_unattributable_os_noise(&path_lower, &leaf_lower) {
+            let (zone, _) = classify_zone(&unit.path, false);
+            unattributed.push(UnattributedItem {
+                path: unit.path.clone(),
+                bytes: unit.bytes,
+                drive_letter: d_letter,
+                zone_hint: Some(zone),
+                is_loose_files: false,
+            });
+            continue;
+        }
+
+        // Part B(7): Manual Pin = Ignore overrides all inference below (falls through to Unattributed).
+        if pin_here == Some(PinKind::Ignore) {
+            let (zone, _) = classify_zone(&unit.path, false);
+            unattributed.push(UnattributedItem {
+                path: unit.path.clone(),
+                bytes: unit.bytes,
+                drive_letter: d_letter,
+                zone_hint: Some(zone),
+                is_loose_files: false,
+            });
+            continue;
+        }
+
+        // Step (4): Two-Segment Publisher\Product Composition BEFORE leaf-only matching.
+        match find_by_two_segment_composition(&buckets, &unit.path) {
+            TwoSegmentMatch::Unique(idx) => {
+                let (zone, qual) = classify_zone(&unit.path, unit.is_direct_install_root);
+                let nt = buckets[idx].app.no_touch;
+                push_item_to_bucket(
+                    &mut buckets[idx],
+                    BreakdownItem {
+                        path: unit.path.clone(),
+                        bytes: unit.bytes,
+                        zone: Some(zone),
+                        qualifier: qual,
+                        basis: Some(AttributionBasis::PublisherProduct),
+                        basis_detail: None,
+                        no_touch: nt,
+                        drive_letter: d_letter,
+                    },
+                    AttributionBasis::PublisherProduct,
+                );
+                continue;
+            }
+            TwoSegmentMatch::AmbiguousTie => {
+                let (zone, _) = classify_zone(&unit.path, false);
+                unattributed.push(UnattributedItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    drive_letter: d_letter,
+                    zone_hint: Some(zone),
+                    is_loose_files: false,
+                });
+                continue;
+            }
+            TwoSegmentMatch::NoMatch => {}
+        }
+
+        // 2b. ExactName leaf match.
         if let Some(idx) = find_by_exact_name(&buckets, &leaf) {
             let (zone, qual) = classify_zone(&unit.path, unit.is_direct_install_root);
             let nt = buckets[idx].app.no_touch;
@@ -353,7 +664,7 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
-        // 5. Store Packages fallback (`AppData\Local\Packages\<Pkg>` or `Program Files\WindowsApps\<Pkg>`).
+        // 5a. Store Packages fallback (`AppData\Local\Packages\<Pkg>` or `Program Files\WindowsApps\<Pkg>`).
         if (path_lower.contains("\\appdata\\local\\packages\\")
             && !path_lower.ends_with("\\appdata\\local\\packages"))
             || (path_lower.contains("\\program files\\windowsapps\\")
@@ -396,7 +707,7 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
-        // 5c. Rule 2(b) & 2(c): Top-level user-profile dot-folders and standalone Roaming\flutter stand alone under their folder name.
+        // 5c. User-profile dot-folders and standalone SDKs.
         if is_user_profile_dot_folder(&path_lower, &leaf_lower) {
             let idx = ensure_synthetic_app(
                 &mut buckets,
@@ -512,63 +823,36 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
-        // 5d. Container Rulebook (FIX 6a): only claims otherwise-unattributed immediate children
-        // of matched container directories (registry/Steam/stronger bases above always win).
-        if let Some(container_name) = options
-            .containers
-            .and_then(|c| match_container_child(c, &unit.path, &path_lower, &leaf_lower))
-        {
-            let clean_name = clean_container_folder_name(&leaf);
-            let app_key = format!("container:{path_lower}");
-            let idx = ensure_folder_only_app(
-                &mut buckets,
-                &mut store_buckets,
-                &app_key,
-                &clean_name,
+        // Step (5): Three-way candidate inference on unclaimed remainder (never promotes manifest non-member siblings).
+        if !is_unclaimed_manifest_sibling(&path_lower, &manifest_container_keys) {
+            if let Some((display, publisher_ctx, icon, basis, detail)) = infer_step5_app_candidate(
                 &unit.path,
-                None,
-            );
-            let (zone, qual) = classify_zone(&unit.path, true);
-            let detail = format!("layout rule: {container_name}");
-            push_item_to_bucket(
-                &mut buckets[idx],
-                BreakdownItem {
-                    path: unit.path.clone(),
-                    bytes: unit.bytes,
-                    zone: Some(zone),
-                    qualifier: qual,
-                    basis: Some(AttributionBasis::ContainerRule),
-                    basis_detail: Some(detail),
-                    no_touch: None,
-                    drive_letter: d_letter,
-                },
-                AttributionBasis::ContainerRule,
-            );
-            continue;
-        }
-
-        // 5e. Conservative drive-root executable inference (FIX 6d).
-        if is_drive_root_child(&path_lower) {
-            if let Some(cand) = options
-                .root_exe_candidates
-                .and_then(|m| m.get(&path_lower))
-            {
-                let display = cand
-                    .product_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| clean_container_folder_name(&leaf));
-                let app_key = format!("exe:{path_lower}");
+                &path_lower,
+                &leaf,
+                &leaf_lower,
+                &effective_zones,
+                options.root_exe_candidates,
+                &exe_children_by_parent,
+            ) {
+                let prefix = if basis == AttributionBasis::ContainerRule {
+                    "container"
+                } else {
+                    "exe"
+                };
+                let app_key = format!("{prefix}:{path_lower}");
                 let idx = ensure_folder_only_app(
                     &mut buckets,
                     &mut store_buckets,
                     &app_key,
                     &display,
                     &unit.path,
-                    Some(cand.exe_path.clone()),
+                    icon,
                 );
+                if let Some(pub_str) = publisher_ctx {
+                    if !buckets[idx].app.publishers.contains(&pub_str) {
+                        buckets[idx].app.publishers.push(pub_str);
+                    }
+                }
                 let (zone, qual) = classify_zone(&unit.path, true);
                 push_item_to_bucket(
                     &mut buckets[idx],
@@ -577,24 +861,52 @@ pub fn attribute_scan_with_options(
                         bytes: unit.bytes,
                         zone: Some(zone),
                         qualifier: qual,
-                        basis: Some(AttributionBasis::ExecutableScan),
-                        basis_detail: Some("executable scan (inferred)".to_string()),
+                        basis: Some(basis),
+                        basis_detail: Some(detail),
                         no_touch: None,
                         drive_letter: d_letter,
                     },
-                    AttributionBasis::ExecutableScan,
+                    basis,
                 );
                 continue;
             }
         }
 
-        // 6. Honest remainder: stays Unattributed.
+        // Step (6): Containment is the weakest claim — claims only residual unattributed subtrees
+        // inside an app's InstallLocation left over after Steps (1)–(5) and Pins.
+        if let Some(idx) = find_by_enclosing_install_location(&buckets, &path_lower) {
+            let (zone, qual) = classify_zone(&unit.path, true);
+            let nt = buckets[idx].app.no_touch;
+            let basis = if buckets[idx].app.id.starts_with("steam:") {
+                AttributionBasis::SteamManifest
+            } else {
+                AttributionBasis::InstallLocation
+            };
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(zone),
+                    qualifier: qual,
+                    basis: Some(basis),
+                    basis_detail: None,
+                    no_touch: nt,
+                    drive_letter: d_letter,
+                },
+                basis,
+            );
+            continue;
+        }
+
+        // Honest remainder: stays Unattributed.
         let (zone, _) = classify_zone(&unit.path, false);
         unattributed.push(UnattributedItem {
             path: unit.path.clone(),
             bytes: unit.bytes,
             drive_letter: d_letter,
             zone_hint: Some(zone),
+            is_loose_files: false,
         });
     }
 
@@ -643,6 +955,7 @@ pub fn attribute_scan_with_options(
                 no_touch: b.app.no_touch,
                 bases: b.bases,
                 items: b.items,
+                carved_out_apps: Vec::new(),
                 dependencies: Vec::new(),
                 display_icon: b.app.display_icon,
                 icon_rgba: None,
@@ -652,6 +965,45 @@ pub fn attribute_scan_with_options(
         })
         .collect();
 
+    // Record carved-out nested apps on enclosing apps ("contains <Child> — counted under <Child>").
+    let root_entries: Vec<(String, String, Vec<String>)> = raw_apps
+        .iter()
+        .map(|a| {
+            let mut roots: Vec<String> = Vec::new();
+            if let Some(ref inst) = a.install_location {
+                let k = normalize_path_key(inst);
+                if k.len() > 3 {
+                    roots.push(k);
+                }
+            }
+            (a.id.clone(), a.display_name.clone(), roots)
+        })
+        .collect();
+    for app_a in &mut raw_apps {
+        let Some(ref loc_a) = app_a.install_location else {
+            continue;
+        };
+        let ak = normalize_path_key(loc_a);
+        if ak.len() <= 3 {
+            continue;
+        }
+        let mut children_names: Vec<String> = Vec::new();
+        for (id_b, name_b, roots_b) in &root_entries {
+            if id_b == &app_a.id {
+                continue;
+            }
+            if roots_b
+                .iter()
+                .any(|bk| bk != &ak && is_subpath_of(bk, &ak))
+                && !children_names.contains(name_b)
+            {
+                children_names.push(name_b.clone());
+            }
+        }
+        children_names.sort();
+        app_a.carved_out_apps = children_names;
+    }
+
     // If two folder-only apps happen to share the exact same cleaned display name across folders
     // (e.g. D:\Games\Minecraft vs Z:\Games\Minecraft), add a concise drive/leaf suffix so every row is unique.
     let mut name_counts: HashMap<String, usize> = HashMap::new();
@@ -659,7 +1011,7 @@ pub fn attribute_scan_with_options(
         *name_counts.entry(app.display_name.to_ascii_lowercase()).or_default() += 1;
     }
     for app in &mut raw_apps {
-        if (app.id.starts_with("container:") || app.id.starts_with("exe:"))
+        if (app.id.starts_with("container:") || app.id.starts_with("exe:") || app.id.starts_with("pin:"))
             && name_counts
                 .get(&app.display_name.to_ascii_lowercase())
                 .copied()
@@ -755,6 +1107,7 @@ pub fn attribute_scan_with_options(
         catalog_source: String::new(),
         warnings: Vec::new(),
         applied_containers: options.containers.cloned(),
+        applied_zones: Some(effective_zones),
     }
 }
 
@@ -893,6 +1246,7 @@ pub fn merge_drive_rescan(
                 no_touch: fresh_app.no_touch,
                 bases,
                 items: fresh_items_on_target,
+                carved_out_apps: fresh_app.carved_out_apps,
                 dependencies: fresh_app.dependencies,
                 display_icon: fresh_app.display_icon,
                 icon_rgba: fresh_app.icon_rgba,
@@ -999,6 +1353,9 @@ pub fn merge_drive_rescan(
         applied_containers: single_drive_report
             .applied_containers
             .or_else(|| base_report.applied_containers.clone()),
+        applied_zones: single_drive_report
+            .applied_zones
+            .or_else(|| base_report.applied_zones.clone()),
     };
 
     // Preserve growth baselines for untouched apps, and recompute per-drive growth strictly for
@@ -1103,62 +1460,268 @@ fn is_drive_root_child(path_lower: &str) -> bool {
     parts.len() == 2 && parts[0].len() == 2 && parts[0].ends_with(':')
 }
 
-fn is_steam_library_loose_files(path_lower: &str, steam_lib_keys: &[String]) -> bool {
-    let Some(parent) = path_lower.strip_suffix("\\[files]") else {
+fn is_steam_library_loose_dir(path_lower: &str, steam_lib_keys: &[String]) -> bool {
+    let norm = path_lower.trim_end_matches('\\');
+    steam_lib_keys
+        .iter()
+        .any(|lk| norm == lk || norm == format!("{lk}\\steamapps"))
+}
+
+fn is_manifest_green_cache(path_lower: &str, steam_lib_keys: &[String]) -> bool {
+    steam_lib_keys.iter().any(|lk| {
+        path_lower == format!("{lk}\\steamapps\\shadercache")
+            || path_lower == format!("{lk}\\steamapps\\temp")
+    })
+}
+
+fn is_unclaimed_manifest_sibling(path_lower: &str, manifest_containers: &HashSet<String>) -> bool {
+    let trimmed = path_lower.trim_end_matches('\\');
+    let Some((parent, _)) = trimmed.rsplit_once('\\') else {
         return false;
     };
-    if steam_lib_keys
-        .iter()
-        .any(|lk| parent == lk || parent == format!("{lk}\\steamapps"))
+    manifest_containers.contains(parent)
+}
+
+fn is_generic_container_path_for_loose(path_lower: &str, zones: &ZoneRulebook) -> bool {
+    let pk = path_lower.trim_end_matches('\\');
+    if pk.len() <= 2 {
+        return true;
+    }
+    if zones.matches_app_container_dir(path_lower).is_some()
+        || zones.matches_personal_dir(path_lower, &[])
     {
         return true;
     }
-    false
+    matches!(
+        pk.split('\\').last().unwrap_or(""),
+        "users"
+            | "appdata"
+            | "local"
+            | "roaming"
+            | "locallow"
+            | "programs"
+            | "packages"
+            | "windowsapps"
+            | "program files"
+            | "program files (x86)"
+            | "common files"
+            | "programdata"
+    ) || pk.ends_with("\\common files\\steam")
+        || pk.ends_with("\\appdata\\local\\steam")
+        || pk.ends_with("\\appdata\\roaming\\inkscape")
+        || pk.ends_with("\\microsoft\\edge")
+        || pk.ends_with(":\\program files\\amd")
+        || pk.ends_with(":\\program files\\nvidia corporation")
 }
 
-fn match_container_child(
-    containers: &ContainerRulebook,
+fn infer_step5_app_candidate(
     unit_path: &str,
     path_lower: &str,
+    leaf: &str,
     leaf_lower: &str,
-) -> Option<String> {
-    if leaf_lower == "[files]" || leaf_lower == "[root files]" || leaf_lower == "steam" || leaf_lower == "steamlibrary" {
-        return None;
-    }
+    zones: &ZoneRulebook,
+    exe_candidates: Option<&HashMap<String, RootExeCandidate>>,
+    exe_children_by_parent: &HashMap<String, Vec<(&String, &RootExeCandidate)>>,
+) -> Option<(String, Option<String>, Option<String>, AttributionBasis, String)> {
     let trimmed = unit_path.trim_end_matches('\\');
-    let (parent, _) = trimmed.rsplit_once('\\')?;
-    let container_name = containers.matches_container_dir(parent)?;
-    // On the system drive under `Program Files`, never promote Windows inbox OS skeleton folders as apps.
-    if container_name.eq_ignore_ascii_case("Program Files")
-        && path_lower.contains(":\\program files\\")
-        && matches!(
-            leaf_lower,
-            "common files"
-                | "windowsapps"
-                | "windows defender"
-                | "windows mail"
-                | "windows media player"
-                | "windows nt"
-                | "windows photo viewer"
-                | "windows sidebar"
-                | "windowspowershell"
-                | "internet explorer"
-                | "iis"
-                | "iis express"
-                | "modifiablewindowsapps"
-                | "uninstall information"
-                | "reference assemblies"
-                | "microsoft"
-                | "msbuild"
-                | "ruxim"
-                | "application verifier"
-                | "xboxservice"
-                | "activation-renewal"
-        )
-    {
+    let parent_path = trimmed
+        .rsplit_once('\\')
+        .map(|(p, _)| if p.len() == 2 && p.ends_with(':') { format!("{p}\\") } else { p.to_string() })
+        .unwrap_or_default();
+    let parent_key = normalize_path_key(&parent_path);
+    let cand_here = exe_candidates.and_then(|m| m.get(path_lower));
+    let child_exes_here = exe_children_by_parent
+        .get(path_lower)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    // 1. Child of a Group node (explicit PinKind::Group, OR Drive-Root / AppContainer child whose
+    // parent has no own-level exe and >= 2 non-internal children passing 5(a)). An AppContainer itself
+    // is never treated as a publisher Group node.
+    let parent_pin_group = zones.pin_for_path(&parent_path) == Some(PinKind::Group);
+    let parent_is_app_container = if let Some((gp, _)) = parent_path.trim_end_matches('\\').rsplit_once('\\') {
+        zones.matches_app_container_dir(gp).is_some()
+    } else {
+        false
+    };
+    let parent_auto_group = zones.matches_app_container_dir(&parent_path).is_none()
+        && (is_drive_root_child(&parent_key) || parent_is_app_container)
+        && exe_candidates.is_some_and(|m| !m.contains_key(&parent_key))
+        && exe_children_by_parent.get(&parent_key).is_some_and(|v| {
+            v.iter()
+                .filter(|(cpk, _)| {
+                    !is_non_app_internal_subdir_name(&leaf_name(cpk).to_ascii_lowercase())
+                })
+                .count()
+                >= 2
+        });
+    if parent_pin_group || parent_auto_group {
+        if is_program_files_inbox_folder(path_lower, leaf_lower) {
+            return None;
+        }
+        if cand_here.is_some() || parent_pin_group {
+            let group_name = clean_container_folder_name(&leaf_name(&parent_path));
+            let display = cand_here
+                .and_then(|c| c.product_name.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| clean_container_folder_name(leaf));
+            let icon = cand_here.map(|c| c.exe_path.clone());
+            let detail = if parent_pin_group {
+                format!("manual pin Group: {group_name}")
+            } else {
+                format!("group node: {group_name}")
+            };
+            return Some((
+                display,
+                (!group_name.is_empty()).then_some(group_name),
+                icon,
+                AttributionBasis::ExecutableScan,
+                detail,
+            ));
+        }
         return None;
     }
-    Some(container_name)
+
+    // 2. User-declared AppContainer immediate children: preserve user-organized folder names and never overwrite with wrapper exe names.
+    if let Some(container_name) = zones.matches_app_container_dir(&parent_path) {
+        if leaf_lower == "steam"
+            || leaf_lower == "steamlibrary"
+            || is_program_files_inbox_folder(path_lower, leaf_lower)
+        {
+            return None;
+        }
+        let icon = cand_here
+            .map(|c| c.exe_path.clone())
+            .or_else(|| child_exes_here.first().map(|(_, c)| c.exe_path.clone()));
+        return Some((
+            clean_container_folder_name(leaf),
+            None,
+            icon,
+            AttributionBasis::ContainerRule,
+            format!("layout rule: {container_name}"),
+        ));
+    }
+
+    // 3. Drive-root candidate (Part A Drive Root Rule + Part B 5(a) own exe / 5(c) unsplit wrapper).
+    if is_drive_root_child(path_lower) {
+        if let Some(c) = cand_here {
+            let display = c
+                .product_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| clean_container_folder_name(leaf));
+            return Some((
+                display,
+                None,
+                Some(c.exe_path.clone()),
+                AttributionBasis::ExecutableScan,
+                "executable scan (inferred)".to_string(),
+            ));
+        }
+        if !child_exes_here.is_empty() {
+            return Some((
+                clean_container_folder_name(leaf),
+                None,
+                Some(child_exes_here[0].1.exe_path.clone()),
+                AttributionBasis::ExecutableScan,
+                "single-app wrapper (inferred)".to_string(),
+            ));
+        }
+    }
+
+    None
+}
+
+enum TwoSegmentMatch {
+    Unique(usize),
+    AmbiguousTie,
+    NoMatch,
+}
+
+fn is_structural_two_segment_parent(p_lower: &str) -> bool {
+    (p_lower.len() == 2 && p_lower.ends_with(':'))
+        || matches!(
+            p_lower,
+            "users"
+                | "appdata"
+                | "local"
+                | "roaming"
+                | "locallow"
+                | "programdata"
+                | "program files"
+                | "program files (x86)"
+                | "common files"
+                | "programs"
+                | "packages"
+                | "windowsapps"
+        )
+}
+
+fn find_by_two_segment_composition(buckets: &[AppBucket], path: &str) -> TwoSegmentMatch {
+    let trimmed = path.trim_end_matches('\\');
+    let parts: Vec<&str> = trimmed.split('\\').collect();
+    if parts.len() < 3 {
+        return TwoSegmentMatch::NoMatch;
+    }
+    let parent_seg = parts[parts.len() - 2];
+    let leaf_seg = parts[parts.len() - 1];
+    let parent_lower = parent_seg.to_ascii_lowercase();
+    if is_structural_two_segment_parent(&parent_lower) {
+        return TwoSegmentMatch::NoMatch;
+    }
+    let p_words = split_alnum_words(parent_seg);
+    let l_words = split_alnum_words(leaf_seg);
+    if p_words.is_empty() || l_words.is_empty() {
+        return TwoSegmentMatch::NoMatch;
+    }
+    let mut composed = p_words.clone();
+    composed.extend(l_words.clone());
+
+    let p_norm = normalize_app_token(parent_seg);
+    let l_norm = normalize_app_token(leaf_seg);
+    let composed_norm = if !p_norm.is_empty() && !l_norm.is_empty() {
+        format!("{p_norm} {l_norm}")
+    } else {
+        String::new()
+    };
+
+    let mut matched: Vec<(usize, bool)> = Vec::new();
+    for (i, b) in buckets.iter().enumerate() {
+        if b.app.is_store_fallback || b.app.id.starts_with("synth:") {
+            continue;
+        }
+        let exact_words = split_alnum_words(&b.app.display_name) == composed
+            || b.app
+                .aliases
+                .iter()
+                .any(|al| split_alnum_words(al) == composed);
+        let norm_eq = !composed_norm.is_empty()
+            && (normalize_app_token(&b.app.display_name) == composed_norm
+                || b.app
+                    .aliases
+                    .iter()
+                    .any(|al| normalize_app_token(al) == composed_norm));
+        if exact_words || norm_eq {
+            let pub_hit = b
+                .app
+                .publishers
+                .iter()
+                .any(|p| contains_whole_token_sequence(p, parent_seg));
+            matched.push((i, pub_hit));
+        }
+    }
+
+    if matched.is_empty() {
+        TwoSegmentMatch::NoMatch
+    } else if matched.len() == 1 {
+        TwoSegmentMatch::Unique(matched[0].0)
+    } else {
+        TwoSegmentMatch::AmbiguousTie
+    }
 }
 
 #[must_use]
@@ -1277,35 +1840,49 @@ fn is_unattributable_os_noise(path_lower: &str, leaf_lower: &str) -> bool {
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\windows")
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\installer")
         || path_lower.ends_with("\\appdata\\roaming\\microsoft\\crypto")
-        || path_lower.ends_with("\\appdata\\local\\packages\\[files]")
-        || path_lower.ends_with("\\program files\\windowsapps\\[files]")
-        || path_lower.ends_with("\\[root files]")
-        || (path_lower.ends_with("\\[files]")
-            && !path_lower.contains("\\programdata\\nvidia\\")
-            && !path_lower.contains("\\programdata\\nvidia corporation\\"))
+        || path_lower.ends_with("\\appdata\\local\\packages")
+        || path_lower.ends_with("\\program files\\windowsapps")
     {
         return true;
     }
     false
 }
 
-fn find_by_install_location(buckets: &[AppBucket], path_lower: &str) -> Option<(usize, bool)> {
-    let mut best: Option<(usize, usize, bool)> = None;
+fn find_by_exact_install_root(buckets: &[AppBucket], path_lower: &str) -> Option<usize> {
     for (i, b) in buckets.iter().enumerate() {
+        for loc in &b.app.all_install_locations {
+            let lk = normalize_path_key(loc);
+            if lk.len() >= 4 && path_lower == lk {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn find_by_enclosing_install_location(buckets: &[AppBucket], path_lower: &str) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None;
+    for (i, b) in buckets.iter().enumerate() {
+        if b.app.id.starts_with("container:")
+            || b.app.id.starts_with("exe:")
+            || b.app.id.starts_with("pin:")
+            || b.app.id.starts_with("synth:")
+        {
+            continue;
+        }
         for loc in &b.app.all_install_locations {
             let lk = normalize_path_key(loc);
             if lk.len() < 4 {
                 continue;
             }
-            if is_subpath_of(path_lower, &lk) {
-                let is_exact = path_lower == lk;
-                if best.is_none_or(|(_, best_len, _)| lk.len() > best_len) {
-                    best = Some((i, lk.len(), is_exact || is_subpath_of(path_lower, &lk)));
+            if path_lower != lk && is_subpath_of(path_lower, &lk) {
+                if best.is_none_or(|(_, best_len)| lk.len() > best_len) {
+                    best = Some((i, lk.len()));
                 }
             }
         }
     }
-    best.map(|(idx, _, is_inst)| (idx, is_inst))
+    best.map(|(idx, _)| idx)
 }
 
 fn find_by_exact_name(buckets: &[AppBucket], leaf: &str) -> Option<usize> {

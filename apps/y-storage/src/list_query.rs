@@ -666,6 +666,7 @@ mod tests {
             no_touch,
             bases,
             items,
+            carved_out_apps: Vec::new(),
             dependencies: Vec::new(),
             display_icon: None,
             icon_rgba: None,
@@ -1107,18 +1108,21 @@ mod tests {
                 bytes: 5_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\ProgramData\Microsoft\Shared".into(),
                 bytes: 9_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\Users\Win\AppData\Roaming\zeta_cache".into(),
                 bytes: 1_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
         ];
 
@@ -1274,6 +1278,7 @@ mod tests {
             catalog_source: String::new(),
             warnings: vec![],
             applied_containers: None,
+            applied_zones: None,
         };
         let mut stale = FacetFilters {
             publisher: Some("Vanished Publisher".into()),
@@ -1293,42 +1298,49 @@ mod tests {
                 bytes: 2_000_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\Users\Win\AppData\Roaming\UserBenchmark".into(),
                 bytes: 200_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\Users\Win\AppData\LocalLow\CampfireStudio".into(),
                 bytes: 50_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\ProgramData\USOShared".into(),
                 bytes: 120_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\Program Files\IIS".into(),
                 bytes: 15_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Body),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"C:\Users\Win\onecoremsvsmon".into(),
                 bytes: 96_000_000,
                 drive_letter: 'C',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
             UnattributedItem {
                 path: r"D:\Media".into(),
                 bytes: 150_000_000_000,
                 drive_letter: 'D',
                 zone_hint: Some(ZoneKind::Red),
+                is_loose_files: false,
             },
         ];
 
