@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::discovery::{AppTokenMatchKind, contains_whole_token_sequence, match_app_predicate};
 use crate::model::{AppCategory, AttributedApp, ScanReport};
 
 pub const EMBEDDED_APP_CATEGORIES: &str = include_str!("../../../data/app_categories.toml");
@@ -106,16 +107,28 @@ where
     F: Fn(&str) -> bool,
 {
     let name_lower = app.display_name.to_ascii_lowercase();
-    let id_lower = app.id.to_ascii_lowercase();
 
-    // (a) Authored explicit mapping (highest precedence)
+    // (a) Authored explicit mapping (highest precedence): prefer exact full-token match over whole-word slice
+    let mut slice_mapping: Option<&CategoryMappingEntry> = None;
     for mapping in &catalog.mappings {
-        if mapping.app_matches.iter().any(|m| {
-            let nl = m.to_ascii_lowercase();
-            name_lower.contains(&nl) || id_lower.contains(&nl)
-        }) {
-            return (mapping.category, format!("mapping: {}", mapping.reason));
+        for m in &mapping.app_matches {
+            let kind = match_app_predicate(&app.display_name, m)
+                .into_iter()
+                .chain(match_app_predicate(&app.id, m))
+                .max();
+            match kind {
+                Some(AppTokenMatchKind::ExactFullToken) => {
+                    return (mapping.category, format!("mapping: {}", mapping.reason));
+                }
+                Some(AppTokenMatchKind::WholeWordSlice) if slice_mapping.is_none() => {
+                    slice_mapping = Some(mapping);
+                }
+                _ => {}
+            }
         }
+    }
+    if let Some(mapping) = slice_mapping {
+        return (mapping.category, format!("mapping: {}", mapping.reason));
     }
 
     // (b) Hard signals: game library install tree OR system/driver/service/runtime NO-TOUCH identity
@@ -160,22 +173,18 @@ where
         );
     }
 
-    // (c) Publisher / name keyword rules from catalog
-    let pub_lower: Vec<String> = app
-        .publishers
-        .iter()
-        .map(|p| p.to_ascii_lowercase())
-        .collect();
+    // (c) Publisher / name keyword rules from catalog (whole-word token boundary)
     for rule in &catalog.rules {
         let name_hit = !rule.name_contains.is_empty()
             && rule
                 .name_contains
                 .iter()
-                .any(|kw| name_lower.contains(&kw.to_ascii_lowercase()));
+                .any(|kw| contains_whole_token_sequence(&app.display_name, kw));
         let pub_hit = !rule.publisher_contains.is_empty()
             && rule.publisher_contains.iter().any(|kw| {
-                let needle = kw.to_ascii_lowercase();
-                pub_lower.iter().any(|p| p.contains(&needle))
+                app.publishers
+                    .iter()
+                    .any(|p| contains_whole_token_sequence(p, kw))
             });
         if name_hit || pub_hit {
             return (rule.category, format!("rule: {}", rule.reason));

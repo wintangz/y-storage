@@ -3,7 +3,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::{is_subpath_of, normalize_app_token, normalize_path_key};
+use crate::discovery::{
+    contains_whole_token_sequence, is_subpath_of, normalize_app_token, normalize_path_key,
+};
 use crate::model::{
     AttributedApp, DependencyConfidence, DependencyKind, DependencyRecord, ReverseConsumer,
     ReverseDependencyEntry, ScanReport,
@@ -194,22 +196,7 @@ pub struct ResolvedTargetStatus {
 }
 
 pub fn contains_token_boundary(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let mut start = 0usize;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let end = abs + needle.len();
-        let left_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
-        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if left_ok && right_ok {
-            return true;
-        }
-        start = abs + 1;
-    }
-    false
+    contains_whole_token_sequence(haystack, needle)
 }
 
 pub fn resolve_catalog_targets<F>(
@@ -333,21 +320,24 @@ fn upsert_dep(map: &mut BTreeMap<String, PendingDep>, cand: PendingDep) {
 }
 
 fn is_self_dependency(app_name: &str, target: &CatalogTarget) -> bool {
-    let al = app_name.to_ascii_lowercase();
     if target
         .registry_matches
         .iter()
-        .any(|m| contains_token_boundary(&al, &m.to_ascii_lowercase()))
+        .any(|m| contains_whole_token_sequence(app_name, m))
     {
         return true;
     }
     if target.id.starts_with("dotnet-")
-        && !al.contains("visual studio")
-        && (al.contains(".net") || al.contains("desktop runtime"))
+        && !contains_whole_token_sequence(app_name, "visual studio")
+        && (contains_whole_token_sequence(app_name, ".net")
+            || contains_whole_token_sequence(app_name, "desktop runtime"))
     {
         return true;
     }
-    if target.id.starts_with("vcpp-") && al.contains("visual c++") && al.contains("redistributable") {
+    if target.id.starts_with("vcpp-")
+        && contains_whole_token_sequence(app_name, "visual c++")
+        && contains_whole_token_sequence(app_name, "redistributable")
+    {
         return true;
     }
     let a = normalize_app_token(app_name);
@@ -689,7 +679,7 @@ pub fn analyze_report_dependencies(
                 .map(|p| normalize_vendor_key(p))
                 .filter(|v| v.len() >= 3)
                 .collect();
-            let app_is_launcher = app.display_name.to_ascii_lowercase().contains("launcher")
+            let app_is_launcher = contains_whole_token_sequence(&app.display_name, "launcher")
                 || target_statuses.iter().any(|(_, s)| {
                     s.target.kind == DependencyKind::PlatformLauncher
                         && is_self_dependency(&app.display_name, &s.target)
@@ -719,14 +709,22 @@ pub fn analyze_report_dependencies(
 
                 let target_compact = normalize_app_token(&st.target.name).replace(' ', "");
                 let folder_kinship = (!target_compact.is_empty()
-                    && item_tokens_lower
-                        .iter()
-                        .any(|tok| tok.replace(' ', "").contains(&target_compact)))
+                    && item_tokens_lower.iter().any(|tok| {
+                        contains_whole_token_sequence(tok, &st.target.name)
+                            || tok.split('\\').any(|seg| {
+                                normalize_app_token(seg).replace(' ', "") == target_compact
+                            })
+                    }))
                     || (tid == "epic-online-services"
-                        && item_tokens_lower.iter().any(|tok| tok.contains("eosoverlay")))
+                        && item_tokens_lower
+                            .iter()
+                            .any(|tok| contains_whole_token_sequence(tok, "eosoverlay")))
                     || registered_svcs.iter().any(|svc| {
                         let sk = svc.service_name.to_ascii_lowercase();
-                        sk.len() >= 6 && item_tokens_lower.iter().any(|tok| tok.contains(&sk))
+                        sk.len() >= 6
+                            && item_tokens_lower
+                                .iter()
+                                .any(|tok| contains_whole_token_sequence(tok, &sk))
                     });
 
                 let same_pub_launcher_kinship = app_is_launcher
@@ -873,13 +871,7 @@ pub fn analyze_report_dependencies(
             }
         }
 
-        // Source (4): Curated dependency catalog rules (INFERRED).
-        let app_name_lower = app.display_name.to_ascii_lowercase();
-        let pub_lower: Vec<String> = app
-            .publishers
-            .iter()
-            .map(|p| p.to_ascii_lowercase())
-            .collect();
+        // Source (4): Curated dependency catalog rules (INFERRED, token-boundary matched).
         let install_lower = app
             .install_location
             .as_deref()
@@ -891,16 +883,17 @@ pub fn analyze_report_dependencies(
                 || rule
                     .app_matches
                     .iter()
-                    .any(|m| app_name_lower.contains(&m.to_ascii_lowercase()));
+                    .any(|m| contains_whole_token_sequence(&app.display_name, m));
             let pub_ok = rule.publisher_matches.is_empty()
                 || rule.publisher_matches.iter().any(|pm| {
-                    let needle = pm.to_ascii_lowercase();
-                    pub_lower.iter().any(|p| p.contains(&needle))
+                    app.publishers
+                        .iter()
+                        .any(|p| contains_whole_token_sequence(p, pm))
                 });
             let path_ok = rule
                 .install_path_contains
                 .as_deref()
-                .is_none_or(|sub| install_lower.contains(&sub.to_ascii_lowercase()));
+                .is_none_or(|sub| contains_whole_token_sequence(&install_lower, sub));
 
             if name_ok && pub_ok && path_ok {
                 if let Some(st) = target_statuses.get(&rule.target_id) {

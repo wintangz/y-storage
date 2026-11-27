@@ -90,12 +90,17 @@ pub fn extract_exe_path_from_command(raw: &str) -> Option<String> {
 
 #[must_use]
 pub fn infer_install_root_from_exe(raw_cmd_or_icon: &str) -> Option<String> {
+    let raw_lower = raw_cmd_or_icon.trim().to_ascii_lowercase();
+    if raw_lower.contains("://") {
+        return None;
+    }
     let exe = extract_exe_path_from_command(raw_cmd_or_icon)?;
     let lower = exe.to_ascii_lowercase();
     if lower.contains("\\windows\\")
         || lower.contains("msiexec.exe")
         || lower.contains("\\package cache\\")
         || lower.contains("\\windowsapps\\")
+        || lower.contains("\\steam\\games\\")
     {
         return None;
     }
@@ -238,6 +243,116 @@ pub fn classify_no_touch(display_name: &str, publisher: &str) -> Option<NoTouchC
 }
 
 #[must_use]
+pub fn split_alnum_words(s: &str) -> Vec<String> {
+    let lower = s
+        .to_ascii_lowercase()
+        .replace('™', "")
+        .replace('®', "")
+        .replace('©', "");
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+fn is_release_patch_token(w: &str) -> bool {
+    let bytes = w.as_bytes();
+    let Some(first_alpha) = bytes.iter().position(|b| b.is_ascii_alphabetic()) else {
+        return false;
+    };
+    if first_alpha == 0 {
+        return false;
+    }
+    let prefix = &w[..first_alpha];
+    let rest = &w[first_alpha..];
+    if !prefix.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    for tag in ["rc", "a", "b", "f", "p", "r"] {
+        if let Some(tail) = rest.strip_prefix(tag) {
+            return !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AppTokenMatchKind {
+    WholeWordSlice = 1,
+    ExactFullToken = 2,
+}
+
+/// Token-boundary app/publisher predicate matcher: matches only when `predicate` equals the
+/// candidate's normalized token identity or appears as a contiguous whole-word token slice —
+/// never as a substring inside a longer alphanumeric token (e.g. `"steam"` in `"msteams"`).
+#[must_use]
+pub fn match_app_predicate(haystack: &str, predicate: &str) -> Option<AppTokenMatchKind> {
+    let pt_lower = predicate.trim().to_ascii_lowercase();
+    if let Some(first_dot_tok) = pt_lower.split_whitespace().next() {
+        if first_dot_tok.starts_with('.') {
+            let dot_stem = first_dot_tok.trim_end_matches('.');
+            if !haystack.to_ascii_lowercase().contains(dot_stem) {
+                return None;
+            }
+        }
+    }
+    let h_words = split_alnum_words(haystack);
+    let p_words = split_alnum_words(predicate);
+    if h_words.is_empty() || p_words.is_empty() {
+        return None;
+    }
+    if h_words == p_words {
+        return Some(AppTokenMatchKind::ExactFullToken);
+    }
+    let has_digits = predicate.chars().any(|c| c.is_ascii_digit());
+    let h_norm = if has_digits {
+        String::new()
+    } else {
+        normalize_app_token(haystack)
+    };
+    let p_norm = if has_digits {
+        String::new()
+    } else {
+        normalize_app_token(predicate)
+    };
+    if !has_digits
+        && !p_norm.is_empty()
+        && (h_norm == p_norm || h_norm.strip_prefix("store ") == Some(p_norm.as_str()))
+    {
+        return Some(AppTokenMatchKind::ExactFullToken);
+    }
+    if h_words.len() >= p_words.len() && h_words.windows(p_words.len()).any(|w| w == p_words.as_slice())
+    {
+        return Some(AppTokenMatchKind::WholeWordSlice);
+    }
+    if !has_digits && !p_norm.is_empty() {
+        let hn_words: Vec<&str> = h_norm.split_whitespace().collect();
+        let pn_words: Vec<&str> = p_norm.split_whitespace().collect();
+        if !pn_words.is_empty()
+            && hn_words.len() >= pn_words.len()
+            && hn_words.windows(pn_words.len()).any(|w| w == pn_words.as_slice())
+        {
+            return Some(AppTokenMatchKind::WholeWordSlice);
+        }
+    }
+    None
+}
+
+#[must_use]
+pub fn contains_whole_token_sequence(haystack: &str, predicate: &str) -> bool {
+    match_app_predicate(haystack, predicate).is_some()
+}
+
+#[must_use]
 pub fn normalize_app_token(name: &str) -> String {
     let lower = name
         .to_ascii_lowercase()
@@ -261,9 +376,19 @@ pub fn normalize_app_token(name: &str) -> String {
             let is_pure_num = w.chars().all(|c| c.is_ascii_digit());
             !is_ver
                 && !is_pure_num
+                && !is_release_patch_token(w)
                 && !matches!(
                     *w,
-                    "version" | "64" | "bit" | "x64" | "x86" | "user" | "edition" | "update"
+                    "version"
+                        | "64"
+                        | "bit"
+                        | "x64"
+                        | "x86"
+                        | "arm64"
+                        | "amd64"
+                        | "user"
+                        | "edition"
+                        | "update"
                 )
         })
         .collect();

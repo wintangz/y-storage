@@ -44,7 +44,7 @@ reason = "Microsoft Casual Games solitaire collection"
 
 [[mappings]]
 category = "Games"
-app_matches = ["minecraft"]
+app_matches = ["minecraft", "microsoft.minecraftuwp"]
 reason = "Mojang / Microsoft sandbox game package"
 
 [[mappings]]
@@ -103,6 +103,16 @@ app_matches = ["vanillartxapp"]
 reason = "Vanilla RTX Minecraft launcher / mod manager"
 
 [[mappings]]
+category = "System & Runtimes"
+app_matches = ["microsoft edge webview2 runtime", "edge webview2"]
+reason = "Microsoft Edge WebView2 shared browser runtime"
+
+[[mappings]]
+category = "Utilities"
+app_matches = ["microsoft.edge.gameassist"]
+reason = "Microsoft Edge Game Assist companion overlay widget"
+
+[[mappings]]
 category = "Browsers"
 app_matches = ["microsoft edge"]
 reason = "Microsoft Chromium web browser"
@@ -149,7 +159,7 @@ reason = "Microsoft Visual Studio IDE & installer"
 
 [[mappings]]
 category = "Development"
-app_matches = ["visual studio code"]
+app_matches = ["visual studio code", "microsoft.visualstudiocode"]
 reason = "Visual Studio Code source editor"
 
 [[mappings]]
@@ -355,15 +365,73 @@ reason = "Developer SDK / terminal keyword"
 
 [[rules]]
 category = "Media & Creative"
-name_contains = ["zunevideo", "zunemusic", "videoextension", "imageextension", "mediaextensions", "windowscamera", "soundrecorder", "3dviewer", "photocraft", "filmcraft", "artcraft", "dtsxultra"]
+name_contains = [
+  "zunevideo",
+  "zunemusic",
+  "videoextension",
+  "vp9videoextensions",
+  "avcencodervideoextension",
+  "av1videoextension",
+  "mpeg2videoextension",
+  "imageextension",
+  "heifimageextension",
+  "rawimageextension",
+  "webpimageextension",
+  "mediaextensions",
+  "webmediaextensions",
+  "windowscamera",
+  "soundrecorder",
+  "windowssoundrecorder",
+  "3dviewer",
+  "microsoft3dviewer",
+  "photocraft",
+  "filmcraft",
+  "artcraft",
+  "dtsxultra",
+]
 reason = "Audio/video codec, camera, or creative media keyword"
 
 [[rules]]
 category = "Productivity"
-name_contains = ["calculator", "notepad", "alarms", "maps", "powerautomate", "bingweather", "bingnews", "bingsearch"]
+name_contains = [
+  "calculator",
+  "windowscalculator",
+  "notepad",
+  "windowsnotepad",
+  "alarms",
+  "windowsalarms",
+  "maps",
+  "windowsmaps",
+  "powerautomate",
+  "powerautomatedesktop",
+  "bingweather",
+  "bingnews",
+  "bingsearch",
+]
 reason = "Personal productivity & information utility keyword"
 
 [[rules]]
 category = "Utilities"
-name_contains = ["controlpanel", "audiocontrol", "eartrumpet", "screensketch", "quickassist", "feedbackhub", "gethelp", "sechealthui", "desktopappinstaller", "winget", "xboxgamingoverlay", "xboxgameoverlay", "gameassist", "mixedreality", "auto clicker", "contextmenu"]
+name_contains = [
+  "controlpanel",
+  "nvidiacontrolpanel",
+  "audiocontrol",
+  "realtekaudiocontrol",
+  "eartrumpet",
+  "screensketch",
+  "quickassist",
+  "feedbackhub",
+  "windowsfeedbackhub",
+  "gethelp",
+  "sechealthui",
+  "desktopappinstaller",
+  "winget",
+  "xboxgamingoverlay",
+  "xboxgameoverlay",
+  "gameassist",
+  "mixedreality",
+  "auto clicker",
+  "contextmenu",
+  "treesizefreecontextmenu",
+]
 reason = "System companion, overlay, diagnostics, or desktop utility keyword"

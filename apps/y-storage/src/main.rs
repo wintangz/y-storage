@@ -426,6 +426,20 @@ fn render_screenshot_frame(
                 ui_state.expanded_apps.insert(vcpp.id.clone());
             }
         }
+        "msteams-drawer" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            if ui_state.search_query.is_empty() {
+                ui_state.search_query = "MSTeams".to_string();
+            }
+            if let Some(teams) = report
+                .apps
+                .iter()
+                .find(|a| a.display_name.eq_ignore_ascii_case("Store: MSTeams"))
+            {
+                ui_state.expanded_apps.insert(teams.id.clone());
+            }
+        }
         "ledger-resized" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;

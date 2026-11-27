@@ -523,6 +523,278 @@ fn catalog_embed_override_and_corrupt_fallback_work_as_specified() {
 }
 
 #[test]
+fn msteams_and_steam_collision_attributes_steam_folders_to_steam_and_cleans_msteams() {
+    use y_core::attribution::match_installed_app_index;
+    use y_core::categories::classify_report_apps;
+    use y_core::dependencies::{WindowsServiceEntry, resolve_catalog_targets_with_registry};
+    use y_core::discovery::build_registry_catalog;
+    use y_core::model::AppCategory;
+
+    // Part 1: protocol launcher redirect (`steam://uninstall/...`) + Steam icon cache never shadows `Steam`.
+    let raw = vec![
+        RawRegistryApp {
+            hive_view: "HKLM-64".into(),
+            subkey_name: "Steam App 376210".into(),
+            display_name: "The Isle".into(),
+            display_version: String::new(),
+            publisher: "Afterthought LLC".into(),
+            install_location: String::new(),
+            uninstall_string: "\"Z:\\Games\\Steam\\steam.exe\" steam://uninstall/376210".into(),
+            display_icon: "Z:\\Games\\Steam\\steam\\games\\dcc409f581316cdb0deb73f8bcc5202d32edaee8.ico".into(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "Steam".into(),
+            display_name: "Steam".into(),
+            display_version: "2.10.91.91".into(),
+            publisher: "Valve Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: "Z:\\Games\\Steam\\uninstall.exe".into(),
+            display_icon: "Z:\\Games\\Steam\\uninstall.exe".into(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+    ];
+    let reg_cat = build_registry_catalog(&raw, Some("Z:\\Games\\Steam"));
+    assert_eq!(reg_cat.apps.len(), 2);
+    let steam_reg = reg_cat
+        .apps
+        .iter()
+        .find(|a| a.display_name == "Steam")
+        .expect("Steam must remain its own canonical app row");
+    assert_eq!(
+        steam_reg.inferred_install_location.as_deref(),
+        Some("Z:\\Games\\Steam")
+    );
+    let the_isle_reg = reg_cat
+        .apps
+        .iter()
+        .find(|a| a.display_name == "The Isle")
+        .unwrap();
+    assert_eq!(the_isle_reg.inferred_install_location, None);
+
+    // Part 2: `"Store: MSTeams"` placed BEFORE `"Steam"` must NEVER match `"steam"` in token, category, or dep lookup.
+    let drive = DriveInfo {
+        letter: 'C',
+        root: "C:\\".into(),
+        total_bytes: 2_000_000_000,
+        free_bytes: 500_000_000,
+        used_bytes: 1_500_000_000,
+        is_system_drive: true,
+        full_walk_enabled: true,
+        exclusions: vec!["C:\\Windows".into()],
+    };
+    let apps = vec![
+        InstalledApp {
+            id: "store:msteams_8wekyb3d8bbwe".into(),
+            display_name: "Store: MSTeams".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["Microsoft Store".into()],
+            direct_install_location: None,
+            inferred_install_location: None,
+            all_install_locations: vec![],
+            no_touch: None,
+            is_store_fallback: true,
+            display_icon: None,
+        },
+        steam_reg.clone(),
+    ];
+    assert_eq!(match_installed_app_index(&apps, &["steam"]), Some(1));
+
+    let units = vec![
+        ScannedUnit {
+            path: "C:\\Program Files\\WindowsApps\\MSTeams_25017.203.3370.1174_x64__8wekyb3d8bbwe".into(),
+            drive_letter: 'C',
+            bytes: 279_412_182,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Packages\\MSTeams_8wekyb3d8bbwe".into(),
+            drive_letter: 'C',
+            bytes: 16_384,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Steam\\htmlcache".into(),
+            drive_letter: 'C',
+            bytes: 777_226_881,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Steam\\cefdata".into(),
+            drive_letter: 'C',
+            bytes: 19_136_578,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Program Files (x86)\\Common Files\\Steam\\drivers".into(),
+            drive_letter: 'C',
+            bytes: 8_966_361,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+    ];
+
+    let mut report = attribute_scan(
+        1,
+        "2026-11-27 16:45:00".into(),
+        5,
+        vec![drive],
+        reg_cat.stats,
+        &apps,
+        &HashMap::new(),
+        &units,
+        None,
+    );
+    classify_report_apps(&mut report, |_| false);
+    let catalog = DependencyCatalog::load_from_disk_or_embedded();
+    let services = vec![WindowsServiceEntry {
+        service_name: "Steam Client Service".into(),
+        display_name: "Steam Client Service".into(),
+        service_type: 16,
+        raw_image_path: "C:\\Program Files (x86)\\Common Files\\Steam\\SteamService.exe".into(),
+        normalized_image_path: "C:\\Program Files (x86)\\Common Files\\Steam\\SteamService.exe".into(),
+        depend_on_service: vec![],
+    }];
+    let statuses = resolve_catalog_targets_with_registry(
+        &catalog,
+        &report.apps,
+        &report.installed_registry_names,
+        &services,
+        |_| false,
+    );
+    analyze_report_dependencies(&mut report, &catalog, &services, &HashMap::new(), &statuses);
+
+    let msteams = report
+        .apps
+        .iter()
+        .find(|a| a.display_name == "Store: MSTeams")
+        .expect("Store: MSTeams present");
+    assert_eq!(msteams.total_bytes, 279_412_182 + 16_384);
+    assert_eq!(msteams.items.len(), 2);
+    assert!(msteams.items.iter().all(|it| it.path.contains("MSTeams")));
+    assert_eq!(msteams.category, AppCategory::Communication);
+    assert!(!msteams.dependencies.iter().any(|d| d.target_id == "steam"));
+
+    let steam = report
+        .apps
+        .iter()
+        .find(|a| a.display_name == "Steam")
+        .expect("Steam present");
+    assert_eq!(steam.total_bytes, 777_226_881 + 19_136_578 + 8_966_361);
+    assert_eq!(steam.items.len(), 3);
+    assert_eq!(steam.category, AppCategory::PlatformsAndLaunchers);
+}
+
+#[test]
+fn generic_substring_and_ambiguous_app_name_collisions_never_force_match() {
+    use y_core::attribution::match_installed_app_index;
+
+    let make_app = |id: &str, name: &str, pub_name: &str| InstalledApp {
+        id: id.into(),
+        display_name: name.into(),
+        display_version: String::new(),
+        uninstall_guids: vec![],
+        aliases: vec![],
+        publishers: vec![pub_name.into()],
+        direct_install_location: None,
+        inferred_install_location: None,
+        all_install_locations: vec![],
+        no_touch: None,
+        is_store_fallback: false,
+        display_icon: None,
+    };
+
+    // 1. Mid-word substring `X = "Nova"` inside `Y = "SuperNova"` (Y ordered first): never matches Y, picks X.
+    let apps_mid = vec![
+        make_app("reg:supernova", "SuperNova", "SuperNova Labs"),
+        make_app("reg:nova", "Nova", "Nova Corp"),
+    ];
+    assert_eq!(match_installed_app_index(&apps_mid, &["nova"]), Some(1));
+    assert_eq!(
+        match_installed_app_index(&[make_app("reg:supernova", "SuperNova", "SuperNova Labs")], &["nova"]),
+        None
+    );
+
+    // 2. Whole-word prefix `X = "Python 3.15.1 (64-bit)"` vs `Y = "Python Launcher"` (Y first): exact full token beats partial.
+    let apps_exact_pref = vec![
+        make_app("reg:python-launcher", "Python Launcher", "Python Software Foundation"),
+        make_app("reg:python", "Python 3.15.1 (64-bit)", "Python Software Foundation"),
+    ];
+    assert_eq!(match_installed_app_index(&apps_exact_pref, &["python"]), Some(1));
+
+    // 3. Ambiguous multi-app partial match ("Widget Pro" + "Widget Studio", no exact "Widget"): refuses to force-match and lands in Unattributed.
+    let apps_ambig = vec![
+        make_app("reg:widget-pro", "Widget Pro", "Widget Inc"),
+        make_app("reg:widget-studio", "Widget Studio", "Widget Inc"),
+    ];
+    assert_eq!(match_installed_app_index(&apps_ambig, &["widget"]), None);
+
+    let drive = DriveInfo {
+        letter: 'C',
+        root: "C:\\".into(),
+        total_bytes: 1_000_000,
+        free_bytes: 800_000,
+        used_bytes: 200_000,
+        is_system_drive: true,
+        full_walk_enabled: true,
+        exclusions: vec!["C:\\Windows".into()],
+    };
+    let units = vec![
+        // Real MSTeams fallback vs absent Steam (using Generic X/Y via XData):
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Packages\\SuperWidget_8wekyb3d8bbwe".into(),
+            drive_letter: 'C',
+            bytes: 100_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Steam\\htmlcache".into(),
+            drive_letter: 'C',
+            bytes: 50_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+    ];
+    let apps_fallback = vec![
+        make_app("store:supernova", "Store: SuperSteamView", "Microsoft Store"),
+    ];
+    let rep = attribute_scan(
+        1,
+        "2026-11-27 16:45:00".into(),
+        5,
+        vec![drive],
+        RegistryDiscoveryStats {
+            raw_display_name_entries: 1,
+            raw_with_install_location: 0,
+            canonical_apps: 1,
+            canonical_with_direct_install_location: 0,
+            canonical_with_inferred_install_location: 0,
+        },
+        &apps_fallback,
+        &HashMap::new(),
+        &units,
+        None,
+    );
+    assert!(rep.unattributed.iter().any(|u| u.path.ends_with("\\AppData\\Local\\Steam\\htmlcache")));
+    assert_eq!(
+        rep.total_apps_bytes_on_drive('C') + rep.total_unattributed_on_drive('C') + rep.windows_system[0].total_bytes + 800_000,
+        1_000_000
+    );
+}
+
+#[test]
 fn vc_package_cache_lands_on_its_own_versions_row() {
     use y_core::discovery::build_registry_catalog;
 

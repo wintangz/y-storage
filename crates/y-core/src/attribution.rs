@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::discovery::{
-    extract_guid, is_subpath_of, normalize_app_token, normalize_path_key, path_drive_letter,
+    AppTokenMatchKind, contains_whole_token_sequence, extract_guid, is_subpath_of,
+    match_app_predicate, normalize_app_token, normalize_path_key, path_drive_letter,
+    versioned_family_identity_key,
 };
 use crate::history::{HistoryEntryRef, compute_growth};
 use crate::model::{
@@ -650,16 +652,69 @@ fn find_by_exact_name(buckets: &[AppBucket], leaf: &str) -> Option<usize> {
     None
 }
 
-fn find_app_matching(buckets: &[AppBucket], predicates: &[&str]) -> Option<usize> {
-    for pred in predicates {
-        for (i, b) in buckets.iter().enumerate() {
-            let dn = b.app.display_name.to_ascii_lowercase();
-            if dn.contains(pred) {
-                return Some(i);
+/// Selects an `InstalledApp` index using token-boundary matching.
+/// Prefers exact full-token matches over whole-word slice matches, never matches substrings inside
+/// longer words, and returns `None` when multiple unrelated apps tie ambiguously at the winning tier.
+#[must_use]
+pub fn match_installed_app_index(apps: &[InstalledApp], predicates: &[&str]) -> Option<usize> {
+    match_installed_app_by(apps.iter(), predicates)
+}
+
+fn match_installed_app_by<'a>(
+    apps: impl Iterator<Item = &'a InstalledApp> + Clone,
+    predicates: &[&str],
+) -> Option<usize> {
+    for &pred in predicates {
+        let mut exact_hits: Vec<(usize, &'a InstalledApp)> = Vec::new();
+        let mut slice_hits: Vec<(usize, &'a InstalledApp)> = Vec::new();
+        for (i, app) in apps.clone().enumerate() {
+            let mut best = match_app_predicate(&app.display_name, pred);
+            for alias in &app.aliases {
+                if let Some(kind) = match_app_predicate(alias, pred) {
+                    if best.is_none_or(|prev| kind > prev) {
+                        best = Some(kind);
+                    }
+                }
+            }
+            match best {
+                Some(AppTokenMatchKind::ExactFullToken) => exact_hits.push((i, app)),
+                Some(AppTokenMatchKind::WholeWordSlice) => slice_hits.push((i, app)),
+                None => {}
             }
         }
+        let candidates = if !exact_hits.is_empty() {
+            exact_hits
+        } else {
+            slice_hits
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+        if candidates.len() == 1 {
+            return Some(candidates[0].0);
+        }
+        // Only resolve multi-row ties automatically when every candidate is a split row of the
+        // exact same canonical versioned product family (e.g. .NET SDK 7 & 10); otherwise refuse
+        // to force-match so genuinely ambiguous folders fall through cleanly to Unattributed.
+        let family_keys: Vec<Option<String>> = candidates
+            .iter()
+            .map(|(_, app)| {
+                versioned_family_identity_key(&app.display_name, &app.display_version)
+                    .and_then(|fk| fk.split(':').next().map(str::to_string))
+            })
+            .collect();
+        if let Some(Some(first_fam)) = family_keys.first() {
+            if family_keys.iter().all(|k| k.as_deref() == Some(first_fam.as_str())) {
+                return Some(candidates[0].0);
+            }
+        }
+        return None;
     }
     None
+}
+
+fn find_app_matching(buckets: &[AppBucket], predicates: &[&str]) -> Option<usize> {
+    match_installed_app_by(buckets.iter().map(|b| &b.app), predicates)
 }
 
 fn ensure_synthetic_app(
@@ -835,12 +890,12 @@ fn find_by_token(
         if let Some(ref g) = opt_guid {
             if let Some(app_name) = guid_to_app_name.get(g) {
                 let an_lower = app_name.to_ascii_lowercase();
-                if an_lower.contains("ea app") {
+                if contains_whole_token_sequence(&an_lower, "ea app") {
                     if let Some(idx) = find_app_matching(buckets, &["ea app"]) {
                         return Some((idx, false));
                     }
                 }
-                if an_lower.contains("visual studio") {
+                if contains_whole_token_sequence(&an_lower, "visual studio") {
                     if let Some(idx) = find_app_matching(
                         buckets,
                         &["visual studio build tools", "visual studio community", "visual studio"],
@@ -848,70 +903,73 @@ fn find_by_token(
                         return Some((idx, false));
                     }
                 }
-                if an_lower.contains("windows software development kit")
-                    || an_lower.contains("windows sdk")
-                    || an_lower.contains("windows app certification")
-                    || an_lower.contains("universal crt")
-                    || an_lower.contains("windows team extension")
-                    || an_lower.contains("universal general midi")
-                    || an_lower.contains("winrt intellisense")
-                    || an_lower.contains("kits configuration")
-                    || an_lower.contains("application verifier")
-                    || an_lower.contains("msi development tools")
-                    || an_lower.contains("sdk arm64")
-                    || an_lower.contains("windows desktop extension")
-                    || an_lower.contains("windows iot extension")
-                    || an_lower.contains("windows mobile extension")
-                    || an_lower.contains("winappdeploy")
+                if contains_whole_token_sequence(&an_lower, "windows software development kit")
+                    || contains_whole_token_sequence(&an_lower, "windows sdk")
+                    || contains_whole_token_sequence(&an_lower, "windows app certification")
+                    || contains_whole_token_sequence(&an_lower, "universal crt")
+                    || contains_whole_token_sequence(&an_lower, "windows team extension")
+                    || contains_whole_token_sequence(&an_lower, "universal general midi")
+                    || contains_whole_token_sequence(&an_lower, "winrt intellisense")
+                    || contains_whole_token_sequence(&an_lower, "kits configuration")
+                    || contains_whole_token_sequence(&an_lower, "application verifier")
+                    || contains_whole_token_sequence(&an_lower, "msi development tools")
+                    || contains_whole_token_sequence(&an_lower, "sdk arm64")
+                    || contains_whole_token_sequence(&an_lower, "windows desktop extension")
+                    || contains_whole_token_sequence(&an_lower, "windows iot extension")
+                    || contains_whole_token_sequence(&an_lower, "windows mobile extension")
+                    || contains_whole_token_sequence(&an_lower, "winappdeploy")
                 {
                     let ver = opt_cache_ver
                         .clone()
                         .or_else(|| extract_ver_token_from_text(&an_lower));
                     if let Some(idx) = find_best_versioned_bucket(
                         buckets,
-                        |dn| dn.contains("windows software development kit"),
+                        |dn| contains_whole_token_sequence(dn, "windows software development kit"),
                         ver.as_deref(),
                         None,
                     ) {
                         return Some((idx, false));
                     }
                 }
-                if an_lower.contains("visual c++") {
+                if contains_whole_token_sequence(&an_lower, "visual c++") {
                     let target_ver = opt_cache_ver
                         .clone()
                         .or_else(|| extract_ver_token_from_text(&an_lower));
                     let target_arch = extract_arch_from_text(&an_lower);
                     if let Some(idx) = find_best_versioned_bucket(
                         buckets,
-                        |dn| dn.contains("visual c++") && dn.contains("redistributable"),
+                        |dn| {
+                            contains_whole_token_sequence(dn, "visual c++")
+                                && contains_whole_token_sequence(dn, "redistributable")
+                        },
                         target_ver.as_deref(),
                         target_arch,
                     ) {
                         return Some((idx, false));
                     }
                 }
-                if an_lower.contains("windows desktop runtime") {
+                if contains_whole_token_sequence(&an_lower, "windows desktop runtime") {
                     let target_ver = extract_ver_token_from_text(&an_lower)
                         .or_else(|| opt_cache_ver.clone());
                     let target_arch = extract_arch_from_text(&an_lower);
                     if let Some(idx) = find_best_versioned_bucket(
                         buckets,
-                        |dn| dn.contains("windows desktop runtime"),
+                        |dn| contains_whole_token_sequence(dn, "windows desktop runtime"),
                         target_ver.as_deref(),
                         target_arch,
                     ) {
                         return Some((idx, false));
                     }
                 }
-                if an_lower.contains(".net") {
+                if contains_whole_token_sequence(&an_lower, ".net") {
                     let target_arch = extract_arch_from_text(&an_lower);
                     let named_ver = extract_ver_token_from_text(&an_lower);
                     // Prefer exact .NET Runtime - <ver> match when component belongs to an installed runtime (e.g. 8.0.21)
                     if let Some(ref nv) = named_ver {
                         if let Some(idx) = buckets.iter().position(|b| {
                             let dn = b.app.display_name.to_ascii_lowercase();
-                            dn.contains(".net runtime")
-                                && !dn.contains("desktop")
+                            contains_whole_token_sequence(&dn, ".net runtime")
+                                && !contains_whole_token_sequence(&dn, "desktop")
                                 && app_effective_version(&b.app)
                                     .as_deref()
                                     .is_some_and(|bv| versions_match(nv, bv))
@@ -945,7 +1003,7 @@ fn find_by_token(
                         });
                     if let Some(idx) = find_best_versioned_bucket(
                         buckets,
-                        |dn| dn.contains(".net sdk"),
+                        |dn| contains_whole_token_sequence(dn, ".net sdk"),
                         inferred_sdk_ver.as_deref(),
                         target_arch,
                     ) {
@@ -1138,7 +1196,7 @@ fn find_by_token(
                 "\\appdata\\local\\microsoft\\office",
                 "\\appdata\\roaming\\microsoft\\office",
             ],
-            &["microsoft office"],
+            &["microsoft office ltsc", "microsoft 365", "microsoft office professional", "microsoft office"],
             false,
         ),
         // Logitech G Hub
@@ -1385,7 +1443,10 @@ fn find_by_token(
         || path_lower.contains("\\common files\\microsoft shared")
         || path_lower.contains("\\appdata\\local\\packages\\oice_16_")
     {
-        if let Some(idx) = find_app_matching(buckets, &["microsoft office"]) {
+        if let Some(idx) = find_app_matching(
+            buckets,
+            &["microsoft office ltsc", "microsoft 365", "microsoft office professional", "microsoft office"],
+        ) {
             return Some((idx, !path_lower.contains("\\appdata\\local\\packages\\")));
         }
     }
@@ -1631,11 +1692,31 @@ fn path_matches_token(path_lower: &str, leaf_lower: &str, needle: &str) -> bool 
 
 fn find_by_publisher(buckets: &[AppBucket], leaf: &str) -> Option<usize> {
     let leaf_tok = normalize_app_token(leaf);
-    if leaf_tok.len() < 4 {
+    if leaf_tok.len() < 4
+        || matches!(
+            leaf_tok.as_str(),
+            "microsoft"
+                | "microsoft corporation"
+                | "studio"
+                | "studios"
+                | "software"
+                | "games"
+                | "interactive"
+                | "entertainment"
+                | "technologies"
+                | "systems"
+                | "digital"
+                | "corporation"
+                | "company"
+                | "limited"
+        )
+    {
         return None;
     }
-    let mut matches: Vec<usize> = Vec::new();
+    let mut strong_matches: Vec<usize> = Vec::new();
+    let mut slice_matches: Vec<usize> = Vec::new();
     for (i, b) in buckets.iter().enumerate() {
+        let mut best: Option<AppTokenMatchKind> = None;
         for pub_name in &b.app.publishers {
             let p_tok = normalize_app_token(pub_name);
             // Never attribute solely on generic "Microsoft" / "Microsoft Corporation".
@@ -1646,18 +1727,33 @@ fn find_by_publisher(buckets: &[AppBucket], leaf: &str) -> Option<usize> {
             {
                 continue;
             }
-            if p_tok == leaf_tok
-                || p_tok.starts_with(&format!("{leaf_tok} "))
-                || (leaf_tok.len() >= 6 && p_tok.contains(&leaf_tok))
-            {
-                matches.push(i);
-                break;
+            if let Some(kind) = match_app_predicate(&p_tok, &leaf_tok) {
+                let effective = if p_tok == leaf_tok
+                    || p_tok.starts_with(&format!("{leaf_tok} "))
+                {
+                    AppTokenMatchKind::ExactFullToken
+                } else {
+                    kind
+                };
+                if best.is_none_or(|prev| effective > prev) {
+                    best = Some(effective);
+                }
             }
         }
+        match best {
+            Some(AppTokenMatchKind::ExactFullToken) => strong_matches.push(i),
+            Some(AppTokenMatchKind::WholeWordSlice) => slice_matches.push(i),
+            None => {}
+        }
     }
-    // Only attribute when unambiguous (1 owning app, OR all matching apps belong to same publisher).
-    if matches.len() == 1 {
-        Some(matches[0])
+    let winners = if !strong_matches.is_empty() {
+        strong_matches
+    } else {
+        slice_matches
+    };
+    // Only attribute when unambiguous (1 owning app at the winning tier).
+    if winners.len() == 1 {
+        Some(winners[0])
     } else {
         None
     }
