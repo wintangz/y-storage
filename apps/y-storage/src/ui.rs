@@ -10,7 +10,8 @@ use egui::{
 use y_core::config::{
     AppConfig, AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
     GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, PinKind, SizeBandFilter, SortDirection, ThemeMode,
-    UnattributedFacetFilters, UnattributedLocationZone, ZoneRuleKind, ZoneRulebook,
+    ThemePresetChoice, UnattributedFacetFilters, UnattributedLocationZone, ZoneRuleKind,
+    ZoneRulebook, default_custom_theme_rgb,
 };
 use y_core::discovery::{normalize_app_token, normalize_path_key};
 use y_core::model::{
@@ -24,49 +25,10 @@ use crate::list_query::{
     filter_and_sort_apps_with_facets, filter_and_sort_unattributed_with_facets, has_growth_baseline,
     publisher_facet_options, sanitize_facets_for_report,
 };
-
-// Accent family anchored to the two-colour flat mark (`logo-mark-flat`: #7CCBF2 / #F2A9D6, DESIGN.md §2.2).
-#[allow(dead_code)]
-pub const FLAT_LOGO_BLUE_SRC: Color32 = Color32::from_rgb(124, 203, 242); // #7CCBF2
-#[allow(dead_code)]
-pub const FLAT_LOGO_PINK_SRC: Color32 = Color32::from_rgb(242, 169, 214); // #F2A9D6
-pub const ACCENT_1_DARK: Color32 = Color32::from_rgb(105, 203, 252); // #69CBFC
-pub const ACCENT_2_DARK: Color32 = Color32::from_rgb(250, 128, 203); // #FA80CB
-pub const ACCENT_INK_1_LIGHT: Color32 = Color32::from_rgb(0, 144, 217); // #0090D9 (owner max-vivid Light step)
-pub const ACCENT_INK_2_LIGHT: Color32 = Color32::from_rgb(250, 41, 170); // #FA29AA (owner max-vivid Light step)
-/// Six-stop gradient from the converted logo mark, used strictly for active container rims and drive meters.
-pub const WT_RIM_GRADIENT_STOPS: [Color32; 6] = [
-    Color32::from_rgb(84, 185, 242),  // #54B9F2
-    Color32::from_rgb(124, 208, 250), // #7CD0FA
-    Color32::from_rgb(165, 230, 255), // #A5E6FF
-    Color32::from_rgb(216, 166, 255), // #D8A6FF (unnamed sweep midpoint only)
-    Color32::from_rgb(247, 168, 216), // #F7A8D8
-    Color32::from_rgb(255, 199, 227), // #FFC7E3
-];
-pub const STATUS_GREEN: Color32 = Color32::from_rgb(40, 214, 108); // #28D66C
-pub const STATUS_RED: Color32 = Color32::from_rgb(240, 68, 88); // #F04458
-
-#[inline]
-#[must_use]
-fn sample_wt_logo_gradient(t: f32) -> Color32 {
-    let scaled = t.clamp(0.0, 1.0) * (WT_RIM_GRADIENT_STOPS.len() - 1) as f32;
-    let idx = (scaled.floor() as usize).min(WT_RIM_GRADIENT_STOPS.len() - 2);
-    let frac = scaled - idx as f32;
-    lerp_color(
-        WT_RIM_GRADIENT_STOPS[idx],
-        WT_RIM_GRADIENT_STOPS[idx + 1],
-        frac,
-    )
-}
-
-#[inline]
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let u = t.clamp(0.0, 1.0);
-    let r = (a.r() as f32 + (b.r() as f32 - a.r() as f32) * u).round() as u8;
-    let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32) * u).round() as u8;
-    let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32) * u).round() as u8;
-    Color32::from_rgb(r, g, bl)
-}
+use crate::theme::{
+    ThemeLadder, ThemePalette, compute_theme_key, contrast_ratio, format_hex_rgb, lerp_color,
+    parse_hex_rgb,
+};
 
 // Single multiples-of-4 spacing scale used uniformly everywhere.
 pub const SPACE_4: f32 = 4.0;
@@ -115,6 +77,11 @@ pub enum UiAction {
     StartRescan,
     StartDriveRescan(char),
     ToggleTheme(ThemeMode),
+    SetTheme {
+        mode: ThemeMode,
+        preset: ThemePresetChoice,
+        custom_rgb: [u8; 3],
+    },
     SaveConfig(AppConfig),
     UpdateListView {
         sort_mode: AppSortMode,
@@ -136,110 +103,6 @@ struct ChipStyle {
     fill: Color32,
     stroke: Color32,
     text: Color32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ThemePalette {
-    pub bg: Color32,
-    pub panel: Color32,
-    pub panel_alt: Color32,
-    pub border: Color32,
-    pub text: Color32,
-    pub muted: Color32,
-    pub subtle_text: Color32,
-    pub hint_text: Color32,
-    pub input_bg: Color32,
-    pub header_input_bg: Color32,
-    pub widget: Color32,
-    pub widget_hover: Color32,
-    pub widget_active: Color32,
-    pub accent_line: Color32,
-    pub accent_2: Color32,
-    pub proven_text: Color32,
-    pub pill_pink_text: Color32,
-    pub status_green: Color32,
-    pub status_red: Color32,
-    pub status_amber: Color32,
-    pub delta_grew: Color32,
-    pub no_touch_outline: Color32,
-    pub pill_blue_fill: Color32,
-    pub pill_green_fill: Color32,
-    pub pill_pink_fill: Color32,
-    #[allow(dead_code)]
-    pub pill_amber_fill: Color32,
-    pub pill_red_fill: Color32,
-    pub scrollbar_thumb: Color32,
-    pub scrollbar_thumb_hover: Color32,
-}
-
-impl ThemePalette {
-    #[must_use]
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Dark => Self {
-                bg: Color32::from_rgb(10, 10, 16),        // #0A0A10 (z-controller bg)
-                panel: Color32::from_rgb(20, 20, 31),     // #14141F (z-controller panel)
-                panel_alt: Color32::from_rgb(16, 16, 26), // #10101A (z-controller faint_bg)
-                border: Color32::from_rgb(38, 38, 58),    // #26263A (z-controller border)
-                text: Color32::from_rgb(237, 237, 242),   // #EDEDF2 (z-controller text)
-                muted: Color32::from_rgb(154, 154, 176),  // #9A9AB0 (z-controller muted)
-                subtle_text: Color32::from_rgb(130, 130, 154), // #82829A (pure R==G axis synced with z-controller)
-                hint_text: Color32::from_rgb(100, 100, 122),   // #64647A (pure R==G axis dim placeholder hint)
-                input_bg: Color32::from_rgb(10, 10, 16),       // #0A0A10 (z-controller extreme_bg)
-                header_input_bg: Color32::from_rgb(10, 10, 16), // #0A0A10
-                widget: Color32::from_rgb(24, 24, 38),         // #181826 (z-controller widget)
-                widget_hover: Color32::from_rgb(31, 31, 49),   // #1F1F31 (z-controller widget_hover)
-                widget_active: Color32::from_rgb(20, 40, 50),  // #142832 (pressed accent tint from WT mark blue)
-                accent_line: ACCENT_1_DARK,                    // #69CBFC (boosted flat-logo blue)
-                accent_2: ACCENT_2_DARK,                       // #FA80CB (boosted flat-logo pink)
-                proven_text: Color32::from_rgb(175, 227, 253), // #AFE3FD (Dark blue pill text)
-                pill_pink_text: Color32::from_rgb(251, 187, 227), // #FBBBE3 (Dark pink pill text)
-                status_green: STATUS_GREEN,                    // #28D66C
-                status_red: STATUS_RED,                        // #F04458
-                status_amber: Color32::from_rgb(245, 184, 61), // #F5B83D (FIX 15 warning text/stroke)
-                delta_grew: STATUS_RED,                        // #F04458 (saturated status)
-                no_touch_outline: STATUS_RED,                  // #F04458 (saturated status)
-                pill_blue_fill: Color32::from_rgb(37, 49, 65), // #253141 (Dark blue pill fill)
-                pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (Dark green pill fill)
-                pill_pink_fill: Color32::from_rgb(56, 44, 60), // #382C3C (Dark pink pill fill)
-                pill_amber_fill: Color32::from_rgb(56, 46, 37), // #382E25 (Dark warning pill fill)
-                pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (Dark red pill fill)
-                scrollbar_thumb: Color32::from_rgb(82, 86, 122), // #52567A (FIX 4b minimum visible Dark contrast)
-                scrollbar_thumb_hover: Color32::from_rgb(122, 134, 184), // #7A86B8
-            },
-            ThemeMode::Light => Self {
-                bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA (z-controller bg)
-                panel: Color32::from_rgb(255, 255, 255),  // #FFFFFF (z-controller panel)
-                panel_alt: Color32::from_rgb(244, 248, 252), // #F4F8FC (z-controller faint_bg)
-                border: Color32::from_rgb(217, 228, 240), // #D9E4F0 (z-controller border)
-                text: Color32::from_rgb(28, 39, 51),      // #1C2733 (z-controller text)
-                muted: Color32::from_rgb(95, 113, 134),   // #5F7186 (z-controller muted)
-                subtle_text: Color32::from_rgb(116, 132, 153), // #748499 (DESIGN.md T4 exception)
-                hint_text: Color32::from_rgb(152, 166, 184),   // #98A6B8
-                input_bg: Color32::from_rgb(238, 244, 250),    // #EEF4FA (z-controller extreme_bg on #FFFFFF cards)
-                header_input_bg: Color32::from_rgb(255, 255, 255), // #FFFFFF (crisp contrast on #EEF4FA header canvas)
-                widget: Color32::from_rgb(245, 248, 252),      // #F5F8FC (z-controller widget)
-                widget_hover: Color32::from_rgb(232, 244, 251), // #E8F4FB (WT-blue hover wash)
-                widget_active: Color32::from_rgb(216, 238, 249), // #D8EEF9 (WT-blue press wash)
-                accent_line: ACCENT_INK_1_LIGHT,               // #0090D9 (owner max-vivid Light blue)
-                accent_2: ACCENT_INK_2_LIGHT,                  // #FA29AA (owner max-vivid Light pink)
-                proven_text: ACCENT_INK_1_LIGHT,               // #0090D9 (Light blue pill text)
-                pill_pink_text: ACCENT_INK_2_LIGHT,            // #FA29AA (Light pink pill text)
-                status_green: Color32::from_rgb(10, 122, 60),  // #0A7A3C (Light green text/stroke)
-                status_red: Color32::from_rgb(224, 36, 68),    // #E02444 (Light red text/stroke)
-                status_amber: Color32::from_rgb(166, 108, 7),  // #A66C07 (Light warning text/stroke)
-                delta_grew: Color32::from_rgb(224, 36, 68),    // #E02444
-                no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444
-                pill_blue_fill: Color32::from_rgb(226, 244, 252), // #E2F4FC (Light blue pill fill)
-                pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (Light green pill fill)
-                pill_pink_fill: Color32::from_rgb(252, 236, 246), // #FCECF6 (Light pink pill fill)
-                pill_amber_fill: Color32::from_rgb(253, 240, 218), // #FDF0DA (Light warning pill fill)
-                pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (Light red pill fill)
-                scrollbar_thumb: Color32::from_rgb(152, 176, 202), // #98B0CA (FIX 4b Light contrast)
-                scrollbar_thumb_hover: Color32::from_rgb(100, 140, 184), // #648CB8
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +128,7 @@ struct CachedAppMeta {
 
 struct CachedReportData {
     scan_ts: u64,
-    dark_mode: bool,
+    theme_key: u32,
     apps_count: usize,
     app_idx_by_id: HashMap<String, usize>,
     apps: Vec<CachedAppMeta>,
@@ -279,6 +142,29 @@ struct CachedReportData {
     shared_app_ids: HashSet<String>,
     has_growth_baseline: bool,
     sys_reconcile: Vec<(char, String, String, i128)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusKind {
+    Success,
+    Warning,
+    Danger,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LedgerRowBadge {
+    Accent(&'static str),
+    Status(StatusKind, &'static str),
+}
+
+struct CachedUnattributedList {
+    scan_ts: u64,
+    count: usize,
+    search_query: String,
+    facets: UnattributedFacetFilters,
+    sort: UnattributedSortMode,
+    visible_indices: Vec<usize>,
+    filtered_sub_bytes: u64,
 }
 
 struct CachedFilteredList {
@@ -297,6 +183,7 @@ struct CachedRimMesh {
     h_q: i32,
     r_q: i32,
     ppp_q: i32,
+    theme_key: u32,
     mesh: egui::epaint::Mesh,
     fill_poly: Vec<Pos2>,
 }
@@ -330,7 +217,9 @@ pub struct StorageUiState {
     pub expand_your_files: bool,
     pub expand_unattributed: bool,
     pub new_exclusion_inputs: HashMap<char, String>,
-    pub applied_theme: Option<ThemeMode>,
+    pub applied_theme_key: Option<u32>,
+    pub custom_hex_input: String,
+    pub custom_hex_valid: bool,
     pub has_prop_strong: bool,
     pub ledger_collapsed: bool,
     pub ledger_height_px: Option<f32>,
@@ -346,6 +235,7 @@ pub struct StorageUiState {
     unattrib_exists_cache: HashMap<String, bool>,
     cached_report: Option<CachedReportData>,
     cached_filtered: Option<CachedFilteredList>,
+    cached_unattrib: Option<CachedUnattributedList>,
     cached_rim: Option<CachedRimMesh>,
     expanded_row_heights: HashMap<String, f32>,
     truncate_cache: HashMap<(u64, u32, u16), (String, bool)>,
@@ -383,7 +273,9 @@ impl Default for StorageUiState {
             expand_your_files: false,
             expand_unattributed: false,
             new_exclusion_inputs: HashMap::new(),
-            applied_theme: None,
+            applied_theme_key: None,
+            custom_hex_input: format_hex_rgb(default_custom_theme_rgb()),
+            custom_hex_valid: true,
             has_prop_strong: false,
             ledger_collapsed: false,
             ledger_height_px: None,
@@ -399,6 +291,7 @@ impl Default for StorageUiState {
             unattrib_exists_cache: HashMap::new(),
             cached_report: None,
             cached_filtered: None,
+            cached_unattrib: None,
             cached_rim: None,
             expanded_row_heights: HashMap::new(),
             truncate_cache: HashMap::new(),
@@ -418,6 +311,8 @@ impl StorageUiState {
             facets: cfg.facets.clone(),
             ledger_collapsed: cfg.ledger_collapsed,
             ledger_height_px: cfg.ledger_height_px,
+            custom_hex_input: format_hex_rgb(cfg.theme_custom_rgb),
+            custom_hex_valid: true,
             ..Self::default()
         }
     }
@@ -524,14 +419,6 @@ pub fn format_exact_bytes(bytes: u64) -> String {
     format!("{formatted} bytes")
 }
 
-fn new_growth_chip_style(pal: &ThemePalette) -> ChipStyle {
-    ChipStyle {
-        fill: pal.pill_green_fill,
-        stroke: pal.status_green,
-        text: pal.status_green,
-    }
-}
-
 fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> DeltaCellDisplay {
     match delta {
         GrowthDelta::NoBaseline => DeltaCellDisplay {
@@ -583,6 +470,20 @@ fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> DeltaCellDisp
 }
 
 pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
+    configure_fonts_and_theme_with(
+        ctx,
+        mode,
+        ThemePresetChoice::Blue,
+        default_custom_theme_rgb(),
+    );
+}
+
+pub fn configure_fonts_and_theme_with(
+    ctx: &egui::Context,
+    mode: ThemeMode,
+    preset: ThemePresetChoice,
+    custom_rgb: [u8; 3],
+) {
     let mut fonts = FontDefinitions::default();
     let prop_regular_bytes = std::fs::read(SEGOE_UI_FONT_PATH).ok();
     if let Some(ref bytes) = prop_regular_bytes {
@@ -638,7 +539,7 @@ pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
         opts.feathering_size_in_pixels = 1.0;
         opts.bezier_tolerance = 0.015;
     });
-    apply_theme_visuals(ctx, mode);
+    apply_theme_visuals_with(ctx, mode, preset, custom_rgb);
 }
 
 #[inline]
@@ -655,8 +556,13 @@ fn prop_strong_font(has_prop_strong: bool, size_px: f32) -> (FontId, bool) {
     }
 }
 
-pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
-    let pal = ThemePalette::for_mode(mode);
+pub fn apply_theme_visuals_with(
+    ctx: &egui::Context,
+    mode: ThemeMode,
+    preset: ThemePresetChoice,
+    custom_rgb: [u8; 3],
+) {
+    let pal = ThemePalette::from_config(mode, preset, custom_rgb);
     let mut style = (*ctx.style()).clone();
     let mut visuals = match mode {
         ThemeMode::Dark => egui::Visuals::dark(),
@@ -690,21 +596,24 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
 
     visuals.widgets.hovered.bg_fill = pal.widget_hover;
     visuals.widgets.hovered.weak_bg_fill = pal.widget_hover;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, pal.accent_line);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, pal.accent_border);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.hovered.rounding = Rounding::same(6.0);
 
     visuals.widgets.active.bg_fill = pal.widget_active;
     visuals.widgets.active.weak_bg_fill = pal.widget_active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, pal.accent_2);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, pal.accent_border);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.active.rounding = Rounding::same(6.0);
 
     visuals.widgets.open.bg_fill = pal.widget_hover;
     visuals.widgets.open.weak_bg_fill = pal.widget_hover;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, pal.accent_line);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, pal.accent_border);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.open.rounding = Rounding::same(6.0);
+
+    visuals.selection.bg_fill = lerp_color(pal.panel, pal.accent_border, 0.48);
+    visuals.selection.stroke = Stroke::new(1.0_f32, pal.accent_line);
 
     style.visuals = visuals;
     style.interaction.selectable_labels = false;
@@ -759,8 +668,10 @@ fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
 }
 
-fn corner_unit_arcs() -> &'static [[(f32, f32); 33]; 4] {
-    static ARCS: OnceLock<[[(f32, f32); 33]; 4]> = OnceLock::new();
+const CORNER_ARC_PTS: usize = 17;
+
+fn corner_unit_arcs() -> &'static [[(f32, f32); CORNER_ARC_PTS]; 4] {
+    static ARCS: OnceLock<[[(f32, f32); CORNER_ARC_PTS]; 4]> = OnceLock::new();
     ARCS.get_or_init(|| {
         let ranges = [
             (std::f32::consts::PI, 1.5 * std::f32::consts::PI),
@@ -768,10 +679,11 @@ fn corner_unit_arcs() -> &'static [[(f32, f32); 33]; 4] {
             (0.0, 0.5 * std::f32::consts::PI),
             (0.5 * std::f32::consts::PI, std::f32::consts::PI),
         ];
-        let mut out = [[(0.0_f32, 0.0_f32); 33]; 4];
+        let mut out = [[(0.0_f32, 0.0_f32); CORNER_ARC_PTS]; 4];
+        let denom = (CORNER_ARC_PTS - 1) as f32;
         for (c_idx, &(a0, a1)) in ranges.iter().enumerate() {
-            for k in 0..=32usize {
-                let theta = a0 + (a1 - a0) * (k as f32 / 32.0);
+            for k in 0..CORNER_ARC_PTS {
+                let theta = a0 + (a1 - a0) * (k as f32 / denom);
                 out[c_idx][k] = (theta.cos(), theta.sin());
             }
         }
@@ -805,7 +717,7 @@ fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec
     }
 }
 
-/// Emits fixed-count (`4 * 33 = 132`) rounded-rect perimeter vertices so concentric rings align 1:1.
+/// Emits fixed-count (`4 * 17 = 68`) rounded-rect perimeter vertices so concentric rings align 1:1.
 fn sample_rounded_rect_ring(rect: Rect, radius: f32, diag_pad: f32, out: &mut Vec<Pos2>) {
     out.clear();
     let r = radius.clamp(0.0, 0.5 * rect.width().min(rect.height()));
@@ -893,6 +805,141 @@ fn add_ring_center_fan(
     }
 }
 
+#[inline]
+fn add_solid_rect_quad(mesh: &mut egui::epaint::Mesh, rect: Rect, col: Color32) {
+    if col == Color32::TRANSPARENT || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let b = mesh.vertices.len() as u32;
+    mesh.vertices.extend_from_slice(&[
+        egui::epaint::Vertex {
+            pos: rect.left_top(),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        },
+        egui::epaint::Vertex {
+            pos: rect.right_top(),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        },
+        egui::epaint::Vertex {
+            pos: rect.right_bottom(),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        },
+        egui::epaint::Vertex {
+            pos: rect.left_bottom(),
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        },
+    ]);
+    mesh.indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+}
+
+#[inline]
+fn add_corner_quadrant_fan(
+    mesh: &mut egui::epaint::Mesh,
+    corner_pts: &[Pos2],
+    anchor: Pos2,
+    col: Color32,
+) {
+    if col == Color32::TRANSPARENT || corner_pts.len() < 2 {
+        return;
+    }
+    let a_idx = mesh.vertices.len() as u32;
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: anchor,
+        uv: egui::epaint::WHITE_UV,
+        color: col,
+    });
+    let base = mesh.vertices.len() as u32;
+    for &p in corner_pts {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: p,
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        });
+    }
+    for i in 0..(corner_pts.len() - 1) {
+        mesh.indices
+            .extend_from_slice(&[a_idx, base + i as u32, base + i as u32 + 1]);
+    }
+}
+
+/// Fills rounded-rect interior via 3 axis-aligned `WHITE_UV` quads + 4 localized corner fans
+/// so software blitting uses `slice::fill` across >95% of panel interiors.
+fn fill_rounded_interior_9slice(
+    mesh: &mut egui::epaint::Mesh,
+    fill_rect: Rect,
+    ring_pts: &[Pos2],
+    r_in: f32,
+    col: Color32,
+) {
+    if col == Color32::TRANSPARENT || fill_rect.width() <= 0.0 || fill_rect.height() <= 0.0 {
+        return;
+    }
+    if r_in <= 0.5 {
+        add_solid_rect_quad(mesh, fill_rect, col);
+        return;
+    }
+    if ring_pts.len() == 4 * CORNER_ARC_PTS
+        && fill_rect.width() >= 96.0
+        && fill_rect.height() >= 48.0
+        && fill_rect.width() > 2.0 * r_in + 0.5
+        && fill_rect.height() > 2.0 * r_in + 0.5
+    {
+        let left = fill_rect.left();
+        let right = fill_rect.right();
+        let top = fill_rect.top();
+        let bottom = fill_rect.bottom();
+
+        add_solid_rect_quad(
+            mesh,
+            Rect::from_min_max(Pos2::new(left + r_in, top), Pos2::new(right - r_in, top + r_in)),
+            col,
+        );
+        add_solid_rect_quad(
+            mesh,
+            Rect::from_min_max(Pos2::new(left, top + r_in), Pos2::new(right, bottom - r_in)),
+            col,
+        );
+        add_solid_rect_quad(
+            mesh,
+            Rect::from_min_max(
+                Pos2::new(left + r_in, bottom - r_in),
+                Pos2::new(right - r_in, bottom),
+            ),
+            col,
+        );
+
+        let tl_c = Pos2::new(left + r_in, top + r_in);
+        let tr_c = Pos2::new(right - r_in, top + r_in);
+        let br_c = Pos2::new(right - r_in, bottom - r_in);
+        let bl_c = Pos2::new(left + r_in, bottom - r_in);
+        add_corner_quadrant_fan(mesh, &ring_pts[0..CORNER_ARC_PTS], tl_c, col);
+        add_corner_quadrant_fan(
+            mesh,
+            &ring_pts[CORNER_ARC_PTS..2 * CORNER_ARC_PTS],
+            tr_c,
+            col,
+        );
+        add_corner_quadrant_fan(
+            mesh,
+            &ring_pts[2 * CORNER_ARC_PTS..3 * CORNER_ARC_PTS],
+            br_c,
+            col,
+        );
+        add_corner_quadrant_fan(
+            mesh,
+            &ring_pts[3 * CORNER_ARC_PTS..4 * CORNER_ARC_PTS],
+            bl_c,
+            col,
+        );
+    } else {
+        add_ring_center_fan(mesh, ring_pts, fill_rect.center(), col);
+    }
+}
+
 /// Builds one physical-pixel-feathered rounded rectangle border+fill mesh (`1px` corner AA, crisp straight H/V edges).
 fn build_feathered_rounded_box_mesh(
     snapped: Rect,
@@ -915,27 +962,21 @@ fn build_feathered_rounded_box_mesh(
             return mesh;
         }
         if r <= 0.0 {
-            let mut m = egui::epaint::Mesh::default();
-            m.vertices = vec![
-                egui::epaint::Vertex { pos: snapped.left_top(), uv: egui::epaint::WHITE_UV, color: fill },
-                egui::epaint::Vertex { pos: snapped.right_top(), uv: egui::epaint::WHITE_UV, color: fill },
-                egui::epaint::Vertex { pos: snapped.right_bottom(), uv: egui::epaint::WHITE_UV, color: fill },
-                egui::epaint::Vertex { pos: snapped.left_bottom(), uv: egui::epaint::WHITE_UV, color: fill },
-            ];
-            m.indices = vec![0, 1, 2, 0, 2, 3];
-            return m;
+            add_solid_rect_quad(&mut mesh, snapped, fill);
+            return mesh;
         }
-        let mut r0_pts = Vec::with_capacity(132);
-        let mut r1_pts = Vec::with_capacity(132);
+        let mut r0_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
+        let mut r1_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
         sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
         let rect1 = if snapped.width() > px && snapped.height() > px {
             snapped.shrink(half_px)
         } else {
             snapped
         };
-        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), 0.0, &mut r1_pts);
+        let r1 = (r - half_px).max(0.0);
+        sample_rounded_rect_ring(rect1, r1, 0.0, &mut r1_pts);
         stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
-        add_ring_center_fan(&mut mesh, &r1_pts, snapped.center(), fill);
+        fill_rounded_interior_9slice(&mut mesh, rect1, &r1_pts, r1, fill);
         return mesh;
     }
 
@@ -945,15 +986,15 @@ fn build_feathered_rounded_box_mesh(
     } else {
         snapped
     };
-    let mut r0_pts = Vec::with_capacity(132);
-    let mut r1_pts = Vec::with_capacity(132);
-    let mut r2_pts = Vec::with_capacity(132);
+    let mut r0_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let mut r1_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let mut r2_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
 
     let r1b_pts = if bw > px * 1.05 {
         sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
         sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), 0.0, &mut r1_pts);
         stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
-        let mut pts = Vec::with_capacity(132);
+        let mut pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
         let s1b = (bw - half_px).min(snapped.width().min(snapped.height()) * 0.45);
         sample_rounded_rect_ring(snapped.shrink(s1b), (r - s1b).max(0.0), 0.0, &mut pts);
         stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &pts, border_color);
@@ -964,7 +1005,7 @@ fn build_feathered_rounded_box_mesh(
         sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, diag_pad, &mut r0_pts);
         sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), diag_pad, &mut r1_pts);
         stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
-        let mut r1_in_pts = Vec::with_capacity(132);
+        let mut r1_in_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
         sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), -diag_pad, &mut r1_in_pts);
         stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
         r1_in_pts
@@ -973,10 +1014,11 @@ fn build_feathered_rounded_box_mesh(
     let inner_shrink = bw + half_px;
     if snapped.width() > inner_shrink * 2.0 && snapped.height() > inner_shrink * 2.0 {
         let rect2 = snapped.shrink(inner_shrink);
+        let r2 = (r - inner_shrink).max(0.0);
         let inner_diag = if bw <= px * 1.05 { -0.42 * px } else { 0.0 };
-        sample_rounded_rect_ring(rect2, (r - inner_shrink).max(0.0), inner_diag, &mut r2_pts);
+        sample_rounded_rect_ring(rect2, r2, inner_diag, &mut r2_pts);
         stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
-        add_ring_center_fan(&mut mesh, &r2_pts, rect2.center(), fill);
+        fill_rounded_interior_9slice(&mut mesh, rect2, &r2_pts, r2, fill);
     } else {
         add_ring_center_fan(&mut mesh, &r1b_pts, snapped.center(), border_color);
     }
@@ -984,13 +1026,19 @@ fn build_feathered_rounded_box_mesh(
 }
 
 fn build_rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<Pos2> {
-    let mut ring = Vec::with_capacity(132);
+    let mut ring = Vec::with_capacity(4 * CORNER_ARC_PTS);
     push_rounded_rect_perimeter(rect, radius, &mut ring);
     ring.into_iter().map(|(p, _)| p).collect()
 }
 
-/// Builds origin-relative gradient-rim mesh + inner polygon once per `(w, h, rounding, ppp)` and translates on scroll frames.
-fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32, ppp: f32) -> CachedRimMesh {
+/// Builds origin-relative monochrome sweep rim mesh + inner polygon once per `(w, h, rounding, ppp, theme_key)` and translates on scroll frames.
+fn build_cached_rim_geometry(
+    w: f32,
+    h: f32,
+    rounding: f32,
+    ppp: f32,
+    pal: &ThemePalette,
+) -> CachedRimMesh {
     let px = 1.0 / ppp.max(0.5);
     let half_px = 0.5 * px;
     let local_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(w.max(1.0), h.max(1.0)));
@@ -998,7 +1046,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32, ppp: f32) -> CachedR
         local_rect.shrink(px),
         (rounding - px).max(0.0),
     );
-    let mut ring = Vec::with_capacity(132);
+    let mut ring = Vec::with_capacity(4 * CORNER_ARC_PTS);
     push_rounded_rect_perimeter(local_rect, rounding, &mut ring);
     let n = ring.len();
     const BANDS: usize = 5;
@@ -1013,7 +1061,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32, ppp: f32) -> CachedR
         mesh.indices.reserve(n * (BANDS - 1) * 6);
         for (p, norm) in &ring {
             let t = ((p.x / lw) * 0.65 + (p.y / lh) * 0.35).clamp(0.0, 1.0);
-            let c = sample_wt_logo_gradient(t);
+            let c = pal.sample_sweep(t);
             for (&off, &a) in offsets.iter().zip(alphas.iter()) {
                 let color = if a == 0 {
                     Color32::TRANSPARENT
@@ -1046,6 +1094,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32, ppp: f32) -> CachedR
         h_q: (h * 2.0).round() as i32,
         r_q: (rounding * 10.0).round() as i32,
         ppp_q: (ppp * 100.0).round() as i32,
+        theme_key: pal.theme_key,
         mesh,
         fill_poly,
     }
@@ -1055,6 +1104,7 @@ fn translate_cached_rim_for_rect(
     rect: Rect,
     rounding: f32,
     ppp: f32,
+    pal: &ThemePalette,
     cache: &mut Option<CachedRimMesh>,
 ) -> (Vec<Pos2>, egui::epaint::Mesh) {
     let w = rect.width().max(1.0);
@@ -1063,11 +1113,15 @@ fn translate_cached_rim_for_rect(
     let h_q = (h * 2.0).round() as i32;
     let r_q = (rounding * 10.0).round() as i32;
     let ppp_q = (ppp * 100.0).round() as i32;
-    let hit = cache
-        .as_ref()
-        .is_some_and(|c| c.w_q == w_q && c.h_q == h_q && c.r_q == r_q && c.ppp_q == ppp_q);
+    let hit = cache.as_ref().is_some_and(|c| {
+        c.w_q == w_q
+            && c.h_q == h_q
+            && c.r_q == r_q
+            && c.ppp_q == ppp_q
+            && c.theme_key == pal.theme_key
+    });
     if !hit {
-        *cache = Some(build_cached_rim_geometry(w, h, rounding, ppp));
+        *cache = Some(build_cached_rim_geometry(w, h, rounding, ppp, pal));
     }
     let cached = cache.as_ref().unwrap();
     let offset = rect.min.to_vec2();
@@ -1079,13 +1133,18 @@ fn translate_cached_rim_for_rect(
     (fill_poly, mesh)
 }
 
-/// Diagonal 6-stop logo-file gradient rim (`WT_RIM_GRADIENT_STOPS`) bounded strictly inside `rect`.
+/// Diagonal within-family monochrome sweep rim bounded strictly inside `rect`.
 #[allow(dead_code)]
-fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, rounding: f32) {
+fn paint_active_card_gradient_border(
+    painter: &egui::Painter,
+    rect: Rect,
+    rounding: f32,
+    pal: &ThemePalette,
+) {
     if rect.width() <= 4.0 || rect.height() <= 4.0 {
         return;
     }
-    let mut ring = Vec::with_capacity(132);
+    let mut ring = Vec::with_capacity(4 * CORNER_ARC_PTS);
     push_rounded_rect_perimeter(rect, rounding, &mut ring);
     let n = ring.len();
     if n < 8 {
@@ -1105,7 +1164,7 @@ fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, roundi
 
     for (p, norm) in &ring {
         let t = (((p.x - rect.left()) / w) * 0.65 + ((p.y - rect.top()) / h) * 0.35).clamp(0.0, 1.0);
-        let c = sample_wt_logo_gradient(t);
+        let c = pal.sample_sweep(t);
         for (&off, &a) in offsets.iter().zip(alphas.iter()) {
             let color = if a == 0 {
                 Color32::TRANSPARENT
@@ -1188,15 +1247,8 @@ fn draw_crisp_frame<R>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrandVariant {
-    Blue,
-    #[allow(dead_code)]
-    Pink,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonVariant {
-    PrimaryOutline(BrandVariant),
+    PrimaryOutline,
     SecondaryOutline,
     SubtleOutline,
 }
@@ -1205,6 +1257,41 @@ enum ButtonVariant {
 fn snap_scalar_to_px(v: f32, ppp: f32) -> f32 {
     let p = ppp.max(0.5);
     (v * p).round() / p
+}
+
+#[inline]
+fn font_family_tag(family: &FontFamily) -> u8 {
+    match family {
+        FontFamily::Proportional => 0,
+        FontFamily::Monospace => 1,
+        FontFamily::Name(_) => 2,
+    }
+}
+
+fn cached_hx_metrics(ui: &egui::Ui, font_id: &FontId) -> Option<(f32, f32)> {
+    static HX_CACHE: OnceLock<std::sync::Mutex<HashMap<(u32, u32, u8), (f32, f32)>>> =
+        OnceLock::new();
+    let key = (
+        ui.ctx().pixels_per_point().to_bits(),
+        font_id.size.to_bits(),
+        font_family_tag(&font_id.family),
+    );
+    let cache = HX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(&val) = guard.get(&key) {
+            return Some(val);
+        }
+    }
+    let ref_g = ui.fonts(|f| f.layout_no_wrap("Hx".to_owned(), font_id.clone(), Color32::WHITE));
+    if ref_g.mesh_bounds.is_positive() {
+        let val = (ref_g.mesh_bounds.center().y, ref_g.mesh_bounds.max.y);
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(key, val);
+        }
+        Some(val)
+    } else {
+        None
+    }
 }
 
 /// Computes pixel-snapped top-left origin so glyph ink is optically centered vertically in `outer_rect`.
@@ -1227,11 +1314,10 @@ fn optical_galley_pos(
         .job
         .sections
         .first()
-        .map(|s| s.format.font_id.clone())
+        .map(|s| &s.format.font_id)
     {
-        let ref_g = ui.fonts(|f| f.layout_no_wrap("Hx".to_owned(), font_id, Color32::WHITE));
-        if ref_g.mesh_bounds.is_positive() {
-            (ref_g.mesh_bounds.center().y, ref_g.mesh_bounds.max.y)
+        if let Some(m) = cached_hx_metrics(ui, font_id) {
+            m
         } else if galley.mesh_bounds.is_positive() {
             (galley.mesh_bounds.center().y, galley.mesh_bounds.max.y)
         } else {
@@ -1254,22 +1340,12 @@ fn baseline_aligned_galley_pos(
     anchor_font: FontId,
 ) -> Pos2 {
     let ppp = ui.ctx().pixels_per_point();
-    let probe = |fid: FontId| -> (f32, f32) {
-        let g = ui.fonts(|f| f.layout_no_wrap("Hx".to_owned(), fid, Color32::WHITE));
-        if g.mesh_bounds.is_positive() {
-            (g.mesh_bounds.center().y, g.mesh_bounds.max.y)
-        } else {
-            (g.size().y * 0.5, g.size().y * 0.8)
-        }
+    let probe = |fid: &FontId, fallback_h: f32| -> (f32, f32) {
+        cached_hx_metrics(ui, fid).unwrap_or((fallback_h * 0.5, fallback_h * 0.8))
     };
-    let (anchor_cy, anchor_base) = probe(anchor_font);
-    let (_, self_base) = if let Some(fid) = galley
-        .job
-        .sections
-        .first()
-        .map(|s| s.format.font_id.clone())
-    {
-        probe(fid)
+    let (anchor_cy, anchor_base) = probe(&anchor_font, galley.size().y);
+    let (_, self_base) = if let Some(fid) = galley.job.sections.first().map(|s| &s.format.font_id) {
+        probe(fid, galley.size().y)
     } else {
         (galley.size().y * 0.5, galley.size().y * 0.8)
     };
@@ -1295,22 +1371,22 @@ fn draw_optical_label_in_rect(
         if align_right { Some(rect.max.x) } else { None },
         align_center_x,
     );
-    let resp = ui.interact(rect, ui.make_persistent_id(("opt_lbl", rect.min.x.to_bits(), rect.min.y.to_bits(), text)), Sense::hover());
+    let resp = ui.interact(
+        rect,
+        ui.make_persistent_id(("opt_lbl", rect.min.x.to_bits(), rect.min.y.to_bits(), text)),
+        Sense::hover(),
+    );
     ui.painter().galley(pos, galley, color);
     resp
 }
 
-#[inline]
-fn wt_gradient_color_at(t: f32) -> Color32 {
-    sample_wt_logo_gradient(t)
-}
-
-/// Paints the 6-stop WT horizontal logo gradient across `full_track`, clipped to `fill_rect` with crisp rounded caps.
-fn paint_horizontal_wt_gradient_bar(
+/// Paints a within-family monochrome sweep across `full_track`, clipped to `fill_rect` (`WT_UI_LIBRARY §0.6`).
+fn paint_horizontal_theme_sweep_bar(
     painter: &egui::Painter,
     full_track: Rect,
     fill_rect: Rect,
     rounding: f32,
+    pal: &ThemePalette,
 ) {
     if fill_rect.width() <= 0.5 || fill_rect.height() <= 0.5 || full_track.width() <= 0.5 {
         return;
@@ -1332,9 +1408,11 @@ fn paint_horizontal_wt_gradient_bar(
             xs.push(x0 + r * (1.0 - a.cos()));
         }
     }
-    let track_mid_x = full_track.center().x;
-    if track_mid_x > x0 + r + 0.5 && track_mid_x < x1 - r - 0.5 {
-        xs.push(track_mid_x);
+    for frac in [0.333_f32, 0.667_f32] {
+        let stop_x = full_track.min.x + full_track.width() * frac;
+        if stop_x > x0 + r + 0.5 && stop_x < x1 - r - 0.5 {
+            xs.push(stop_x);
+        }
     }
     if r > 0.25 {
         for k in 1..=5 {
@@ -1346,7 +1424,7 @@ fn paint_horizontal_wt_gradient_bar(
     xs.sort_by(|a, b| a.total_cmp(b));
     xs.dedup_by(|a, b| (*a - *b).abs() < 0.05);
     if xs.len() < 2 {
-        let col = wt_gradient_color_at((fill_rect.center().x - full_track.min.x) / full_track.width());
+        let col = pal.sample_sweep((fill_rect.center().x - full_track.min.x) / full_track.width());
         painter.rect_filled(fill_rect, Rounding::same(r), col);
         return;
     }
@@ -1367,7 +1445,7 @@ fn paint_horizontal_wt_gradient_bar(
             (y0, y1)
         };
         let t = ((x - full_track.min.x) / full_track.width()).clamp(0.0, 1.0);
-        let col = wt_gradient_color_at(t);
+        let col = pal.sample_sweep(t);
         let vt = mesh.vertices.len() as u32;
         mesh.vertices.push(egui::epaint::Vertex {
             pos: Pos2::new(x, ty),
@@ -1421,8 +1499,7 @@ fn paint_bottom_fade_overlay(painter: &egui::Painter, rect: Rect, surface_bg: Co
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Resolves `(fill, border_col, text_color)` under WT_UI_LIBRARY §1/§3:
-/// PrimaryOutline exists identically in Blue and Pink; the calling app's Scope Decision Table picks which variant is used where.
+/// Resolves `(fill, border_col, text_color)` under WT_UI_LIBRARY §0 single-hue monochrome ladder.
 fn resolve_button_colors(
     variant: ButtonVariant,
     enabled: bool,
@@ -1438,7 +1515,7 @@ fn resolve_button_colors(
                 Color32::TRANSPARENT,
                 lerp_color(pal.bg, pal.muted, 0.55),
             ),
-            ButtonVariant::PrimaryOutline(_) | ButtonVariant::SecondaryOutline => {
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
                 (Color32::TRANSPARENT, pal.border, pal.muted)
             }
         };
@@ -1446,20 +1523,14 @@ fn resolve_button_colors(
     if pressed {
         let press_border = match variant {
             ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
-            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => pal.accent_2,
-            ButtonVariant::PrimaryOutline(BrandVariant::Blue) | ButtonVariant::SecondaryOutline => {
-                pal.accent_line
-            }
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => pal.accent_border,
         };
         return (pal.widget_active, press_border, pal.text);
     }
     if hovered {
         return match variant {
-            ButtonVariant::PrimaryOutline(BrandVariant::Blue) | ButtonVariant::SecondaryOutline => {
-                (pal.widget_hover, pal.accent_line, pal.accent_line)
-            }
-            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
-                (pal.widget_hover, pal.accent_2, pal.accent_2)
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
+                (pal.widget_hover, pal.accent_border, pal.accent_line)
             }
             ButtonVariant::SubtleOutline => {
                 (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
@@ -1467,45 +1538,34 @@ fn resolve_button_colors(
         };
     }
     if active_highlight {
-        return match variant {
-            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
-                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
-            }
-            _ => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
-        };
+        return (pal.accent_soft_fill, pal.accent_border, pal.accent_line);
     }
     match variant {
-        ButtonVariant::PrimaryOutline(BrandVariant::Blue) => {
-            (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
-        }
-        ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
-            (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
-        }
+        ButtonVariant::PrimaryOutline => (pal.accent_soft_fill, pal.accent_border, pal.accent_line),
         ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
         ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
     }
 }
 
-/// Resolves `(fill, border_col, check_col)` for both Blue and Pink Checkbox variants (`WT_UI_LIBRARY §4 #6`).
+/// Resolves `(fill, border_col, check_col)` for monochrome Checkbox (`WT_UI_LIBRARY §0 & §4 #6`).
 fn resolve_checkbox_colors(
-    variant: BrandVariant,
     checked: bool,
     hovered: bool,
     pal: &ThemePalette,
 ) -> (Color32, Color32, Color32) {
-    let (accent, soft_fill) = match variant {
-        BrandVariant::Blue => (pal.accent_line, pal.pill_blue_fill),
-        BrandVariant::Pink => (pal.accent_2, pal.pill_pink_fill),
-    };
     let fill = if checked {
-        soft_fill
+        pal.accent_soft_fill
     } else if hovered {
         pal.widget_hover
     } else {
         pal.input_bg
     };
-    let border_col = if checked || hovered { accent } else { pal.border };
-    (fill, border_col, accent)
+    let border_col = if checked || hovered {
+        pal.accent_border
+    } else {
+        pal.border
+    };
+    (fill, border_col, pal.accent_line)
 }
 
 /// Renders an outline or quiet row-level button enforcing the WT_UI_LIBRARY outline/quiet hierarchy.
@@ -1523,10 +1583,7 @@ fn draw_z_button(
 ) -> egui::Response {
     let h_pad = if variant == ButtonVariant::SubtleOutline && min_size.y <= 20.0 {
         3.0
-    } else if matches!(variant, ButtonVariant::PrimaryOutline(_))
-        && min_size.y <= 24.0
-        && min_size.x <= 52.0
-    {
+    } else if variant == ButtonVariant::PrimaryOutline && min_size.y <= 24.0 && min_size.x <= 52.0 {
         6.0
     } else if min_size.y <= 24.0 {
         SPACE_8
@@ -1605,7 +1662,7 @@ fn draw_crisp_text_input(
     inner.inner
 }
 
-/// Crisp 1px-bordered toggle checkbox matching the z-controller palette on one shared optical baseline.
+/// Crisp 1px-bordered toggle checkbox matching the monochrome theme ladder on one shared optical baseline.
 fn draw_crisp_checkbox(
     ui: &mut egui::Ui,
     checked: &mut bool,
@@ -1618,8 +1675,7 @@ fn draw_crisp_checkbox(
     let row_h = 22.0_f32.max(text_galley.size().y);
     let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, row_h), Sense::click());
     let ppp = ui.ctx().pixels_per_point();
-    let (fill, border_col, check_col) =
-        resolve_checkbox_colors(BrandVariant::Blue, *checked, resp.hovered(), pal);
+    let (fill, border_col, check_col) = resolve_checkbox_colors(*checked, resp.hovered(), pal);
     let box_rect = Rect::from_center_size(
         Pos2::new(hit_rect.min.x + 8.0, hit_rect.center().y),
         Vec2::splat(16.0),
@@ -1717,6 +1773,105 @@ fn draw_synced_scroll_area(
     });
 }
 
+fn draw_status_glyph(painter: &egui::Painter, center: Pos2, kind: StatusKind, color: Color32) {
+    match kind {
+        StatusKind::Success => {
+            painter.add(egui::Shape::line(
+                vec![
+                    Pos2::new(center.x - 3.0, center.y + 0.3),
+                    Pos2::new(center.x - 0.8, center.y + 2.6),
+                    Pos2::new(center.x + 3.2, center.y - 2.4),
+                ],
+                Stroke::new(1.5_f32, color),
+            ));
+        }
+        StatusKind::Warning => {
+            painter.line_segment(
+                [
+                    Pos2::new(center.x, center.y - 3.2),
+                    Pos2::new(center.x, center.y + 0.6),
+                ],
+                Stroke::new(1.6_f32, color),
+            );
+            painter.circle_filled(Pos2::new(center.x, center.y + 2.8), 1.0, color);
+        }
+        StatusKind::Danger => {
+            let st = Stroke::new(1.5_f32, color);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 2.5, center.y - 2.5),
+                    Pos2::new(center.x + 2.5, center.y + 2.5),
+                ],
+                st,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 2.5, center.y - 2.5),
+                    Pos2::new(center.x - 2.5, center.y + 2.5),
+                ],
+                st,
+            );
+        }
+    }
+}
+
+fn status_chip_style(kind: StatusKind, pal: &ThemePalette) -> ChipStyle {
+    match kind {
+        StatusKind::Success => ChipStyle {
+            fill: pal.pill_green_fill,
+            stroke: pal.status_green,
+            text: pal.status_green,
+        },
+        StatusKind::Warning => ChipStyle {
+            fill: pal.pill_amber_fill,
+            stroke: pal.status_amber,
+            text: pal.status_amber,
+        },
+        StatusKind::Danger => ChipStyle {
+            fill: pal.pill_red_fill,
+            stroke: pal.status_red,
+            text: pal.status_red,
+        },
+    }
+}
+
+/// Semantic §4B status pill ALWAYS carrying vector icon (`✓` / `!` / `✕`) + text label (`WT_UI_LIBRARY §0.8`).
+fn paint_status_chip(
+    ui: &mut egui::Ui,
+    kind: StatusKind,
+    label: &str,
+    pal: &ThemePalette,
+) -> egui::Response {
+    let style = status_chip_style(kind, pal);
+    let font_id = FontId::new(10.5, FontFamily::Proportional);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, style.text));
+    let icon_w = 7.0_f32;
+    let icon_gap = 4.0_f32;
+    let h_pad = 7.0_f32;
+    let desired_w = (h_pad * 2.0 + icon_w + icon_gap + galley.size().x).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, BADGE_PILL_H), Sense::hover());
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(
+        ui.painter(),
+        rect,
+        RADIUS_BADGE_PILL,
+        style.fill,
+        style.stroke,
+        1.0,
+        ppp,
+    );
+    let cx = snap_scalar_to_px(snapped.min.x + h_pad + icon_w * 0.5, ppp);
+    let cy = snap_scalar_to_px(snapped.center().y, ppp);
+    draw_status_glyph(ui.painter(), Pos2::new(cx, cy), kind, style.text);
+    let label_box = Rect::from_min_max(
+        Pos2::new(snapped.min.x + h_pad + icon_w + icon_gap, snapped.min.y),
+        snapped.max,
+    );
+    let text_pos = optical_galley_pos(ui, label_box, &galley, None, false);
+    ui.painter().galley(text_pos, galley, style.text);
+    resp
+}
+
 fn paint_chip(ui: &mut egui::Ui, label: &str, style: ChipStyle, container_bg: Color32) -> egui::Response {
     let fill = if style.fill == Color32::TRANSPARENT {
         container_bg
@@ -1748,56 +1903,17 @@ fn paint_zone_chip(
     pal: &ThemePalette,
     container_bg: Color32,
 ) -> egui::Response {
-    if matches!(zone, ZoneKind::Body) {
-        return paint_chip(ui, zone.short_label(), zone_chip_style(zone, pal), container_bg);
+    match zone {
+        ZoneKind::Green => paint_status_chip(ui, StatusKind::Success, zone.short_label(), pal),
+        ZoneKind::Red => paint_status_chip(ui, StatusKind::Danger, zone.short_label(), pal),
+        ZoneKind::Body => paint_chip(ui, zone.short_label(), zone_chip_style(zone, pal), container_bg),
     }
-    let (fill, stroke, text_col, dot_col) = match zone {
-        ZoneKind::Green => (pal.pill_green_fill, pal.status_green, pal.status_green, STATUS_GREEN),
-        ZoneKind::Red => (pal.pill_red_fill, pal.status_red, pal.status_red, STATUS_RED),
-        ZoneKind::Body => unreachable!(),
-    };
-    let font_id = FontId::new(10.5, FontFamily::Proportional);
-    let galley = ui.fonts(|f| f.layout_no_wrap(zone.short_label().to_owned(), font_id, text_col));
-    let dot_d = 5.0_f32;
-    let dot_gap = 4.0_f32;
-    let h_pad = 7.0_f32;
-    let desired_w = (h_pad * 2.0 + dot_d + dot_gap + galley.size().x).round();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, BADGE_PILL_H), Sense::hover());
-    let ppp = ui.ctx().pixels_per_point();
-    let snapped = paint_crisp_bordered_box(
-        ui.painter(),
-        rect,
-        RADIUS_BADGE_PILL,
-        fill,
-        stroke,
-        1.0,
-        ppp,
-    );
-    let dot_cx = snap_scalar_to_px(snapped.min.x + h_pad + dot_d * 0.5, ppp);
-    let dot_cy = snap_scalar_to_px(snapped.center().y, ppp);
-    ui.painter()
-        .circle_filled(Pos2::new(dot_cx, dot_cy), dot_d * 0.5, dot_col);
-    let label_box = Rect::from_min_max(
-        Pos2::new(snapped.min.x + h_pad + dot_d + dot_gap, snapped.min.y),
-        snapped.max,
-    );
-    let text_pos = optical_galley_pos(ui, label_box, &galley, None, false);
-    ui.painter().galley(text_pos, galley, text_col);
-    resp
 }
 
 fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
     match zone {
-        ZoneKind::Green => ChipStyle {
-            fill: pal.pill_green_fill,
-            stroke: pal.status_green,
-            text: pal.status_green,
-        },
-        ZoneKind::Red => ChipStyle {
-            fill: pal.pill_red_fill,
-            stroke: pal.status_red,
-            text: pal.status_red,
-        },
+        ZoneKind::Green => status_chip_style(StatusKind::Success, pal),
+        ZoneKind::Red => status_chip_style(StatusKind::Danger, pal),
         ZoneKind::Body => ChipStyle {
             fill: Color32::TRANSPARENT,
             stroke: pal.border,
@@ -1808,26 +1924,18 @@ fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
 
 fn qualifier_chip_style(pal: &ThemePalette) -> ChipStyle {
     ChipStyle {
-        fill: pal.pill_pink_fill,
-        stroke: pal.accent_2,
-        text: pal.pill_pink_text,
-    }
-}
-
-fn no_touch_chip_style(pal: &ThemePalette) -> ChipStyle {
-    ChipStyle {
-        fill: pal.pill_red_fill,
-        stroke: pal.no_touch_outline,
-        text: pal.no_touch_outline,
+        fill: pal.accent_soft_fill,
+        stroke: pal.accent_border,
+        text: pal.accent_pill_text,
     }
 }
 
 fn confidence_chip_style(conf: DependencyConfidence, pal: &ThemePalette) -> ChipStyle {
     match conf {
         DependencyConfidence::Proven => ChipStyle {
-            fill: pal.pill_blue_fill,
-            stroke: pal.accent_line,
-            text: pal.proven_text,
+            fill: pal.accent_soft_fill,
+            stroke: pal.accent_border,
+            text: pal.accent_pill_text,
         },
         DependencyConfidence::Inferred => ChipStyle {
             fill: Color32::TRANSPARENT,
@@ -2172,9 +2280,9 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
     let hovered = resp.hovered();
     let pressed = resp.is_pointer_button_down_on();
     let (fill, border, fg) = if pressed {
-        (pal.widget_active, pal.accent_2, pal.text)
+        (pal.widget_active, pal.accent_border, pal.text)
     } else if hovered {
-        (pal.widget_hover, pal.accent_line, pal.accent_line)
+        (pal.widget_hover, pal.accent_border, pal.accent_line)
     } else {
         (Color32::TRANSPARENT, pal.border, pal.text)
     };
@@ -2514,7 +2622,7 @@ fn draw_facet_popup_row(
             .set(slot, egui::Shape::rect_filled(rect, Rounding::same(RADIUS_PILL), pal.widget_hover));
     } else if selected {
         ui.painter()
-            .set(slot, egui::Shape::rect_filled(rect, Rounding::same(RADIUS_PILL), pal.pill_blue_fill));
+            .set(slot, egui::Shape::rect_filled(rect, Rounding::same(RADIUS_PILL), pal.accent_soft_fill));
     }
 
     let fg = if selected {
@@ -2742,15 +2850,15 @@ fn draw_filter_radio_chip(
     let desired_w = (galley.size().x + SPACE_16).round();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 22.0), Sense::click());
     let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
-        (pal.widget_active, pal.accent_2, pal.text)
+        (pal.widget_active, pal.accent_border, pal.text)
     } else if resp.hovered() {
         (
             pal.widget_hover,
-            pal.accent_line,
+            pal.accent_border,
             if selected { pal.text } else { pal.accent_line },
         )
     } else if selected {
-        (pal.pill_blue_fill, pal.accent_line, pal.text)
+        (pal.accent_soft_fill, pal.accent_border, pal.text)
     } else {
         (pal.widget, pal.border, pal.muted)
     };
@@ -2767,7 +2875,7 @@ fn ensure_report_and_filter_caches(
     rep: &ScanReport,
     pal: &ThemePalette,
     sys_drive_letter: char,
-    dark_mode: bool,
+    theme_key: u32,
 ) {
     let ppp = ctx.pixels_per_point();
     if ui_state.cached_measure_ppp != Some(ppp) {
@@ -2791,7 +2899,7 @@ fn ensure_report_and_filter_caches(
 
     let report_stale = ui_state.cached_report.as_ref().is_none_or(|c| {
         c.scan_ts != rep.scan_timestamp_unix
-            || c.dark_mode != dark_mode
+            || c.theme_key != theme_key
             || c.apps_count != rep.apps.len()
     });
     if report_stale {
@@ -2923,7 +3031,7 @@ fn ensure_report_and_filter_caches(
 
         ui_state.cached_report = Some(CachedReportData {
             scan_ts: rep.scan_timestamp_unix,
-            dark_mode,
+            theme_key,
             apps_count: rep.apps.len(),
             app_idx_by_id,
             apps,
@@ -3062,7 +3170,7 @@ fn draw_compact_pod_checkbox(
     let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, alloc_h), Sense::click());
     let ppp = ui.ctx().pixels_per_point();
     let (fill, border_col, check_col) =
-        resolve_checkbox_colors(BrandVariant::Blue, *checked, resp.hovered(), pal);
+        resolve_checkbox_colors(*checked, resp.hovered(), pal);
     let box_rect = Rect::from_center_size(
         Pos2::new(hit_rect.min.x + 7.0, hit_rect.center().y),
         Vec2::splat(14.0),
@@ -3265,6 +3373,8 @@ fn draw_drive_pods_grid(
                                     ui.allocate_exact_size(Vec2::new(inner_w, 16.0), Sense::hover());
                                 let (status_txt, status_col) = if !included {
                                     ("Not scanned".to_string(), pal.muted)
+                                } else if drv.total_bytes == 0 {
+                                    ("✕ Read error".to_string(), pal.status_red)
                                 } else if busy_this_drive {
                                     ("Scanning…".to_string(), pal.accent_line)
                                 } else {
@@ -3332,7 +3442,7 @@ fn draw_drive_pods_grid(
                                     ui.painter().rect_filled(
                                         snapped_track,
                                         Rounding::same(1.0),
-                                        STATUS_RED,
+                                        pal.status_red,
                                     );
                                 } else if fill_px > 0.0 && snapped_track.height() > 0.0 {
                                     let fill_rect = Rect::from_min_size(
@@ -3343,11 +3453,12 @@ fn draw_drive_pods_grid(
                                         ),
                                     );
                                     if included {
-                                        paint_horizontal_wt_gradient_bar(
+                                        paint_horizontal_theme_sweep_bar(
                                             ui.painter(),
                                             snapped_track,
                                             fill_rect,
                                             1.0,
+                                            pal,
                                         );
                                     } else {
                                         let grey_col = lerp_color(pod_fill, pal.muted, 0.35);
@@ -3477,7 +3588,7 @@ fn draw_drive_pods_grid(
                                         RADIUS_CONTROL,
                                         !busy_this_drive,
                                         false,
-                                        ButtonVariant::PrimaryOutline(BrandVariant::Blue),
+                                        ButtonVariant::PrimaryOutline,
                                         pal,
                                     );
                                     if r_resp
@@ -3641,11 +3752,11 @@ fn draw_pod_scope_overlay(
                                             },
                                             |ui| {
                                                 if is_locked {
-                                                    paint_chip(
+                                                    paint_status_chip(
                                                         ui,
+                                                        StatusKind::Danger,
                                                         "LOCKED",
-                                                        no_touch_chip_style(pal),
-                                                        pal.panel,
+                                                        pal,
                                                     );
                                                 } else if draw_z_button(
                                                     ui,
@@ -3744,8 +3855,8 @@ fn draw_unattributed_facet_popup_overlay(
     rep: &ScanReport,
     facet_key: &'static str,
     trigger_rect: Rect,
+    pal: &ThemePalette,
 ) {
-    let pal = ThemePalette::for_mode(ui_state.applied_theme.unwrap_or(ThemeMode::Dark));
     let screen = ctx.screen_rect();
     let popup_w = match facet_key {
         "unattrib_zone" => 236.0_f32,
@@ -3782,7 +3893,7 @@ fn draw_unattributed_facet_popup_overlay(
                         ("unattrib_facet_scroll", facet_key),
                         Some(max_popup_h),
                         [false, true],
-                        &pal,
+                        pal,
                         pal.panel,
                         |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
@@ -3797,7 +3908,7 @@ fn draw_unattributed_facet_popup_overlay(
                                         "All drives",
                                         Some(&all_cnt),
                                         is_all,
-                                        &pal,
+                                        pal,
                                     ) {
                                         ui_state.unattrib_facets.drive = None;
                                         picked = true;
@@ -3820,7 +3931,7 @@ fn draw_unattributed_facet_popup_overlay(
                                             &format!("{dl}:\\"),
                                             Some(&meta),
                                             sel,
-                                            &pal,
+                                            pal,
                                         ) {
                                             ui_state.unattrib_facets.drive = Some(dl);
                                             picked = true;
@@ -3845,7 +3956,7 @@ fn draw_unattributed_facet_popup_overlay(
                                             band.label(),
                                             Some(&meta),
                                             sel,
-                                            &pal,
+                                            pal,
                                         ) {
                                             ui_state.unattrib_facets.size_band = band;
                                             picked = true;
@@ -3873,7 +3984,7 @@ fn draw_unattributed_facet_popup_overlay(
                                             zone.label(),
                                             Some(&meta),
                                             sel,
-                                            &pal,
+                                            pal,
                                         ) {
                                             ui_state.unattrib_facets.location_zone = zone;
                                             picked = true;
@@ -3936,16 +4047,17 @@ pub fn draw_app_ui_with_drive_busy(
     emit: &mut dyn FnMut(UiAction),
 ) {
     let mode = config.theme_mode;
-    if ui_state.applied_theme != Some(mode) {
-        apply_theme_visuals(ctx, mode);
-        ui_state.applied_theme = Some(mode);
+    let theme_key = compute_theme_key(mode, config.theme_preset, config.theme_custom_rgb);
+    if ui_state.applied_theme_key != Some(theme_key) {
+        apply_theme_visuals_with(ctx, mode, config.theme_preset, config.theme_custom_rgb);
+        ui_state.applied_theme_key = Some(theme_key);
+        ui_state.has_prop_strong = ctx.fonts(|f| {
+            f.families()
+                .iter()
+                .any(|fam| *fam == FontFamily::Name("ProportionalStrong".into()))
+        });
     }
-    ui_state.has_prop_strong = ctx.fonts(|f| {
-        f.families()
-            .iter()
-            .any(|fam| *fam == FontFamily::Name("ProportionalStrong".into()))
-    });
-    let pal = ThemePalette::for_mode(mode);
+    let pal = ThemePalette::from_config(mode, config.theme_preset, config.theme_custom_rgb);
     ui_state.first_unattrib_web_search_rect = None;
     ui_state.unattrib_mid_row_rect = None;
     ui_state.first_drive_pod_rect = None;
@@ -3965,7 +4077,7 @@ pub fn draw_app_ui_with_drive_busy(
             rep,
             &pal,
             sys_drive_letter,
-            mode == ThemeMode::Dark,
+            pal.theme_key,
         );
     }
 
@@ -3987,7 +4099,7 @@ pub fn draw_app_ui_with_drive_busy(
         .show_separator_line(false)
         .frame(
             egui::Frame::none()
-                .fill(pal.bg)
+                .fill(Color32::TRANSPARENT)
                 .stroke(Stroke::NONE)
                 .inner_margin(Margin {
                     left: SPACE_16,
@@ -4021,7 +4133,7 @@ pub fn draw_app_ui_with_drive_busy(
                         (s, pal.accent_line, None)
                     } else if scope_stale {
                         (
-                            "Read-only · Scope changed — rescan needed".to_string(),
+                            "Read-only · ! Scope changed — rescan needed".to_string(),
                             pal.status_amber,
                             Some(format!(
                                 "Last scan: {last_scan_str}\nScan scope, exclusions, or zone rules changed — click Rescan needed to refresh."
@@ -4102,7 +4214,7 @@ pub fn draw_app_ui_with_drive_busy(
                         RADIUS_CONTROL,
                         !any_scan_active,
                         false,
-                        ButtonVariant::PrimaryOutline(BrandVariant::Blue),
+                        ButtonVariant::PrimaryOutline,
                         &pal,
                     );
                     let rescan_tip = if scope_stale {
@@ -4200,9 +4312,9 @@ pub fn draw_app_ui_with_drive_busy(
                             });
                         }
                     }
-                    ui.painter().rect_filled(
+                    paint_solid_px_rect(
+                        ui.painter(),
                         Rect::from_min_size(Pos2::new(sr.left(), top_y), Vec2::new(sr.width(), 1.0)),
-                        Rounding::ZERO,
                         if grip_active { pal.accent_line } else { pal.border },
                     );
                     if !ui_state.ledger_collapsed {
@@ -4241,7 +4353,7 @@ pub fn draw_app_ui_with_drive_busy(
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(pal.bg)
+                        .fill(Color32::TRANSPARENT)
                         .inner_margin(Margin::symmetric(SPACE_16, v_pad)),
                 )
                 .show(ctx, |ui| {
@@ -4595,6 +4707,16 @@ pub fn draw_app_ui_with_drive_busy(
                         }
 
                         if list_view_dirty {
+                            if let Some(rep) = report {
+                                ensure_report_and_filter_caches(
+                                    ctx,
+                                    ui_state,
+                                    rep,
+                                    &pal,
+                                    sys_drive_letter,
+                                    pal.theme_key,
+                                );
+                            }
                             emit(UiAction::UpdateListView {
                                 sort_mode: ui_state.sort_mode,
                                 sort_direction: ui_state.sort_direction,
@@ -4608,13 +4730,17 @@ pub fn draw_app_ui_with_drive_busy(
                     if let Some(rep) = report {
                         for w in &rep.warnings {
                             ui.add_space(SPACE_4);
-                            draw_truncated_text(
-                                ui,
-                                &format!("Warning: {w}"),
-                                FontId::new(11.0, FontFamily::Proportional),
-                                pal.status_red,
-                                false,
-                            );
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_4;
+                                paint_status_chip(ui, StatusKind::Danger, "Warning", &pal);
+                                draw_truncated_text(
+                                    ui,
+                                    w,
+                                    FontId::new(11.0, FontFamily::Proportional),
+                                    pal.status_red,
+                                    false,
+                                );
+                            });
                         }
                     }
 
@@ -4635,7 +4761,14 @@ pub fn draw_app_ui_with_drive_busy(
             if let (Some(rep), Some((facet_key, trigger_rect))) =
                 (report, active_unattrib_facet_anchor)
             {
-                draw_unattributed_facet_popup_overlay(ctx, ui_state, rep, facet_key, trigger_rect);
+                draw_unattributed_facet_popup_overlay(
+                    ctx,
+                    ui_state,
+                    rep,
+                    facet_key,
+                    trigger_rect,
+                    &pal,
+                );
             } else {
                 ui_state.open_unattrib_facet_popup = None;
             }
@@ -4656,7 +4789,7 @@ pub fn draw_app_ui_with_drive_busy(
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(pal.bg)
+                        .fill(Color32::TRANSPARENT)
                         .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
@@ -4692,7 +4825,7 @@ pub fn draw_app_ui_with_drive_busy(
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(pal.bg)
+                        .fill(Color32::TRANSPARENT)
                         .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
@@ -4865,6 +4998,8 @@ fn draw_main_app_list(
         let (nm, nd) = mode.click_transition(ui_state.sort_mode, ui_state.sort_direction);
         ui_state.sort_mode = nm;
         ui_state.sort_direction = nd;
+        ui_state.cached_filtered = None;
+        ui.ctx().request_repaint();
         emit(UiAction::UpdateListView {
             sort_mode: ui_state.sort_mode,
             sort_direction: ui_state.sort_direction,
@@ -4878,8 +5013,7 @@ fn draw_main_app_list(
         Pos2::new(panel_left + inset, hdr_y1),
         Vec2::new((panel_w - inset * 2.0).max(0.0), 1.0),
     );
-    ui.painter()
-        .rect_filled(hdr_div_rect, Rounding::ZERO, pal.border);
+    paint_solid_px_rect(ui.painter(), hdr_div_rect, pal.border);
     ui.advance_cursor_after_rect(hdr_div_rect);
 
     // Precompute cumulative row y-offsets across all `shown` rows (`<= 262` floats) for exact O(log N) viewport virtualization.
@@ -5063,7 +5197,7 @@ fn draw_main_app_list(
                                         .size()
                                         .x
                                     });
-                                    let chip_reserve = chip_text_w + 14.0 + SPACE_8;
+                                    let chip_reserve = chip_text_w + 25.0 + SPACE_8;
                                     let max_name_w = (text_rect.width() - chip_reserve).max(40.0);
                                     if measured_name_w > max_name_w + 0.5 {
                                         truncated_name_tip = Some(app.display_name.clone());
@@ -5085,11 +5219,11 @@ fn draw_main_app_list(
                                         rt = rt.strong();
                                     }
                                     t_ui.add(egui::Label::new(rt).truncate().selectable(false));
-                                    paint_chip(
+                                    paint_status_chip(
                                         &mut n_ui,
+                                        StatusKind::Danger,
                                         chip_lbl,
-                                        no_touch_chip_style(pal),
-                                        if expanded { pal.panel_alt } else { pal.panel },
+                                        pal,
                                     );
                                 } else {
                                     if measured_name_w > text_rect.width() + 0.5 {
@@ -5177,17 +5311,16 @@ fn draw_main_app_list(
                             let delta_rect = cols.delta.rect(y0, y1);
                             match delta_info.kind {
                                 DeltaCellKind::NewPill => {
-                                    let row_surface = if expanded { pal.panel_alt } else { pal.panel };
                                     let mut d_ui = table_cell_ui(
                                         ui,
                                         delta_rect,
                                         Layout::right_to_left(Align::Center),
                                     );
-                                    let resp = paint_chip(
+                                    let resp = paint_status_chip(
                                         &mut d_ui,
+                                        StatusKind::Success,
                                         "new",
-                                        new_growth_chip_style(pal),
-                                        row_surface,
+                                        pal,
                                     );
                                     if let Some(tip) = delta_info.tip.as_deref() {
                                         let _ = resp.on_hover_text(tip);
@@ -5300,17 +5433,17 @@ fn draw_main_app_list(
                                     (track_rect.width() * ratio as f32).clamp(1.0, track_rect.width())
                                 };
                                 if fill_w > 0.0 {
-                                    let bar_col = lerp_color(
-                                        row_surface,
-                                        pal.accent_line,
-                                        if pal.bg.r() < 128 { 0.52 } else { 0.45 },
-                                    );
                                     let fill_rect = Rect::from_min_size(
                                         track_rect.min,
                                         Vec2::new(fill_w, track_rect.height()),
                                     );
-                                    ui.painter()
-                                        .rect_filled(fill_rect, Rounding::same(1.0), bar_col);
+                                    paint_horizontal_theme_sweep_bar(
+                                        ui.painter(),
+                                        track_rect,
+                                        fill_rect,
+                                        1.0,
+                                        pal,
+                                    );
                                 }
                             }
 
@@ -5720,7 +5853,7 @@ fn draw_main_app_list(
                                                 f.layout_no_wrap(
                                                     q_lbl.to_owned(),
                                                     FontId::new(10.5, FontFamily::Proportional),
-                                                    pal.pill_pink_text,
+                                                    pal.accent_pill_text,
                                                 )
                                                 .size()
                                                 .x
@@ -5972,24 +6105,24 @@ fn draw_main_app_list(
                                         true,
                                         pal,
                                     );
-                                    ui.painter().rect_filled(
+                                    paint_solid_px_rect(
+                                        ui.painter(),
                                         Rect::from_min_size(
                                             Pos2::new(sub_x0, dy1 - 1.0),
                                             Vec2::new(sub_w, 1.0),
                                         ),
-                                        Rounding::ZERO,
                                         pal.border,
                                     );
 
                                     for (dep_i, dep) in app.dependencies.iter().enumerate() {
                                         if dep_i > 0 {
                                             let div_y = ui.cursor().min.y;
-                                            ui.painter().rect_filled(
+                                            paint_solid_px_rect(
+                                                ui.painter(),
                                                 Rect::from_min_size(
                                                     Pos2::new(sub_x0, div_y),
                                                     Vec2::new(sub_w, 1.0),
                                                 ),
-                                                Rounding::ZERO,
                                                 pal.border,
                                             );
                                             ui.add_space(2.0);
@@ -6071,11 +6204,11 @@ fn draw_main_app_list(
                                                 );
                                             }
                                             if !dep.present {
-                                                paint_chip(
+                                                paint_status_chip(
                                                     &mut dc_ui,
+                                                    StatusKind::Danger,
                                                     "missing",
-                                                    no_touch_chip_style(pal),
-                                                    pal.panel_alt,
+                                                    pal,
                                                 );
                                             }
                                         }
@@ -6195,18 +6328,22 @@ fn draw_main_app_list(
                 );
                 if expanded {
                     let drawer_rect = inner_row_rect.shrink2(Vec2::new(2.0, 1.0));
-                    let (fill_poly, rim_mesh) =
-                        translate_cached_rim_for_rect(drawer_rect, RADIUS_PANEL, ppp, cached_rim);
+                    let (fill_poly, rim_mesh) = translate_cached_rim_for_rect(
+                        drawer_rect,
+                        RADIUS_PANEL,
+                        ppp,
+                        pal,
+                        cached_rim,
+                    );
                     ui.painter().set(
                         row_slot,
                         egui::Shape::convex_polygon(fill_poly, pal.panel_alt, Stroke::NONE),
                     );
                     ui.painter().add(egui::Shape::mesh(rim_mesh));
                 } else if row_outer_rect.inner {
-                    ui.painter().set(
-                        row_slot,
-                        egui::Shape::rect_filled(inner_row_rect, Rounding::ZERO, pal.widget_hover),
-                    );
+                    let mut m = egui::epaint::Mesh::default();
+                    add_solid_rect_quad(&mut m, inner_row_rect, pal.widget_hover);
+                    ui.painter().set(row_slot, egui::Shape::mesh(m));
                 }
 
                 let next_expanded = visible_indices
@@ -6217,7 +6354,7 @@ fn draw_main_app_list(
                         Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
                         Vec2::new(inner_row_rect.width(), 1.0),
                     );
-                    ui.painter().rect_filled(sep, Rounding::ZERO, pal.border);
+                    paint_solid_px_rect(ui.painter(), sep, pal.border);
                 }
             }
 
@@ -6401,9 +6538,9 @@ fn draw_reverse_dependency_overlay(
                                 ui,
                                 &used_lbl,
                                 ChipStyle {
-                                    fill: pal.pill_blue_fill,
-                                    stroke: pal.accent_line,
-                                    text: pal.proven_text,
+                                    fill: pal.accent_soft_fill,
+                                    stroke: pal.accent_border,
+                                    text: pal.accent_pill_text,
                                 },
                                 pal.panel,
                             );
@@ -6568,18 +6705,19 @@ fn draw_pinned_bottom_groups(
                             false,
                         )
                         .on_hover_text(exact);
-                        let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                        ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
+                        let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                        draw_status_glyph(
+                            ui.painter(),
+                            dot_r.center(),
+                            StatusKind::Success,
+                            pal.status_green,
+                        );
                     } else {
-                        paint_chip(
+                        paint_status_chip(
                             ui,
+                            StatusKind::Danger,
                             &format!("diff {diff} B"),
-                            ChipStyle {
-                                fill: pal.pill_red_fill,
-                                stroke: pal.status_red,
-                                text: pal.status_red,
-                            },
-                            pal.panel_alt,
+                            pal,
                         );
                     }
                 }
@@ -6671,6 +6809,7 @@ fn draw_pinned_bottom_groups(
     let unattrib_facets = &mut ui_state.unattrib_facets;
     let open_unattrib_facet_popup = &mut ui_state.open_unattrib_facet_popup;
     let unattrib_sort = &mut ui_state.unattrib_sort;
+    let cached_unattrib = &mut ui_state.cached_unattrib;
     let mut unattrib_facet_anchor: Option<(&'static str, Rect)> = None;
 
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
@@ -6683,6 +6822,7 @@ fn draw_pinned_bottom_groups(
                     rep.windows_system_total_bytes,
                     "ESTIMATE · system remainder + OS folders + pagefile/hiberfil",
                     pal.muted,
+                    None,
                     expand_windows_system,
                     true,
                     pal,
@@ -6693,7 +6833,7 @@ fn draw_pinned_bottom_groups(
                                     ui,
                                     &rf.path,
                                     rf.bytes,
-                                    Some(("ROOT", no_touch_chip_style(pal))),
+                                    Some(LedgerRowBadge::Status(StatusKind::Danger, "ROOT")),
                                     pal,
                                 );
                             }
@@ -6702,7 +6842,7 @@ fn draw_pinned_bottom_groups(
                                     ui,
                                     &osf.path,
                                     osf.bytes,
-                                    Some(("SYSTEM", no_touch_chip_style(pal))),
+                                    Some(LedgerRowBadge::Status(StatusKind::Danger, "SYSTEM")),
                                     pal,
                                 );
                                 let _ = resp.on_hover_text(osf.basis_label());
@@ -6712,7 +6852,7 @@ fn draw_pinned_bottom_groups(
                                     ui,
                                     &format!("{}:\\ hardlink deduplication offset", sys.drive_letter),
                                     sys.hardlink_overlap_bytes,
-                                    Some(("HARDLINK", qualifier_chip_style(pal))),
+                                    Some(LedgerRowBadge::Accent("HARDLINK")),
                                     pal,
                                 );
                                 let _ = resp.on_hover_text(
@@ -6723,7 +6863,7 @@ fn draw_pinned_bottom_groups(
                                 ui,
                                 &format!("{}:\\Windows & system remainder (estimate)", sys.drive_letter),
                                 sys.remainder_bytes,
-                                Some(("ESTIMATE", qualifier_chip_style(pal))),
+                                Some(LedgerRowBadge::Accent("ESTIMATE")),
                                 pal,
                             );
                         }
@@ -6736,6 +6876,7 @@ fn draw_pinned_bottom_groups(
                     rep.your_files_total_bytes,
                     "Shell folders & Personal-files zones · read-only",
                     pal.muted,
+                    None,
                     expand_your_files,
                     true,
                     pal,
@@ -6762,7 +6903,8 @@ fn draw_pinned_bottom_groups(
                     "Shared & system caches",
                     rep.shared_caches_total_bytes,
                     &format!("{} regenerable Temp / DXCache / Package Cache folders", rep.shared_caches.len()),
-                    STATUS_GREEN,
+                    pal.status_green,
+                    Some(StatusKind::Success),
                     expand_shared_caches,
                     true,
                     pal,
@@ -6773,7 +6915,7 @@ fn draw_pinned_bottom_groups(
                                 vis_idx,
                                 &item.path,
                                 item.bytes,
-                                Some(("GREEN", zone_chip_style(ZoneKind::Green, pal))),
+                                Some(LedgerRowBadge::Status(StatusKind::Success, "GREEN")),
                                 pal,
                                 unattrib_exists_cache,
                                 &mut None,
@@ -6790,17 +6932,40 @@ fn draw_pinned_bottom_groups(
                     rep.unattributed_total_bytes,
                     &format!("{} folders with no verified app owner", rep.unattributed.len()),
                     unattrib_tick,
+                    None,
                     expand_unattributed,
                     false,
                     pal,
                     |ui| {
-                        let (filtered_unattrib, filtered_sub_bytes) =
-                            filter_and_sort_unattributed_with_facets(
-                                &rep.unattributed,
-                                unattrib_search_query,
-                                unattrib_facets,
-                                *unattrib_sort,
-                            );
+                        let cache_stale = cached_unattrib.as_ref().is_none_or(|c| {
+                            c.scan_ts != rep.scan_timestamp_unix
+                                || c.count != rep.unattributed.len()
+                                || c.search_query != *unattrib_search_query
+                                || c.facets != *unattrib_facets
+                                || c.sort != *unattrib_sort
+                        });
+                        if cache_stale {
+                            let (filtered_items, sub_bytes) =
+                                filter_and_sort_unattributed_with_facets(
+                                    &rep.unattributed,
+                                    unattrib_search_query,
+                                    unattrib_facets,
+                                    *unattrib_sort,
+                                );
+                            let visible_indices = filtered_items.into_iter().map(|(i, _)| i).collect();
+                            *cached_unattrib = Some(CachedUnattributedList {
+                                scan_ts: rep.scan_timestamp_unix,
+                                count: rep.unattributed.len(),
+                                search_query: unattrib_search_query.clone(),
+                                facets: unattrib_facets.clone(),
+                                sort: *unattrib_sort,
+                                visible_indices,
+                                filtered_sub_bytes: sub_bytes,
+                            });
+                        }
+                        let cu = cached_unattrib.as_ref().unwrap();
+                        let filtered_count = cu.visible_indices.len();
+                        let filtered_sub_bytes = cu.filtered_sub_bytes;
                         let any_unattrib_filter = !unattrib_search_query.trim().is_empty()
                             || !unattrib_facets.is_default()
                             || *unattrib_sort != UnattributedSortMode::SizeDesc;
@@ -6935,7 +7100,7 @@ fn draw_pinned_bottom_groups(
                                 || !unattrib_facets.is_default();
                             let stats_txt = format!(
                                 "{} of {} folders · {}",
-                                filtered_unattrib.len(),
+                                filtered_count,
                                 rep.unattributed.len(),
                                 format_size_2dec(filtered_sub_bytes),
                             );
@@ -6950,7 +7115,7 @@ fn draw_pinned_bottom_groups(
                         });
                         ui.add_space(2.0);
 
-                        if filtered_unattrib.is_empty() {
+                        if cu.visible_indices.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.add_space(SPACE_16);
                                 ui.add(
@@ -6963,10 +7128,11 @@ fn draw_pinned_bottom_groups(
                                 );
                             });
                         } else {
-                            for (vis_idx, (_, item)) in filtered_unattrib.iter().enumerate() {
+                            for (vis_idx, &idx) in cu.visible_indices.iter().enumerate() {
+                                let item = &rep.unattributed[idx];
                                 let chip = item
                                     .is_loose_files
-                                    .then(|| ("loose files", qualifier_chip_style(pal)));
+                                    .then(|| LedgerRowBadge::Accent("loose files"));
                                 draw_ledger_folder_item_row(
                                     ui,
                                     vis_idx,
@@ -7072,18 +7238,19 @@ fn draw_pinned_bottom_groups(
                                 pal.status_green,
                                 false,
                             );
-                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                            ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
+                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            draw_status_glyph(
+                                ui.painter(),
+                                dot_r.center(),
+                                StatusKind::Success,
+                                pal.status_green,
+                            );
                         } else {
-                            paint_chip(
+                            paint_status_chip(
                                 ui,
+                                StatusKind::Danger,
                                 &format!("diff {diff} B"),
-                                ChipStyle {
-                                    fill: pal.pill_red_fill,
-                                    stroke: pal.status_red,
-                                    text: pal.status_red,
-                                },
-                                pal.panel_alt,
+                                pal,
                             );
                         }
                     },
@@ -7101,6 +7268,7 @@ fn draw_pinned_group_card(
     total_bytes: u64,
     subtitle: &str,
     accent: Color32,
+    status_icon: Option<StatusKind>,
     expanded: &mut bool,
     draw_bottom_divider: bool,
     pal: &ThemePalette,
@@ -7124,6 +7292,10 @@ fn draw_pinned_group_card(
                     let snapped_tick = snap_rect_to_pixels(tick_r, ui.ctx().pixels_per_point());
                     paint_solid_px_rect(ui.painter(), snapped_tick, accent);
                     draw_chevron(ui, *expanded, if *expanded { accent } else { pal.muted });
+                    if let Some(kind) = status_icon {
+                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        draw_status_glyph(ui.painter(), ir.center(), kind, accent);
+                    }
                     let title_font = FontId::new(12.0, FontFamily::Proportional);
                     draw_truncated_text(ui, title, title_font.clone(), pal.text, false);
                     draw_baseline_paired_text(
@@ -7152,17 +7324,27 @@ fn draw_pinned_group_card(
 
     let r = inner.response.rect;
     if inner.inner {
-        ui.painter().set(
-            bg_slot,
-            egui::Shape::rect_filled(r, Rounding::ZERO, pal.widget_hover),
-        );
+        let mut m = egui::epaint::Mesh::default();
+        add_solid_rect_quad(&mut m, r, pal.widget_hover);
+        ui.painter().set(bg_slot, egui::Shape::mesh(m));
     }
     if draw_bottom_divider {
         let sep = Rect::from_min_size(
             Pos2::new(r.min.x, (r.max.y - 1.0).round()),
             Vec2::new(r.width(), 1.0),
         );
-        ui.painter().rect_filled(sep, Rounding::ZERO, pal.border);
+        paint_solid_px_rect(ui.painter(), sep, pal.border);
+    }
+}
+
+fn draw_ledger_row_badge(ui: &mut egui::Ui, badge: LedgerRowBadge, pal: &ThemePalette) {
+    match badge {
+        LedgerRowBadge::Accent(lbl) => {
+            paint_chip(ui, lbl, qualifier_chip_style(pal), pal.panel);
+        }
+        LedgerRowBadge::Status(kind, lbl) => {
+            paint_status_chip(ui, kind, lbl, pal);
+        }
     }
 }
 
@@ -7170,7 +7352,7 @@ fn draw_simple_item_row(
     ui: &mut egui::Ui,
     path: &str,
     bytes: u64,
-    chip: Option<(&str, ChipStyle)>,
+    badge: Option<LedgerRowBadge>,
     pal: &ThemePalette,
 ) -> egui::Response {
     let hover_slot = ui.painter().add(egui::Shape::Noop);
@@ -7181,8 +7363,8 @@ fn draw_simple_item_row(
         Sense::hover(),
         |ui| {
             ui.add_space(SPACE_16);
-            if let Some((lbl, style)) = chip {
-                paint_chip(ui, lbl, style, pal.panel);
+            if let Some(b) = badge {
+                draw_ledger_row_badge(ui, b, pal);
             }
             draw_truncated_text(
                 ui,
@@ -7201,10 +7383,9 @@ fn draw_simple_item_row(
         Pos2::new(row_resp.rect.max.x + SPACE_12, row_resp.rect.max.y),
     );
     if ui.rect_contains_pointer(full_hover_rect) {
-        ui.painter().set(
-            hover_slot,
-            egui::Shape::rect_filled(full_hover_rect, Rounding::ZERO, pal.widget_hover),
-        );
+        let mut m = egui::epaint::Mesh::default();
+        add_solid_rect_quad(&mut m, full_hover_rect, pal.widget_hover);
+        ui.painter().set(hover_slot, egui::Shape::mesh(m));
     }
     row_resp
 }
@@ -7215,7 +7396,7 @@ fn draw_ledger_folder_item_row(
     row_idx: usize,
     path: &str,
     bytes: u64,
-    chip: Option<(&str, ChipStyle)>,
+    badge: Option<LedgerRowBadge>,
     pal: &ThemePalette,
     exists_cache: &mut HashMap<String, bool>,
     first_web_search_rect: &mut Option<Rect>,
@@ -7236,10 +7417,9 @@ fn draw_ledger_folder_item_row(
         Pos2::new(row_rect.max.x + SPACE_12, row_rect.max.y),
     );
     if ui.rect_contains_pointer(full_hover_rect) {
-        ui.painter().set(
-            hover_slot,
-            egui::Shape::rect_filled(full_hover_rect, Rounding::ZERO, pal.widget_hover),
-        );
+        let mut m = egui::epaint::Mesh::default();
+        add_solid_rect_quad(&mut m, full_hover_rect, pal.widget_hover);
+        ui.painter().set(hover_slot, egui::Shape::mesh(m));
     }
     if row_idx == 3 {
         *mid_row_rect = Some(row_rect);
@@ -7266,8 +7446,8 @@ fn draw_ledger_folder_item_row(
     );
     left_ui.spacing_mut().item_spacing.x = SPACE_8;
     left_ui.add_space(SPACE_16);
-    if let Some((lbl, style)) = chip {
-        paint_chip(&mut left_ui, lbl, style, pal.panel);
+    if let Some(b) = badge {
+        draw_ledger_row_badge(&mut left_ui, b, pal);
     }
     draw_truncated_text(
         &mut left_ui,
@@ -7517,9 +7697,9 @@ fn draw_reverse_group_header(
                     ui,
                     &format!("{} binary importers", dep.binary_importer_count),
                     ChipStyle {
-                        fill: pal.pill_blue_fill,
-                        stroke: pal.accent_line,
-                        text: pal.proven_text,
+                        fill: pal.accent_soft_fill,
+                        stroke: pal.accent_border,
+                        text: pal.accent_pill_text,
                     },
                     pal.panel,
                 );
@@ -7539,6 +7719,277 @@ fn draw_reverse_group_header(
     )
 }
 
+fn draw_theme_preset_swatch_chip(
+    ui: &mut egui::Ui,
+    preset: ThemePresetChoice,
+    selected: bool,
+    pal: &ThemePalette,
+    custom_rgb: [u8; 3],
+) -> bool {
+    let label = preset.label();
+    let font_id = FontId::new(11.5, FontFamily::Proportional);
+    let text_col = if selected { pal.text } else { pal.muted };
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_col));
+    let swatch_sz = 10.0_f32;
+    let swatch_gap = 6.0_f32;
+    let h_pad = 8.0_f32;
+    let desired_w = (h_pad * 2.0 + swatch_sz + swatch_gap + galley.size().x).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 24.0), Sense::click());
+    let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
+        (pal.widget_active, pal.accent_border, pal.text)
+    } else if resp.hovered() {
+        (
+            pal.widget_hover,
+            pal.accent_border,
+            if selected { pal.text } else { pal.accent_line },
+        )
+    } else if selected {
+        (pal.accent_soft_fill, pal.accent_border, pal.text)
+    } else {
+        (pal.widget, pal.border, pal.muted)
+    };
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped = paint_crisp_bordered_box(ui.painter(), rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
+    let sw_rgb = if preset == ThemePresetChoice::Custom {
+        custom_rgb
+    } else {
+        preset.base_rgb()
+    };
+    let sw_col = Color32::from_rgb(sw_rgb[0], sw_rgb[1], sw_rgb[2]);
+    let sw_rect = Rect::from_center_size(
+        Pos2::new(snapped.min.x + h_pad + swatch_sz * 0.5, snapped.center().y),
+        Vec2::splat(swatch_sz),
+    );
+    paint_crisp_bordered_box(
+        ui.painter(),
+        sw_rect,
+        3.0,
+        sw_col,
+        if selected { pal.text } else { pal.border },
+        1.0,
+        ppp,
+    );
+    let text_rect = Rect::from_min_max(
+        Pos2::new(snapped.min.x + h_pad + swatch_sz + swatch_gap, snapped.min.y),
+        snapped.max,
+    );
+    let text_pos = optical_galley_pos(ui, text_rect, &galley, None, false);
+    ui.painter().galley(text_pos, galley, draw_fg);
+    resp.clicked()
+}
+
+fn draw_appearance_theme_card(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    width_px: f32,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    ui.label(
+        RichText::new("Appearance & Theme")
+            .size(16.0)
+            .color(pal.text),
+    );
+    ui.label(
+        RichText::new(
+            "One monochrome shade ladder across the whole UI. Backgrounds stay pure neutral; status badges keep semantic icons + labels.",
+        )
+        .size(11.5)
+        .color(pal.muted),
+    );
+    ui.add_space(SPACE_4);
+
+    let card_w = (width_px - SCROLL_GUTTER_W).max(240.0);
+    draw_crisp_frame(
+        ui,
+        pal.panel,
+        pal.border,
+        RADIUS_PANEL,
+        Margin::symmetric(SPACE_12, SPACE_8),
+        |ui| {
+            let inner_w = (card_w - SPACE_12 * 2.0 - 2.0).max(200.0);
+            ui.set_width(inner_w);
+            ui.spacing_mut().item_spacing.y = SPACE_8;
+
+            // Row 1: Theme mode + curated presets + Custom
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                ui.label(RichText::new("Mode:").size(11.5).color(pal.muted));
+                for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                    let lbl = match mode {
+                        ThemeMode::Dark => "Dark",
+                        ThemeMode::Light => "Light",
+                    };
+                    if draw_filter_radio_chip(ui, lbl, config.theme_mode == mode, pal)
+                        && config.theme_mode != mode
+                    {
+                        emit(UiAction::SetTheme {
+                            mode,
+                            preset: config.theme_preset,
+                            custom_rgb: config.theme_custom_rgb,
+                        });
+                    }
+                }
+                ui.add_space(SPACE_8);
+                ui.label(RichText::new("Colour:").size(11.5).color(pal.muted));
+                for preset in ThemePresetChoice::PRESETS {
+                    let selected = config.theme_preset == preset;
+                    if draw_theme_preset_swatch_chip(ui, preset, selected, pal, config.theme_custom_rgb)
+                        && !selected
+                    {
+                        emit(UiAction::SetTheme {
+                            mode: config.theme_mode,
+                            preset,
+                            custom_rgb: config.theme_custom_rgb,
+                        });
+                    }
+                }
+                let custom_sel = config.theme_preset == ThemePresetChoice::Custom;
+                if draw_theme_preset_swatch_chip(
+                    ui,
+                    ThemePresetChoice::Custom,
+                    custom_sel,
+                    pal,
+                    config.theme_custom_rgb,
+                ) && !custom_sel
+                {
+                    ui_state.custom_hex_input = format_hex_rgb(config.theme_custom_rgb);
+                    ui_state.custom_hex_valid = true;
+                    emit(UiAction::SetTheme {
+                        mode: config.theme_mode,
+                        preset: ThemePresetChoice::Custom,
+                        custom_rgb: config.theme_custom_rgb,
+                    });
+                }
+            });
+
+            // Row 2: Custom RGB/Hex picker (shown when Custom is active)
+            if config.theme_preset == ThemePresetChoice::Custom {
+                let mut next_rgb = config.theme_custom_rgb;
+                let mut custom_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                    ui.label(RichText::new("Hex:").size(11.5).color(pal.muted));
+                    let hex_id = ui.make_persistent_id("custom_theme_hex");
+                    if !ui.ctx().memory(|m| m.has_focus(hex_id)) && ui_state.custom_hex_valid {
+                        ui_state.custom_hex_input = format_hex_rgb(next_rgb);
+                    }
+                    let hex_resp = draw_crisp_text_input(
+                        ui,
+                        "custom_theme_hex",
+                        &mut ui_state.custom_hex_input,
+                        92.0,
+                        "#7CCBF2",
+                        pal.input_bg,
+                        pal,
+                    );
+                    if hex_resp.changed() {
+                        if let Some(parsed) = parse_hex_rgb(&ui_state.custom_hex_input) {
+                            ui_state.custom_hex_valid = true;
+                            if parsed != next_rgb {
+                                next_rgb = parsed;
+                                custom_changed = true;
+                            }
+                        } else {
+                            ui_state.custom_hex_valid = false;
+                        }
+                    }
+
+                    for (ch_lbl, ch_idx) in [("R", 0usize), ("G", 1), ("B", 2)] {
+                        ui.label(RichText::new(ch_lbl).size(11.0).color(pal.muted));
+                        let mut v = next_rgb[ch_idx];
+                        let sl = ui.add(
+                            egui::Slider::new(&mut v, 0..=255)
+                                .show_value(true)
+                                .trailing_fill(true),
+                        );
+                        if sl.changed() && v != next_rgb[ch_idx] {
+                            next_rgb[ch_idx] = v;
+                            ui_state.custom_hex_input = format_hex_rgb(next_rgb);
+                            ui_state.custom_hex_valid = true;
+                            custom_changed = true;
+                        }
+                    }
+                    if !ui_state.custom_hex_valid {
+                        paint_status_chip(ui, StatusKind::Warning, "Enter #RRGGBB", pal);
+                    }
+                });
+                if custom_changed {
+                    emit(UiAction::SetTheme {
+                        mode: config.theme_mode,
+                        preset: ThemePresetChoice::Custom,
+                        custom_rgb: next_rgb,
+                    });
+                }
+            }
+
+            // Row 3: Live 4-step monochrome shade ladder preview + contrast readout
+            let ladder = ThemeLadder::generate(config.theme_preset, config.theme_custom_rgb);
+            let steps = [
+                ("Ink / Deep", pal.accent_line),
+                ("Border", pal.accent_border),
+                ("Source", ladder.source),
+                ("Soft fill", pal.accent_soft_fill),
+            ];
+            let ink_cr = contrast_ratio(pal.accent_line, pal.panel);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                ui.label(RichText::new("Shade ladder:").size(11.0).color(pal.muted));
+                let ppp = ui.ctx().pixels_per_point();
+                for (step_name, col) in steps {
+                    let hex = format_hex_rgb([col.r(), col.g(), col.b()]);
+                    draw_crisp_frame(
+                        ui,
+                        pal.panel_alt,
+                        pal.border,
+                        RADIUS_PILL,
+                        Margin::symmetric(SPACE_8, 2.0),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            let (sr, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            paint_crisp_bordered_box(
+                                ui.painter(),
+                                sr,
+                                2.5,
+                                col,
+                                pal.border,
+                                1.0,
+                                ppp,
+                            );
+                            ui.label(
+                                RichText::new(format!("{step_name} {hex}"))
+                                    .font(FontId::new(10.5, FontFamily::Monospace))
+                                    .color(pal.text),
+                            );
+                        },
+                    );
+                }
+                ui.label(
+                    RichText::new(format!("Text/icon contrast {:.1}:1", ink_cr))
+                        .font(FontId::new(10.5, FontFamily::Monospace))
+                        .color(pal.muted),
+                );
+            });
+
+            if pal.near_status_hue {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_4;
+                    paint_status_chip(ui, StatusKind::Warning, "Near status hue", pal);
+                    ui.label(
+                        RichText::new(
+                            "Semantic status badges always pair green/amber/red with semantic icons + text labels.",
+                        )
+                        .size(11.0)
+                        .color(pal.subtle_text),
+                    );
+                });
+            }
+        },
+    );
+    ui.add_space(SPACE_12);
+}
+
 fn draw_settings_view(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
@@ -7555,6 +8006,8 @@ fn draw_settings_view(
     draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
         ui.spacing_mut().item_spacing.y = SPACE_4;
         let scroll_w = ui.available_width().max(240.0);
+
+        draw_appearance_theme_card(ui, ui_state, config, scroll_w, pal, emit);
 
         ui.label(
             RichText::new("Scan Scope & Exclusions")
@@ -7680,11 +8133,11 @@ fn draw_settings_view(
                                                 false,
                                             );
                                             if is_locked_win {
-                                                paint_chip(
+                                                paint_status_chip(
                                                     ui,
+                                                    StatusKind::Danger,
                                                     "LOCKED",
-                                                    no_touch_chip_style(pal),
-                                                    pal.panel,
+                                                    pal,
                                                 );
                                                 draw_truncated_text(
                                                     ui,
@@ -8770,97 +9223,69 @@ mod tests {
 
     #[test]
     fn button_hierarchy_reserves_accent_for_primary_active_and_hover() {
-        for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            let pal = ThemePalette::for_mode(mode);
+        for preset in [ThemePresetChoice::Blue, ThemePresetChoice::Pink, ThemePresetChoice::Green] {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                let pal = ThemePalette::from_config(mode, preset, default_custom_theme_rgb());
 
-            // 1. PrimaryOutline dual-variant catalog (Blue & Pink in both Dark and Light)
-            assert_eq!(
-                resolve_button_colors(
-                    ButtonVariant::PrimaryOutline(BrandVariant::Blue),
-                    true,
-                    false,
-                    false,
-                    false,
-                    &pal
-                ),
-                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
-            );
-            assert_eq!(
-                resolve_button_colors(
-                    ButtonVariant::PrimaryOutline(BrandVariant::Blue),
-                    true,
-                    false,
-                    true,
-                    false,
-                    &pal
-                ),
-                (pal.widget_hover, pal.accent_line, pal.accent_line)
-            );
-            assert_eq!(
-                resolve_button_colors(
-                    ButtonVariant::PrimaryOutline(BrandVariant::Pink),
-                    true,
-                    false,
-                    false,
-                    false,
-                    &pal
-                ),
-                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
-            );
-            assert_eq!(
-                resolve_button_colors(
-                    ButtonVariant::PrimaryOutline(BrandVariant::Pink),
-                    true,
-                    false,
-                    true,
-                    false,
-                    &pal
-                ),
-                (pal.widget_hover, pal.accent_2, pal.accent_2)
-            );
+                assert_eq!(
+                    resolve_button_colors(
+                        ButtonVariant::PrimaryOutline,
+                        true,
+                        false,
+                        false,
+                        false,
+                        &pal
+                    ),
+                    (pal.accent_soft_fill, pal.accent_border, pal.accent_line)
+                );
+                assert_eq!(
+                    resolve_button_colors(
+                        ButtonVariant::PrimaryOutline,
+                        true,
+                        false,
+                        true,
+                        false,
+                        &pal
+                    ),
+                    (pal.widget_hover, pal.accent_border, pal.accent_line)
+                );
+                assert_eq!(
+                    resolve_checkbox_colors(true, false, &pal),
+                    (pal.accent_soft_fill, pal.accent_border, pal.accent_line)
+                );
 
-            // 1b. Checkbox dual-variant catalog (Blue & Pink)
-            assert_eq!(
-                resolve_checkbox_colors(BrandVariant::Blue, true, false, &pal),
-                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
-            );
-            assert_eq!(
-                resolve_checkbox_colors(BrandVariant::Pink, true, false, &pal),
-                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
-            );
+                // 2. SecondaryOutline: neutral at rest, accent on hover
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, false, false, &pal),
+                    (Color32::TRANSPARENT, pal.border, pal.text)
+                );
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, true, false, &pal),
+                    (pal.widget_hover, pal.accent_border, pal.accent_line)
+                );
 
-            // 2. SecondaryOutline (Settings, ThemeToggle, All, Close, Add exclusion): neutral at rest, accent on hover
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, false, false, &pal),
-                (Color32::TRANSPARENT, pal.border, pal.text)
-            );
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SecondaryOutline, true, false, true, false, &pal),
-                (pal.widget_hover, pal.accent_line, pal.accent_line)
-            );
-
-            // 3. SubtleOutline / row-level actions (Locate, Web search, used by N apps >, Remove, Clear):
-            // quiet borderless at rest, muted surface fill + accent text on hover, active accent when latched
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, false, &pal),
-                (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted)
-            );
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, true, false, &pal),
-                (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
-            );
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, true, &pal),
-                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
-            );
-            assert_eq!(
-                resolve_button_colors(ButtonVariant::SubtleOutline, false, false, false, false, &pal),
-                (
-                    Color32::TRANSPARENT,
-                    Color32::TRANSPARENT,
-                    lerp_color(pal.bg, pal.muted, 0.55)
-                )
-            );
+                // 3. SubtleOutline: quiet at rest, accent on hover / active
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, false, &pal),
+                    (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted)
+                );
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SubtleOutline, true, false, true, false, &pal),
+                    (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
+                );
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SubtleOutline, true, false, false, true, &pal),
+                    (pal.accent_soft_fill, pal.accent_border, pal.accent_line)
+                );
+                assert_eq!(
+                    resolve_button_colors(ButtonVariant::SubtleOutline, false, false, false, false, &pal),
+                    (
+                        Color32::TRANSPARENT,
+                        Color32::TRANSPARENT,
+                        lerp_color(pal.bg, pal.muted, 0.55)
+                    )
+                );
+            }
         }
     }
 
@@ -9424,15 +9849,15 @@ mod tests {
         assert!(matches!(is_new.kind, DeltaCellKind::NewPill));
 
         let pod_colors = resolve_button_colors(
-            ButtonVariant::PrimaryOutline(BrandVariant::Blue),
+            ButtonVariant::PrimaryOutline,
             true,
             false,
             false,
             false,
             &dark,
         );
-        assert_eq!(pod_colors.0, dark.pill_blue_fill);
-        assert_eq!(pod_colors.1, dark.accent_line);
+        assert_eq!(pod_colors.0, dark.accent_soft_fill);
+        assert_eq!(pod_colors.1, dark.accent_border);
         assert_eq!(pod_colors.2, dark.accent_line);
 
         let dep_ctx = egui::Context::default();
@@ -9509,62 +9934,65 @@ mod tests {
     }
 
     #[test]
-    fn palette_reanchor_fix15_matches_owner_flat_logo_and_status_tokens() {
+    fn monochrome_theme_engine_presets_custom_contrast_and_status_tokens() {
         let dark = ThemePalette::for_mode(ThemeMode::Dark);
         let light = ThemePalette::for_mode(ThemeMode::Light);
 
-        // Flat logo re-anchoring (#7CCBF2 / #F2A9D6)
-        assert_eq!(FLAT_LOGO_BLUE_SRC, Color32::from_rgb(0x7C, 0xCB, 0xF2));
-        assert_eq!(FLAT_LOGO_PINK_SRC, Color32::from_rgb(0xF2, 0xA9, 0xD6));
+        // Neutral surfaces strictly untinted (R == G == B) in both Dark and Light across all presets
+        for preset in ThemePresetChoice::PRESETS {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                let p = ThemePalette::from_config(mode, preset, default_custom_theme_rgb());
+                for surface in [p.bg, p.panel, p.panel_alt, p.border] {
+                    assert_eq!(surface.r(), surface.g());
+                    assert_eq!(surface.g(), surface.b());
+                }
+                if mode == ThemeMode::Light && matches!(preset, ThemePresetChoice::Blue | ThemePresetChoice::Pink) {
+                    let expected = if preset == ThemePresetChoice::Blue {
+                        Color32::from_rgb(0x00, 0x90, 0xD9)
+                    } else {
+                        Color32::from_rgb(0xFA, 0x29, 0xAA)
+                    };
+                    assert_eq!(p.accent_line, expected);
+                    assert!(contrast_ratio(p.accent_line, p.panel) >= 3.0);
+                } else {
+                    assert!(
+                        contrast_ratio(p.accent_line, p.bg) >= 4.5
+                            && contrast_ratio(p.accent_line, p.panel) >= 4.5,
+                        "preset {preset:?} in {mode:?} failed 4.5:1 contrast"
+                    );
+                    assert!(
+                        contrast_ratio(p.accent_pill_text, p.accent_soft_fill) >= 4.5,
+                        "preset {preset:?} in {mode:?} failed pill contrast"
+                    );
+                }
+            }
+        }
 
-        // Dark accents & pill pairs
+        // Default WT Blue tokens match WT_UI_LIBRARY §2.1
+        assert_eq!(dark.bg, Color32::from_rgb(0x0A, 0x0A, 0x0A));
+        assert_eq!(light.bg, Color32::from_rgb(0xF2, 0xF2, 0xF2));
         assert_eq!(dark.accent_line, Color32::from_rgb(0x69, 0xCB, 0xFC));
-        assert_eq!(dark.accent_2, Color32::from_rgb(0xFA, 0x80, 0xCB));
-        assert_eq!(dark.pill_blue_fill, Color32::from_rgb(0x25, 0x31, 0x41));
-        assert_eq!(dark.proven_text, Color32::from_rgb(0xAF, 0xE3, 0xFD));
-        assert_eq!(dark.pill_pink_fill, Color32::from_rgb(0x38, 0x2C, 0x3C));
-        assert_eq!(dark.pill_pink_text, Color32::from_rgb(0xFB, 0xBB, 0xE3));
-
-        // Light accents (owner max-vivid steps) & pill pairs
         assert_eq!(light.accent_line, Color32::from_rgb(0x00, 0x90, 0xD9));
-        assert_eq!(light.accent_2, Color32::from_rgb(0xFA, 0x29, 0xAA));
-        assert_eq!(light.pill_blue_fill, Color32::from_rgb(0xE2, 0xF4, 0xFC));
-        assert_eq!(light.proven_text, Color32::from_rgb(0x00, 0x90, 0xD9));
-        assert_eq!(light.pill_pink_fill, Color32::from_rgb(0xFC, 0xEC, 0xF6));
-        assert_eq!(light.pill_pink_text, Color32::from_rgb(0xFA, 0x29, 0xAA));
 
-        // Status family
-        assert_eq!(dark.status_green, Color32::from_rgb(0x28, 0xD6, 0x6C));
-        assert_eq!(dark.pill_green_fill, Color32::from_rgb(0x10, 0x2E, 0x20));
-        assert_eq!(light.status_green, Color32::from_rgb(0x0A, 0x7A, 0x3C));
-        assert_eq!(light.pill_green_fill, Color32::from_rgb(0xE4, 0xF9, 0xEC));
+        // Raw yellow custom color normalizes to >= 4.5:1 in Light mode
+        let custom_yellow_light =
+            ThemePalette::from_config(ThemeMode::Light, ThemePresetChoice::Custom, [0xFA, 0xCC, 0x15]);
+        assert!(contrast_ratio(custom_yellow_light.accent_line, custom_yellow_light.panel) >= 4.5);
+        assert!(custom_yellow_light.near_status_hue);
 
-        assert_eq!(dark.status_amber, Color32::from_rgb(0xF5, 0xB8, 0x3D));
-        assert_eq!(dark.pill_amber_fill, Color32::from_rgb(0x38, 0x2E, 0x25));
-        assert_eq!(light.status_amber, Color32::from_rgb(0xA6, 0x6C, 0x07));
-        assert_eq!(light.pill_amber_fill, Color32::from_rgb(0xFD, 0xF0, 0xDA));
+        // Very dark custom color normalizes to >= 4.5:1 in Dark mode
+        let custom_dark_ink =
+            ThemePalette::from_config(ThemeMode::Dark, ThemePresetChoice::Custom, [0x08, 0x10, 0x18]);
+        assert!(contrast_ratio(custom_dark_ink.accent_line, custom_dark_ink.panel) >= 4.5);
 
-        assert_eq!(dark.status_red, Color32::from_rgb(0xF0, 0x44, 0x58));
-        assert_eq!(dark.pill_red_fill, Color32::from_rgb(0x2C, 0x12, 0x1E));
-        assert_eq!(light.status_red, Color32::from_rgb(0xE0, 0x24, 0x44));
-        assert_eq!(light.pill_red_fill, Color32::from_rgb(0xFD, 0xE8, 0xED));
-
-        // 6-stop rim/meter gradient endpoints + midpoint
-        assert_eq!(WT_RIM_GRADIENT_STOPS.len(), 6);
-        assert_eq!(sample_wt_logo_gradient(0.0), Color32::from_rgb(0x54, 0xB9, 0xF2));
-        assert_eq!(sample_wt_logo_gradient(0.2), Color32::from_rgb(0x7C, 0xD0, 0xFA));
-        assert_eq!(sample_wt_logo_gradient(0.4), Color32::from_rgb(0xA5, 0xE6, 0xFF));
-        assert_eq!(sample_wt_logo_gradient(0.6), Color32::from_rgb(0xD8, 0xA6, 0xFF));
-        assert_eq!(sample_wt_logo_gradient(0.8), Color32::from_rgb(0xF7, 0xA8, 0xD8));
-        assert_eq!(sample_wt_logo_gradient(1.0), Color32::from_rgb(0xFF, 0xC7, 0xE3));
-
-        // Qualifier pill uses accent_2 pink family; unchanged neutrals preserved
-        let q = qualifier_chip_style(&dark);
-        assert_eq!(q.fill, dark.pill_pink_fill);
-        assert_eq!(q.stroke, dark.accent_2);
-        assert_eq!(q.text, dark.pill_pink_text);
-        assert_eq!(dark.bg, Color32::from_rgb(10, 10, 16));
-        assert_eq!(light.bg, Color32::from_rgb(238, 244, 250));
+        // Qualifier pill belongs to active monochrome family (never hardcoded pink on non-pink themes)
+        let green_dark =
+            ThemePalette::from_config(ThemeMode::Dark, ThemePresetChoice::Green, [0, 0, 0]);
+        let q = qualifier_chip_style(&green_dark);
+        assert_eq!(q.fill, green_dark.accent_soft_fill);
+        assert_eq!(q.stroke, green_dark.accent_border);
+        assert_eq!(q.text, green_dark.accent_pill_text);
+        assert!(green_dark.near_status_hue);
     }
 
     #[test]
@@ -9593,8 +10021,8 @@ mod tests {
                             ui.painter(),
                             r,
                             RADIUS_PILL,
-                            pal.pill_blue_fill,
-                            pal.accent_line,
+                            pal.accent_soft_fill,
+                            pal.accent_border,
                             1.0,
                             c.pixels_per_point(),
                         );
@@ -9609,7 +10037,7 @@ mod tests {
                 h,
                 out.pixels_per_point,
                 &clipped,
-                0x000A_0A10,
+                crate::theme::CLEAR_BG_DARK_RGB,
                 None,
             );
             let fb = painter.backbuffer_pixels();
@@ -9620,7 +10048,7 @@ mod tests {
             for py in py0..(py0 + corner_sz).min(h) {
                 for px in px0..(px0 + corner_sz).min(w) {
                     let b = fb[py * w + px] & 0xFF;
-                    if b > pal.pill_blue_fill.b() as u32 && b < pal.accent_line.b() as u32 {
+                    if b > pal.accent_soft_fill.b() as u32 && b < pal.accent_border.b() as u32 {
                         intermediate_corner_px += 1;
                     }
                 }
@@ -9630,6 +10058,23 @@ mod tests {
                 "expected anti-aliased intermediate coverage in corner at ppp={ppp}"
             );
         }
+    }
+
+    #[test]
+    fn rounded_box_9slice_uses_fast_interior_quads_and_preserves_corner_aa() {
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let mesh = build_feathered_rounded_box_mesh(
+            Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(800.0, 400.0)),
+            RADIUS_PANEL,
+            pal.panel,
+            pal.border,
+            1.0,
+            1.25,
+        );
+        // 3 interior axis-aligned quads (6 tris) + 4 * 16 corner fans (64 tris) + 3 perimeter rings
+        // instead of 132 full-height center fan triangles.
+        let tri_count = mesh.indices.len() / 3;
+        assert!(tri_count <= 520, "unexpectedly dense 9-slice mesh: {tri_count}");
     }
 
     #[test]

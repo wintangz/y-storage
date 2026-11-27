@@ -45,15 +45,18 @@ use y_platform_windows::scanner::{
     ScanProgressSnapshot, execute_scan_with_history, execute_single_drive_rescan,
 };
 
-use crate::sw_painter::SoftwarePainter;
+use crate::sw_painter::{PaintStats, SoftwarePainter};
+use crate::theme::{CLEAR_BG_DARK_RGB, CLEAR_BG_LIGHT_RGB};
 use crate::ui::{
-    StorageUiState, UiAction, configure_fonts_and_theme, draw_app_ui_with_drive_busy,
+    StorageUiState, UiAction, configure_fonts_and_theme, configure_fonts_and_theme_with,
+    draw_app_ui_with_drive_busy,
 };
 
 const WM_APP_SCAN_UPDATE: u32 = 0x8000 + 10;
 const WM_APP_FOLLOWUP_PAINT: u32 = 0x8000 + 11;
 const TIMER_REPAINT_ID: usize = 9000;
 const TIMER_BENCH_DONE_ID: usize = 9001;
+const TIMER_SAVE_CONFIG_ID: usize = 9002;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_SETFOCUS_MSG: u32 = 0x0007;
@@ -80,8 +83,6 @@ const DEFAULT_LOGICAL_W: i32 = 1020;
 const DEFAULT_LOGICAL_H: i32 = 720;
 const MIN_LOGICAL_W: i32 = 760;
 const MIN_LOGICAL_H: i32 = 520;
-const CLEAR_BG_DARK_RGB: u32 = 0x000A_0A10;
-const CLEAR_BG_LIGHT_RGB: u32 = 0x00EE_F4FA;
 const GWLP_USERDATA: i32 = -21;
 
 #[repr(C)]
@@ -172,6 +173,7 @@ struct FrameTimingSample {
     egui_run_ms: f64,
     tessellate_ms: f64,
     raster_blit_ms: f64,
+    paint: PaintStats,
 }
 
 struct WindowHostState {
@@ -194,6 +196,7 @@ struct WindowHostState {
     tracking_mouse_leave: bool,
     hover_cursor_icon: egui::CursorIcon,
     repaint_timer_active: bool,
+    config_save_dirty: bool,
     smoke_mode: bool,
     start_time: Instant,
     bench_recording: bool,
@@ -405,8 +408,8 @@ fn apply_titlebar_theme(hwnd: HWND, mode: ThemeMode) {
             );
         }
         let caption_color: u32 = match mode {
-            ThemeMode::Dark => 0x0010_0A0A,
-            ThemeMode::Light => 0x00FA_F4EE,
+            ThemeMode::Dark => 0x000A_0A0A,
+            ThemeMode::Light => 0x00F2_F2F2,
         };
         unsafe {
             set_attr(
@@ -609,7 +612,12 @@ pub fn run_gui_app(
     };
 
     let egui_ctx = egui::Context::default();
-    configure_fonts_and_theme(&egui_ctx, init_theme);
+    configure_fonts_and_theme_with(
+        &egui_ctx,
+        init_theme,
+        init_config_snap.theme_preset,
+        init_config_snap.theme_custom_rgb,
+    );
 
     let host_state = Box::new(WindowHostState {
         controller: Arc::clone(&controller),
@@ -631,6 +639,7 @@ pub fn run_gui_app(
         tracking_mouse_leave: false,
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
+        config_save_dirty: false,
         smoke_mode: smoke_ms.is_some(),
         start_time: Instant::now(),
         bench_recording: false,
@@ -849,6 +858,16 @@ unsafe extern "system" fn wnd_proc(
                 st.bench_timer_fired = true;
                 return 0;
             }
+            if tid == TIMER_SAVE_CONFIG_ID {
+                unsafe { KillTimer(hwnd, TIMER_SAVE_CONFIG_ID) };
+                let st = unsafe { &mut *state_ptr };
+                if st.config_save_dirty && !st.smoke_mode {
+                    let g = st.controller.lock().unwrap();
+                    let _ = g.config.save_atomic(&g.config_path);
+                }
+                st.config_save_dirty = false;
+                return 0;
+            }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_PAINT => {
@@ -946,7 +965,8 @@ unsafe extern "system" fn wnd_proc(
 
                 let t_raster_start = Instant::now();
                 st.painter.apply_textures(&full_out.textures_delta);
-                st.painter.paint_and_blit(
+                let mut paint_stats = PaintStats::default();
+                st.painter.paint_and_blit_profiled(
                     hdc,
                     st.width,
                     st.height,
@@ -954,6 +974,7 @@ unsafe extern "system" fn wnd_proc(
                     &clipped,
                     clear_bg,
                     Some(ps.rcPaint),
+                    st.bench_recording.then_some(&mut paint_stats),
                 );
                 let raster_blit_ms = t_raster_start.elapsed().as_secs_f64() * 1000.0;
                 st.needs_redraw = false;
@@ -965,6 +986,7 @@ unsafe extern "system" fn wnd_proc(
                         egui_run_ms,
                         tessellate_ms,
                         raster_blit_ms,
+                        paint: paint_stats,
                     });
                 }
 
@@ -1008,6 +1030,21 @@ unsafe extern "system" fn wnd_proc(
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
+                        UiAction::SetTheme {
+                            mode,
+                            preset,
+                            custom_rgb,
+                        } => {
+                            let mut g = st.controller.lock().unwrap();
+                            g.config.theme_mode = mode;
+                            g.config.theme_preset = preset;
+                            g.config.theme_custom_rgb = custom_rgb;
+                            if !st.smoke_mode {
+                                let _ = g.config.save_atomic(&g.config_path);
+                            }
+                            st.needs_redraw = true;
+                            unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
+                        }
                         UiAction::UpdateListView {
                             sort_mode,
                             sort_direction,
@@ -1021,8 +1058,10 @@ unsafe extern "system" fn wnd_proc(
                             g.config.filter_chip = filter_chip;
                             g.config.search_query = search_query;
                             g.config.facets = facets;
+                            drop(g);
                             if !st.smoke_mode {
-                                let _ = g.config.save_atomic(&g.config_path);
+                                st.config_save_dirty = true;
+                                unsafe { SetTimer(hwnd, TIMER_SAVE_CONFIG_ID, 350, None) };
                             }
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
@@ -1034,8 +1073,10 @@ unsafe extern "system" fn wnd_proc(
                             let mut g = st.controller.lock().unwrap();
                             g.config.ledger_collapsed = collapsed;
                             g.config.ledger_height_px = height_px;
+                            drop(g);
                             if !st.smoke_mode {
-                                let _ = g.config.save_atomic(&g.config_path);
+                                st.config_save_dirty = true;
+                                unsafe { SetTimer(hwnd, TIMER_SAVE_CONFIG_ID, 350, None) };
                             }
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
@@ -1043,6 +1084,8 @@ unsafe extern "system" fn wnd_proc(
                         UiAction::SaveConfig(mut new_cfg) => {
                             let mut g = st.controller.lock().unwrap();
                             new_cfg.theme_mode = g.config.theme_mode;
+                            new_cfg.theme_preset = g.config.theme_preset;
+                            new_cfg.theme_custom_rgb = g.config.theme_custom_rgb;
                             new_cfg.window = g.config.window;
                             new_cfg.sort_mode = g.config.sort_mode;
                             new_cfg.sort_direction = g.config.sort_direction;
@@ -1245,6 +1288,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_CLOSE => {
             let st = unsafe { &mut *state_ptr };
+            if st.config_save_dirty && !st.smoke_mode {
+                unsafe { KillTimer(hwnd, TIMER_SAVE_CONFIG_ID) };
+                let g = st.controller.lock().unwrap();
+                let _ = g.config.save_atomic(&g.config_path);
+                st.config_save_dirty = false;
+            }
             if !st.smoke_mode {
                 save_window_placement(hwnd, &st.controller);
             }
@@ -1358,6 +1407,17 @@ struct BenchPhaseMetrics {
     avg_egui_run_ms: f64,
     avg_tessellate_ms: f64,
     avg_raster_blit_ms: f64,
+    avg_triangles: f64,
+    avg_solid_quads: f64,
+    avg_solid_tris: f64,
+    avg_grad_tris: f64,
+    avg_tex_tris: f64,
+    avg_clear_ms: f64,
+    avg_quad_ms: f64,
+    avg_solid_tri_ms: f64,
+    avg_grad_tri_ms: f64,
+    avg_tex_tri_ms: f64,
+    avg_bitblt_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -1386,6 +1446,17 @@ fn summarize_samples(elapsed_ms: f64, samples: &[FrameTimingSample]) -> BenchPha
             avg_egui_run_ms: 0.0,
             avg_tessellate_ms: 0.0,
             avg_raster_blit_ms: 0.0,
+            avg_triangles: 0.0,
+            avg_solid_quads: 0.0,
+            avg_solid_tris: 0.0,
+            avg_grad_tris: 0.0,
+            avg_tex_tris: 0.0,
+            avg_clear_ms: 0.0,
+            avg_quad_ms: 0.0,
+            avg_solid_tri_ms: 0.0,
+            avg_grad_tri_ms: 0.0,
+            avg_tex_tri_ms: 0.0,
+            avg_bitblt_ms: 0.0,
         };
     }
     let n = samples.len() as f64;
@@ -1405,6 +1476,21 @@ fn summarize_samples(elapsed_ms: f64, samples: &[FrameTimingSample]) -> BenchPha
         avg_egui_run_ms: samples.iter().map(|s| s.egui_run_ms).sum::<f64>() / n,
         avg_tessellate_ms: samples.iter().map(|s| s.tessellate_ms).sum::<f64>() / n,
         avg_raster_blit_ms: samples.iter().map(|s| s.raster_blit_ms).sum::<f64>() / n,
+        avg_triangles: samples.iter().map(|s| s.paint.triangles_total as f64).sum::<f64>() / n,
+        avg_solid_quads: samples.iter().map(|s| s.paint.solid_quads as f64).sum::<f64>() / n,
+        avg_solid_tris: samples
+            .iter()
+            .map(|s| (s.paint.solid_tri_opaque + s.paint.solid_tri_alpha) as f64)
+            .sum::<f64>()
+            / n,
+        avg_grad_tris: samples.iter().map(|s| s.paint.grad_feather_tri as f64).sum::<f64>() / n,
+        avg_tex_tris: samples.iter().map(|s| s.paint.textured_tri as f64).sum::<f64>() / n,
+        avg_clear_ms: samples.iter().map(|s| s.paint.clear_ms).sum::<f64>() / n,
+        avg_quad_ms: samples.iter().map(|s| s.paint.quad_ms).sum::<f64>() / n,
+        avg_solid_tri_ms: samples.iter().map(|s| s.paint.solid_tri_ms).sum::<f64>() / n,
+        avg_grad_tri_ms: samples.iter().map(|s| s.paint.grad_tri_ms).sum::<f64>() / n,
+        avg_tex_tri_ms: samples.iter().map(|s| s.paint.tex_tri_ms).sum::<f64>() / n,
+        avg_bitblt_ms: samples.iter().map(|s| s.paint.bitblt_ms).sum::<f64>() / n,
     }
 }
 
@@ -1464,7 +1550,12 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
         (g.config.theme_mode, g.config.clone())
     };
     let egui_ctx = egui::Context::default();
-    configure_fonts_and_theme(&egui_ctx, init_theme);
+    configure_fonts_and_theme_with(
+        &egui_ctx,
+        init_theme,
+        init_config_snap.theme_preset,
+        init_config_snap.theme_custom_rgb,
+    );
 
     let host_state = Box::new(WindowHostState {
         controller: Arc::clone(&controller),
@@ -1486,6 +1577,7 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
         tracking_mouse_leave: false,
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
+        config_save_dirty: false,
         smoke_mode: true,
         start_time: Instant::now(),
         bench_recording: false,
@@ -1909,6 +2001,7 @@ pub fn run_titlebar_capture(
         tracking_mouse_leave: false,
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
+        config_save_dirty: false,
         smoke_mode: true,
         start_time: Instant::now(),
         bench_recording: false,

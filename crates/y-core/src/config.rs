@@ -14,6 +14,64 @@ pub enum ThemeMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemePresetChoice {
+    #[default]
+    Blue,
+    Pink,
+    Purple,
+    Green,
+    Orange,
+    Yellow,
+    Red,
+    Custom,
+}
+
+impl ThemePresetChoice {
+    pub const PRESETS: [Self; 7] = [
+        Self::Blue,
+        Self::Pink,
+        Self::Purple,
+        Self::Green,
+        Self::Orange,
+        Self::Yellow,
+        Self::Red,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Blue => "Blue",
+            Self::Pink => "Pink",
+            Self::Purple => "Purple",
+            Self::Green => "Green",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Red => "Red",
+            Self::Custom => "Custom",
+        }
+    }
+
+    #[must_use]
+    pub const fn base_rgb(self) -> [u8; 3] {
+        match self {
+            Self::Blue => [0x7C, 0xCB, 0xF2],   // #7CCBF2
+            Self::Pink => [0xF2, 0xA9, 0xD6],   // #F2A9D6
+            Self::Purple => [0x9B, 0x8A, 0xFB], // #9B8AFB
+            Self::Green => [0x3E, 0xCF, 0x6E],  // #3ECF6E
+            Self::Orange => [0xFB, 0x92, 0x3C], // #FB923C
+            Self::Yellow => [0xFA, 0xCC, 0x15], // #FACC15
+            Self::Red => [0xF8, 0x71, 0x71],    // #F87171
+            Self::Custom => [0x7C, 0xCB, 0xF2],
+        }
+    }
+}
+
+#[must_use]
+pub const fn default_custom_theme_rgb() -> [u8; 3] {
+    [0x7C, 0xCB, 0xF2]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AppSortMode {
     #[default]
     Size,
@@ -847,6 +905,10 @@ pub struct AppConfig {
     pub version: u32,
     pub theme_mode: ThemeMode,
     #[serde(default)]
+    pub theme_preset: ThemePresetChoice,
+    #[serde(default = "default_custom_theme_rgb")]
+    pub theme_custom_rgb: [u8; 3],
+    #[serde(default)]
     pub window: Option<WindowPlacementConfig>,
     #[serde(default)]
     pub sort_mode: AppSortMode,
@@ -874,6 +936,8 @@ impl Default for AppConfig {
         Self {
             version: 1,
             theme_mode: ThemeMode::Dark,
+            theme_preset: ThemePresetChoice::Blue,
+            theme_custom_rgb: default_custom_theme_rgb(),
             window: None,
             sort_mode: AppSortMode::Size,
             sort_direction: SortDirection::Desc,
@@ -928,6 +992,8 @@ impl AppConfig {
         Self {
             version: 1,
             theme_mode: ThemeMode::Dark,
+            theme_preset: ThemePresetChoice::Blue,
+            theme_custom_rgb: default_custom_theme_rgb(),
             window: None,
             sort_mode: AppSortMode::Size,
             sort_direction: SortDirection::Desc,
@@ -1036,5 +1102,28 @@ impl AppConfig {
             let _ = fs::remove_file(path);
         }
         fs::rename(&tmp, path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_preset_and_custom_rgb_persist_and_legacy_toml_defaults_to_blue() {
+        let legacy_toml = "version = 1\ntheme_mode = \"Light\"\n[[targets]]\nletter = \"C\"\nenabled = true\nexclusions = []\n";
+        let parsed: AppConfig = toml::from_str(legacy_toml).expect("parse legacy config");
+        assert_eq!(parsed.theme_mode, ThemeMode::Light);
+        assert_eq!(parsed.theme_preset, ThemePresetChoice::Blue);
+        assert_eq!(parsed.theme_custom_rgb, default_custom_theme_rgb());
+
+        let mut cfg = AppConfig::default();
+        cfg.theme_mode = ThemeMode::Dark;
+        cfg.theme_preset = ThemePresetChoice::Custom;
+        cfg.theme_custom_rgb = [0x9B, 0x8A, 0xFB];
+        let encoded = toml::to_string_pretty(&cfg).expect("serialize config");
+        let roundtrip: AppConfig = toml::from_str(&encoded).expect("round-trip config");
+        assert_eq!(roundtrip.theme_preset, ThemePresetChoice::Custom);
+        assert_eq!(roundtrip.theme_custom_rgb, [0x9B, 0x8A, 0xFB]);
     }
 }

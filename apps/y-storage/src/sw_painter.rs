@@ -91,6 +91,23 @@ impl Drop for DibBackBuffer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaintStats {
+    pub primitives: usize,
+    pub triangles_total: usize,
+    pub solid_quads: usize,
+    pub solid_tri_opaque: usize,
+    pub solid_tri_alpha: usize,
+    pub grad_feather_tri: usize,
+    pub textured_tri: usize,
+    pub clear_ms: f64,
+    pub quad_ms: f64,
+    pub solid_tri_ms: f64,
+    pub grad_tri_ms: f64,
+    pub tex_tri_ms: f64,
+    pub bitblt_ms: f64,
+}
+
 pub struct SoftwarePainter {
     width: usize,
     height: usize,
@@ -224,10 +241,35 @@ impl SoftwarePainter {
         clear_rgb: u32,
         present_clip: Option<RECT>,
     ) {
+        self.paint_and_blit_profiled(
+            hdc,
+            width,
+            height,
+            pixels_per_point,
+            primitives,
+            clear_rgb,
+            present_clip,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_and_blit_profiled(
+        &mut self,
+        hdc: HDC,
+        width: usize,
+        height: usize,
+        pixels_per_point: f32,
+        primitives: &[ClippedPrimitive],
+        clear_rgb: u32,
+        present_clip: Option<RECT>,
+        mut stats: Option<&mut PaintStats>,
+    ) {
         if width == 0 || height == 0 {
             return;
         }
         let stride = self.ensure_backbuffer(hdc, width, height);
+        let t_clr = stats.as_ref().map(|_| std::time::Instant::now());
         {
             let fb: &mut [u32] = if let Some(d) = &self.dib {
                 unsafe { slice::from_raw_parts_mut(d.bits, d.cap_w * height) }
@@ -242,6 +284,9 @@ impl SoftwarePainter {
                     fb[row..row + width].fill(clear_rgb);
                 }
             }
+        }
+        if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_clr) {
+            st.clear_ms += t0.elapsed().as_secs_f64() * 1000.0;
         }
 
         let fb: &mut [u32] = if let Some(d) = &self.dib {
@@ -268,38 +313,50 @@ impl SoftwarePainter {
             }
 
             if let Primitive::Mesh(mesh) = &cp.primitive {
+                if let Some(st) = stats.as_deref_mut() {
+                    st.primitives += 1;
+                    st.triangles_total += mesh.indices.len() / 3;
+                }
                 let tex = self.textures.get(&mesh.texture_id);
                 let mut i = 0usize;
-                while i + 6 <= mesh.indices.len() {
-                    let t0 = &mesh.indices[i..i + 6];
-                    if let Some((qx0, qy0, qx1, qy1, col)) =
-                        detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
-                    {
-                        fill_solid_rect(
-                            fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
-                        );
-                    } else {
-                        for k in 0..2 {
-                            let tri = &mesh.indices[i + k * 3..i + k * 3 + 3];
-                            rasterize_triangle(
-                                fb,
-                                stride,
-                                cmin_x,
-                                cmin_y,
-                                cmax_x,
-                                cmax_y,
-                                pixels_per_point,
-                                &mesh.vertices[tri[0] as usize],
-                                &mesh.vertices[tri[1] as usize],
-                                &mesh.vertices[tri[2] as usize],
-                                tex,
+                while i + 3 <= mesh.indices.len() {
+                    if i + 6 <= mesh.indices.len() {
+                        let t0 = &mesh.indices[i..i + 6];
+                        if let Some((qx0, qy0, qx1, qy1, col)) =
+                            detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
+                        {
+                            let t_q = stats.as_ref().map(|_| std::time::Instant::now());
+                            fill_solid_rect(
+                                fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
                             );
+                            if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_q) {
+                                st.solid_quads += 1;
+                                st.quad_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                            }
+                            i += 6;
+                            continue;
+                        }
+                        if let Some(tq) = tex.and_then(|t| {
+                            detect_aligned_tex_quad(&mesh.vertices, t0, pixels_per_point, t)
+                        }) {
+                            let t_tex = stats.as_ref().map(|_| std::time::Instant::now());
+                            fill_aligned_tex_rect(
+                                fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, &tq, tex.unwrap(),
+                            );
+                            if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_tex) {
+                                st.textured_tri += 2;
+                                st.tex_tri_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                            }
+                            i += 6;
+                            continue;
                         }
                     }
-                    i += 6;
-                }
-                while i + 3 <= mesh.indices.len() {
+
                     let tri = &mesh.indices[i..i + 3];
+                    let v0 = &mesh.vertices[tri[0] as usize];
+                    let v1 = &mesh.vertices[tri[1] as usize];
+                    let v2 = &mesh.vertices[tri[2] as usize];
+                    let t_tri = stats.as_ref().map(|_| std::time::Instant::now());
                     rasterize_triangle(
                         fb,
                         stride,
@@ -308,18 +365,289 @@ impl SoftwarePainter {
                         cmax_x,
                         cmax_y,
                         pixels_per_point,
-                        &mesh.vertices[tri[0] as usize],
-                        &mesh.vertices[tri[1] as usize],
-                        &mesh.vertices[tri[2] as usize],
+                        v0,
+                        v1,
+                        v2,
                         tex,
                     );
+                    if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_tri) {
+                        let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                        let c0 = v0.color.to_array();
+                        let c1 = v1.color.to_array();
+                        let c2 = v2.color.to_array();
+                        let untex = v0.uv == WHITE_UV && v1.uv == WHITE_UV && v2.uv == WHITE_UV;
+                        if !untex {
+                            st.textured_tri += 1;
+                            st.tex_tri_ms += dt;
+                        } else if c0 == c1 && c1 == c2 {
+                            if c0[3] == 255 {
+                                st.solid_tri_opaque += 1;
+                            } else {
+                                st.solid_tri_alpha += 1;
+                            }
+                            st.solid_tri_ms += dt;
+                        } else {
+                            st.grad_feather_tri += 1;
+                            st.grad_tri_ms += dt;
+                        }
+                    }
                     i += 3;
                 }
             }
         }
 
         if !hdc.is_null() {
+            let t_blit = stats.as_ref().map(|_| std::time::Instant::now());
             self.present_rect(hdc, present_clip);
+            if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_blit) {
+                st.bitblt_ms += t0.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+    }
+}
+
+struct AlignedTexQuad {
+    x0_f: f32,
+    y0_f: f32,
+    x1_f: f32,
+    y1_f: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    col: [u8; 4],
+}
+
+#[inline]
+fn detect_aligned_tex_quad(
+    verts: &[egui::epaint::Vertex],
+    idx6: &[u32],
+    ppp: f32,
+    _tex: &CpuTexture,
+) -> Option<AlignedTexQuad> {
+    let v0 = &verts[idx6[0] as usize];
+    if v0.uv == WHITE_UV {
+        return None;
+    }
+    let c = v0.color.to_array();
+    if c[3] == 0 {
+        return None;
+    }
+    let mut xs = [f32::INFINITY, f32::NEG_INFINITY];
+    let mut ys = [f32::INFINITY, f32::NEG_INFINITY];
+    for &idx in idx6 {
+        let v = &verts[idx as usize];
+        if v.uv == WHITE_UV || v.color.to_array() != c {
+            return None;
+        }
+        xs[0] = xs[0].min(v.pos.x);
+        xs[1] = xs[1].max(v.pos.x);
+        ys[0] = ys[0].min(v.pos.y);
+        ys[1] = ys[1].max(v.pos.y);
+    }
+    if xs[1] <= xs[0] + 1e-3 || ys[1] <= ys[0] + 1e-3 {
+        return None;
+    }
+    let mut u_left: Option<f32> = None;
+    let mut u_right: Option<f32> = None;
+    let mut v_top: Option<f32> = None;
+    let mut v_bot: Option<f32> = None;
+    for &idx in idx6 {
+        let v = &verts[idx as usize];
+        let at_l = (v.pos.x - xs[0]).abs() < 1e-3;
+        let at_r = (v.pos.x - xs[1]).abs() < 1e-3;
+        let at_t = (v.pos.y - ys[0]).abs() < 1e-3;
+        let at_b = (v.pos.y - ys[1]).abs() < 1e-3;
+        if !(at_l || at_r) || !(at_t || at_b) {
+            return None;
+        }
+        if at_l {
+            if let Some(ul) = u_left {
+                if (ul - v.uv.x).abs() > 1e-5 {
+                    return None;
+                }
+            } else {
+                u_left = Some(v.uv.x);
+            }
+        } else if let Some(ur) = u_right {
+            if (ur - v.uv.x).abs() > 1e-5 {
+                return None;
+            }
+        } else {
+            u_right = Some(v.uv.x);
+        }
+        if at_t {
+            if let Some(vt) = v_top {
+                if (vt - v.uv.y).abs() > 1e-5 {
+                    return None;
+                }
+            } else {
+                v_top = Some(v.uv.y);
+            }
+        } else if let Some(vb) = v_bot {
+            if (vb - v.uv.y).abs() > 1e-5 {
+                return None;
+            }
+        } else {
+            v_bot = Some(v.uv.y);
+        }
+    }
+    let (Some(u0), Some(u1), Some(v0_uv), Some(v1_uv)) = (u_left, u_right, v_top, v_bot) else {
+        return None;
+    };
+    Some(AlignedTexQuad {
+        x0_f: xs[0] * ppp,
+        y0_f: ys[0] * ppp,
+        x1_f: xs[1] * ppp,
+        y1_f: ys[1] * ppp,
+        u0,
+        v0: v0_uv,
+        u1,
+        v1: v1_uv,
+        col: c,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn fill_aligned_tex_rect(
+    fb: &mut [u32],
+    fb_stride: usize,
+    clip_min_x: usize,
+    clip_min_y: usize,
+    clip_max_x: usize,
+    clip_max_y: usize,
+    q: &AlignedTexQuad,
+    tex: &CpuTexture,
+) {
+    if tex.width == 0 || tex.height == 0 {
+        return;
+    }
+    let px0 = ((q.x0_f - 0.5).ceil().max(clip_min_x as f32)) as usize;
+    let px1 = ((q.x1_f - 0.5).ceil().min(clip_max_x as f32)) as usize;
+    let py0 = ((q.y0_f - 0.5).ceil().max(clip_min_y as f32)) as usize;
+    let py1 = ((q.y1_f - 0.5).ceil().min(clip_max_y as f32)) as usize;
+    if px0 >= px1 || py0 >= py1 {
+        return;
+    }
+
+    let inv_w = 1.0 / (q.x1_f - q.x0_f).max(1e-5);
+    let inv_h = 1.0 / (q.y1_f - q.y0_f).max(1e-5);
+    let du_dx = (q.u1 - q.u0) * inv_w;
+    let dv_dy = (q.v1 - q.v0) * inv_h;
+    let tex_wf = tex.width as f32;
+    let tex_hf = tex.height as f32;
+    let dufx_dx = du_dx * tex_wf;
+    let dvfy_dy = dv_dy * tex_hf;
+    let max_tx = (tex.width - 1) as f32;
+    let max_ty = (tex.height - 1) as f32;
+
+    let ufx_start = ((q.u0 + ((px0 as f32 + 0.5) - q.x0_f) * du_dx).clamp(0.0, 1.0) * tex_wf - 0.5)
+        .clamp(0.0, max_tx);
+    let vfy_start = ((q.v0 + ((py0 as f32 + 0.5) - q.y0_f) * dv_dy).clamp(0.0, 1.0) * tex_hf - 0.5)
+        .clamp(0.0, max_ty);
+
+    let cr = q.col[0] as u32;
+    let cg = q.col[1] as u32;
+    let cb = q.col[2] as u32;
+    let ca = q.col[3] as u32;
+
+    let aligned_1_to_1 = (dufx_dx - 1.0).abs() < 2e-3
+        && (dvfy_dy - 1.0).abs() < 2e-3
+        && (ufx_start - ufx_start.round()).abs() < 0.03
+        && (vfy_start - vfy_start.round()).abs() < 0.03;
+
+    if aligned_1_to_1 {
+        let tx0 = (ufx_start.round() as usize).min(tex.width - 1);
+        let ty0 = (vfy_start.round() as usize).min(tex.height - 1);
+        for (dy, py) in (py0..py1).enumerate() {
+            let sy = (ty0 + dy).min(tex.height - 1);
+            let tex_row = &tex.pixels[sy * tex.width..];
+            let dst_row = &mut fb[py * fb_stride..];
+            for (dx, px) in (px0..px1).enumerate() {
+                let tc = tex_row[(tx0 + dx).min(tex.width - 1)];
+                let a = tc[3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let sa = (ca * a + 127) / 255;
+                if sa == 0 {
+                    continue;
+                }
+                let sr = (cr * tc[0] as u32 + 127) / 255;
+                let sg = (cg * tc[1] as u32 + 127) / 255;
+                let sb = (cb * tc[2] as u32 + 127) / 255;
+                if sa == 255 {
+                    dst_row[px] = (sr << 16) | (sg << 8) | sb;
+                } else {
+                    let dst = dst_row[px];
+                    let dr = (dst >> 16) & 0xFF;
+                    let dg = (dst >> 8) & 0xFF;
+                    let db = dst & 0xFF;
+                    let inv_a = 255 - sa;
+                    let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
+                    let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
+                    let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+                    dst_row[px] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+        return;
+    }
+
+    for (dy, py) in (py0..py1).enumerate() {
+        let vfy = (vfy_start + (dy as f32) * dvfy_dy).clamp(0.0, max_ty);
+        let y0 = vfy.floor() as usize;
+        let y1 = (y0 + 1).min(tex.height - 1);
+        let ty = vfy - y0 as f32;
+        let wy1 = (ty * 256.0 + 0.5) as u32;
+        let wy0 = 256 - wy1;
+        let row0 = &tex.pixels[y0 * tex.width..];
+        let row1 = &tex.pixels[y1 * tex.width..];
+        let dst_row = &mut fb[py * fb_stride..];
+
+        let mut ufx = ufx_start;
+        for px in px0..px1 {
+            let ux = ufx.clamp(0.0, max_tx);
+            let x0 = ux.floor() as usize;
+            let x1 = (x0 + 1).min(tex.width - 1);
+            let wx1 = ((ux - x0 as f32) * 256.0 + 0.5) as u32;
+            let wx0 = 256 - wx1;
+
+            let p00 = row0[x0];
+            let p10 = row0[x1];
+            let p01 = row1[x0];
+            let p11 = row1[x1];
+
+            let w00 = wx0 * wy0;
+            let w10 = wx1 * wy0;
+            let w01 = wx0 * wy1;
+            let w11 = wx1 * wy1;
+
+            let ta = (p00[3] as u32 * w00 + p10[3] as u32 * w10 + p01[3] as u32 * w01 + p11[3] as u32 * w11 + 32768) >> 16;
+            if ta > 0 {
+                let tr = (p00[0] as u32 * w00 + p10[0] as u32 * w10 + p01[0] as u32 * w01 + p11[0] as u32 * w11 + 32768) >> 16;
+                let tg = (p00[1] as u32 * w00 + p10[1] as u32 * w10 + p01[1] as u32 * w01 + p11[1] as u32 * w11 + 32768) >> 16;
+                let tb = (p00[2] as u32 * w00 + p10[2] as u32 * w10 + p01[2] as u32 * w01 + p11[2] as u32 * w11 + 32768) >> 16;
+                let sr = (cr * tr + 127) / 255;
+                let sg = (cg * tg + 127) / 255;
+                let sb = (cb * tb + 127) / 255;
+                let sa = (ca * ta + 127) / 255;
+                if sa == 255 {
+                    dst_row[px] = (sr << 16) | (sg << 8) | sb;
+                } else if sa > 0 {
+                    let dst = dst_row[px];
+                    let dr = (dst >> 16) & 0xFF;
+                    let dg = (dst >> 8) & 0xFF;
+                    let db = dst & 0xFF;
+                    let inv_a = 255 - sa;
+                    let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
+                    let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
+                    let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+                    dst_row[px] = (r << 16) | (g << 8) | b;
+                }
+            }
+            ufx += dufx_dx;
         }
     }
 }
@@ -786,5 +1114,74 @@ mod tests {
                 assert_eq!(inside_fast, inside_scalar, "mismatch at ({px}, {py})");
             }
         }
+    }
+
+    #[test]
+    fn aligned_tex_and_solid_quads_recover_alignment_after_single_triangle() {
+        let mut p = SoftwarePainter::new();
+        let tex_id = TextureId::Managed(1);
+        let font_pixels = vec![
+            Color32::from_rgba_premultiplied(255, 255, 255, 255),
+            Color32::from_rgba_premultiplied(128, 128, 128, 128),
+            Color32::from_rgba_premultiplied(0, 0, 0, 0),
+            Color32::from_rgba_premultiplied(200, 200, 200, 200),
+        ];
+        p.apply_textures(&TexturesDelta {
+            set: vec![(
+                tex_id,
+                egui::epaint::ImageDelta::full(
+                    ImageData::Color(std::sync::Arc::new(egui::ColorImage {
+                        size: [2, 2],
+                        pixels: font_pixels,
+                    })),
+                    egui::TextureOptions::NEAREST,
+                ),
+            )],
+            free: vec![],
+        });
+
+        let mut mesh = egui::epaint::Mesh::with_texture(tex_id);
+        let tri_col = Color32::from_rgb(200, 40, 40);
+        // Preceding 3-index triangle that would shift naive 6-index quad loops off by 3 indices.
+        mesh.vertices.extend_from_slice(&[
+            egui::epaint::Vertex { pos: Pos2::new(2.0, 2.0), uv: WHITE_UV, color: tri_col },
+            egui::epaint::Vertex { pos: Pos2::new(6.0, 2.0), uv: WHITE_UV, color: tri_col },
+            egui::epaint::Vertex { pos: Pos2::new(4.0, 6.0), uv: WHITE_UV, color: tri_col },
+        ]);
+        mesh.indices.extend_from_slice(&[0, 1, 2]);
+
+        // Followed immediately by a 6-index textured glyph quad and a 6-index solid quad.
+        let tint = Color32::from_rgb(100, 200, 250);
+        let b = mesh.vertices.len() as u32;
+        mesh.vertices.extend_from_slice(&[
+            egui::epaint::Vertex { pos: Pos2::new(10.0, 10.0), uv: Pos2::new(0.0, 0.0), color: tint },
+            egui::epaint::Vertex { pos: Pos2::new(12.0, 10.0), uv: Pos2::new(1.0, 0.0), color: tint },
+            egui::epaint::Vertex { pos: Pos2::new(12.0, 12.0), uv: Pos2::new(1.0, 1.0), color: tint },
+            egui::epaint::Vertex { pos: Pos2::new(10.0, 12.0), uv: Pos2::new(0.0, 1.0), color: tint },
+        ]);
+        mesh.indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+
+        let sb = mesh.vertices.len() as u32;
+        let sq_col = Color32::from_rgb(30, 210, 90);
+        mesh.vertices.extend_from_slice(&[
+            egui::epaint::Vertex { pos: Pos2::new(20.0, 10.0), uv: WHITE_UV, color: sq_col },
+            egui::epaint::Vertex { pos: Pos2::new(24.0, 10.0), uv: WHITE_UV, color: sq_col },
+            egui::epaint::Vertex { pos: Pos2::new(24.0, 14.0), uv: WHITE_UV, color: sq_col },
+            egui::epaint::Vertex { pos: Pos2::new(20.0, 14.0), uv: WHITE_UV, color: sq_col },
+        ]);
+        mesh.indices.extend_from_slice(&[sb, sb + 1, sb + 2, sb, sb + 2, sb + 3]);
+
+        let clipped = [ClippedPrimitive {
+            clip_rect: Rect::from_min_size(Pos2::ZERO, Vec2::new(40.0, 30.0)),
+            primitive: Primitive::Mesh(mesh),
+        }];
+        let mut stats = PaintStats::default();
+        p.paint_and_blit_profiled(null_mut(), 40, 30, 1.0, &clipped, 0, None, Some(&mut stats));
+        assert_eq!(stats.solid_quads, 1);
+        assert_eq!(stats.textured_tri, 2);
+        let fb = p.backbuffer_pixels();
+        assert_eq!(fb[10 * 40 + 10], ((100u32) << 16) | ((200u32) << 8) | 250);
+        assert_eq!(fb[11 * 40 + 10], 0);
+        assert_eq!(fb[12 * 40 + 22], ((30u32) << 16) | ((210u32) << 8) | 90);
     }
 }

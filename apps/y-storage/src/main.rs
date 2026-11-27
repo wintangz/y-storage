@@ -5,6 +5,7 @@ mod logo;
 mod logo_png;
 mod png;
 mod sw_painter;
+mod theme;
 mod ui;
 mod unattributed_assist;
 mod win32_host;
@@ -17,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{
     AppConfig, AppFilterChip, AppSortMode, ContainerRulebook, DriveScanTarget, SizeBandFilter,
-    SortDirection, ThemeMode, UnattributedLocationZone, ZoneRuleKind, ZoneRulebook,
+    SortDirection, ThemeMode, ThemePresetChoice, UnattributedLocationZone, ZoneRuleKind,
+    ZoneRulebook,
 };
 use y_core::history::{ScanHistory, ScanScopeKind};
 use y_core::model::{
@@ -30,7 +32,9 @@ use y_platform_windows::scanner::{execute_scan_with_history, execute_scan_with_p
 
 use crate::png::save_bgra_u32_as_png;
 use crate::sw_painter::SoftwarePainter;
-use crate::ui::{ActiveView, StorageUiState, configure_fonts_and_theme, draw_app_ui};
+use crate::ui::{
+    ActiveView, StorageUiState, configure_fonts_and_theme_with, draw_app_ui,
+};
 use crate::win32_host::{
     AppController, dpi_to_ppp, run_gui_app, run_perf_benchmark, run_titlebar_capture,
 };
@@ -63,6 +67,8 @@ fn main() {
     let mut screenshot_report_json: Option<PathBuf> = None;
     let mut screenshot_view = "main".to_string();
     let mut screenshot_theme = ThemeMode::Dark;
+    let mut screenshot_preset: Option<ThemePresetChoice> = None;
+    let mut screenshot_custom_rgb: Option<[u8; 3]> = None;
     let mut screenshot_dpi: u32 = 96;
     let mut screenshot_sort = AppSortMode::Size;
     let mut screenshot_sort_dir: Option<SortDirection> = None;
@@ -195,6 +201,30 @@ fn main() {
                     i += 1;
                 }
             }
+            "--theme-preset" => {
+                if i + 1 < args.len() {
+                    screenshot_preset = Some(match args[i + 1].to_ascii_lowercase().as_str() {
+                        "pink" => ThemePresetChoice::Pink,
+                        "purple" => ThemePresetChoice::Purple,
+                        "green" => ThemePresetChoice::Green,
+                        "orange" => ThemePresetChoice::Orange,
+                        "yellow" => ThemePresetChoice::Yellow,
+                        "red" => ThemePresetChoice::Red,
+                        "custom" => ThemePresetChoice::Custom,
+                        _ => ThemePresetChoice::Blue,
+                    });
+                    i += 1;
+                }
+            }
+            "--theme-custom" => {
+                if i + 1 < args.len() {
+                    if let Some(rgb) = crate::theme::parse_hex_rgb(&args[i + 1]) {
+                        screenshot_preset = Some(ThemePresetChoice::Custom);
+                        screenshot_custom_rgb = Some(rgb);
+                    }
+                    i += 1;
+                }
+            }
             "--dpi" => {
                 if i + 1 < args.len() {
                     screenshot_dpi = args[i + 1].parse().unwrap_or(96);
@@ -308,6 +338,8 @@ fn main() {
             screenshot_report_json.as_ref(),
             &screenshot_view,
             screenshot_theme,
+            screenshot_preset,
+            screenshot_custom_rgb,
             screenshot_dpi,
             screenshot_sort,
             sort_dir,
@@ -848,6 +880,8 @@ fn render_screenshot_frame(
     sys_win: &str,
     view: &str,
     theme: ThemeMode,
+    preset_override: Option<ThemePresetChoice>,
+    custom_rgb_override: Option<[u8; 3]>,
     dpi: u32,
     sort_mode: AppSortMode,
     sort_direction: SortDirection,
@@ -866,8 +900,14 @@ fn render_screenshot_frame(
 ) -> (usize, usize, Vec<u32>, Option<Rect>) {
     let mut cfg = config.clone();
     cfg.theme_mode = theme;
+    if let Some(p) = preset_override {
+        cfg.theme_preset = p;
+    }
+    if let Some(rgb) = custom_rgb_override {
+        cfg.theme_custom_rgb = rgb;
+    }
 
-    let mut ui_state = StorageUiState::default();
+    let mut ui_state = StorageUiState::from_config(&cfg);
     ui_state.sort_mode = sort_mode;
     ui_state.sort_direction = sort_direction;
     ui_state.filter_chip = filter_chip;
@@ -1093,6 +1133,11 @@ fn render_screenshot_frame(
                 ui_state.open_unattrib_facet_popup = Some("unattrib_zone");
             }
         }
+        "corner-aa-zoom-4x" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            ui_state.filter_chip = AppFilterChip::HasSystemDriveFootprint;
+        }
         "folder-only-apps" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = true;
@@ -1124,11 +1169,11 @@ fn render_screenshot_frame(
     let phys_h = (logical_h * ppp).round() as usize;
 
     let ctx = egui::Context::default();
-    configure_fonts_and_theme(&ctx, theme);
+    configure_fonts_and_theme_with(&ctx, cfg.theme_mode, cfg.theme_preset, cfg.theme_custom_rgb);
     let mut painter = SoftwarePainter::new();
     let clear_rgb = match theme {
-        ThemeMode::Dark => 0x000A_0A10,
-        ThemeMode::Light => 0x00EE_F4FA,
+        ThemeMode::Dark => crate::theme::CLEAR_BG_DARK_RGB,
+        ThemeMode::Light => crate::theme::CLEAR_BG_LIGHT_RGB,
     };
 
     let steps = if hover_size_mode || hover_web_search_tooltip {
@@ -1266,6 +1311,8 @@ fn render_screenshot(
     report_json: Option<&PathBuf>,
     view: &str,
     theme: ThemeMode,
+    preset_override: Option<ThemePresetChoice>,
+    custom_rgb_override: Option<[u8; 3]>,
     dpi: u32,
     sort_mode: AppSortMode,
     sort_direction: SortDirection,
@@ -1348,6 +1395,8 @@ fn render_screenshot(
             &sys_win,
             "expanded-fifa23",
             ThemeMode::Dark,
+            preset_override,
+            custom_rgb_override,
             96,
             AppSortMode::Size,
             SortDirection::Desc,
@@ -1370,6 +1419,8 @@ fn render_screenshot(
             &sys_win,
             "expanded-fifa23",
             ThemeMode::Light,
+            preset_override,
+            custom_rgb_override,
             120,
             AppSortMode::Size,
             SortDirection::Desc,
@@ -1431,6 +1482,8 @@ fn render_screenshot(
         &sys_win,
         view,
         theme,
+        preset_override,
+        custom_rgb_override,
         dpi,
         sort_mode,
         sort_direction,
@@ -1467,6 +1520,27 @@ fn render_screenshot(
         let crop_w = phys_w.saturating_sub(crop_x0).max(1);
         let crop_h = ((52.0 * ppp).round() as usize).clamp(1, phys_h);
         let (out_w, out_h, zoomed) = upscale_crop_nn(&fb, phys_w, crop_x0, 0, crop_w, crop_h, 3);
+        return save_bgra_u32_as_png(out_path, out_w, out_h, &zoomed);
+    }
+
+    if view == "corner-aa-zoom-4x" {
+        let (cx0, cy0, cx1, cy1) = if let Some(pod_r) = first_pod_rect {
+            let lx0 = (pod_r.max.x - 116.0).max(0.0);
+            let ly0 = (pod_r.max.y - 62.0).max(0.0);
+            let lx1 = (pod_r.max.x + 8.0).min(1020.0);
+            let ly1 = (pod_r.max.y + 8.0).min(720.0);
+            (
+                (lx0 * ppp).floor() as usize,
+                (ly0 * ppp).floor() as usize,
+                ((lx1 * ppp).ceil() as usize).min(phys_w),
+                ((ly1 * ppp).ceil() as usize).min(phys_h),
+            )
+        } else {
+            (0, 0, (124.0 * ppp).round() as usize, (72.0 * ppp).round() as usize)
+        };
+        let cw = cx1.saturating_sub(cx0).max(1);
+        let ch = cy1.saturating_sub(cy0).max(1);
+        let (out_w, out_h, zoomed) = upscale_crop_nn(&fb, phys_w, cx0, cy0, cw, ch, 4);
         return save_bgra_u32_as_png(out_path, out_w, out_h, &zoomed);
     }
 
