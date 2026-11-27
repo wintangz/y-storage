@@ -210,11 +210,12 @@ fn read_utf16le_z(buf: &[u8], start: usize, limit: usize) -> Option<(String, usi
     Some((String::from_utf16_lossy(&units), limit))
 }
 
-/// `ProductName` and `CompanyName` extracted from a PE `VS_VERSION_INFO` string table.
+/// `ProductName`, `CompanyName`, and `FileDescription` extracted from a PE `VS_VERSION_INFO` string table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeVersionStrings {
     pub product_name: Option<String>,
     pub company_name: Option<String>,
+    pub file_description: Option<String>,
 }
 
 /// Parses `VS_VERSION_INFO` -> `StringFileInfo` -> `ProductName` from a PE32/PE32+ `.rsrc` section
@@ -223,8 +224,8 @@ pub fn parse_pe_version_product_name<R: Read + Seek>(r: &mut R) -> Option<String
     parse_pe_version_strings(r).product_name
 }
 
-/// Parses `VS_VERSION_INFO` -> `StringFileInfo` -> `ProductName` and `CompanyName` from a PE32/PE32+
-/// `.rsrc` section using bounded seek-only I/O (`<= 64 KB`).
+/// Parses `VS_VERSION_INFO` -> `StringFileInfo` -> `ProductName`, `CompanyName`, and `FileDescription`
+/// from a PE32/PE32+ `.rsrc` section using bounded seek-only I/O (`<= 64 KB`).
 pub fn parse_pe_version_strings<R: Read + Seek>(r: &mut R) -> PeVersionStrings {
     let mut out = PeVersionStrings::default();
     let Ok(file_len) = r.seek(SeekFrom::End(0)) else {
@@ -412,7 +413,7 @@ pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
     parse_vs_version_strings_bytes(buf).product_name
 }
 
-/// Parses `ProductName` and `CompanyName` from raw `VS_VERSION_INFO` bytes.
+/// Parses `ProductName`, `CompanyName`, and `FileDescription` from raw `VS_VERSION_INFO` bytes.
 #[must_use]
 pub fn parse_vs_version_strings_bytes(buf: &[u8]) -> PeVersionStrings {
     let mut out = PeVersionStrings::default();
@@ -489,10 +490,17 @@ pub fn parse_vs_version_strings_bytes(buf: &[u8]) -> PeVersionStrings {
                                 && out.company_name.is_none()
                             {
                                 out.company_name = sanitize_vs_string(&val);
+                            } else if s_key.eq_ignore_ascii_case("FileDescription")
+                                && out.file_description.is_none()
+                            {
+                                out.file_description = sanitize_vs_string(&val);
                             }
                         }
                     }
-                    if out.product_name.is_some() && out.company_name.is_some() {
+                    if out.product_name.is_some()
+                        && out.company_name.is_some()
+                        && out.file_description.is_some()
+                    {
                         return out;
                     }
                     str_pos = align4(s_end);

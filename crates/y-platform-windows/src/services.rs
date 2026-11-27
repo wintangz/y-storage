@@ -221,3 +221,25 @@ pub fn enumerate_windows_services() -> Vec<WindowsServiceEntry> {
     }
     out
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceImagePath {
+    pub service_name: String,
+    pub display_name: String,
+    pub image_path: String,
+}
+
+/// Projects existing Windows service enumeration into normalized `(service_name, display_name, image_path)` entries,
+/// omitting services without a resolved `ImagePath`.
+#[must_use]
+pub fn enumerate_service_image_paths() -> Vec<ServiceImagePath> {
+    enumerate_windows_services()
+        .into_iter()
+        .filter(|s| !s.normalized_image_path.is_empty())
+        .map(|s| ServiceImagePath {
+            service_name: s.service_name,
+            display_name: s.display_name,
+            image_path: s.normalized_image_path,
+        })
+        .collect()
+}
