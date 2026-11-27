@@ -210,56 +210,82 @@ fn read_utf16le_z(buf: &[u8], start: usize, limit: usize) -> Option<(String, usi
     Some((String::from_utf16_lossy(&units), limit))
 }
 
+/// `ProductName` and `CompanyName` extracted from a PE `VS_VERSION_INFO` string table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeVersionStrings {
+    pub product_name: Option<String>,
+    pub company_name: Option<String>,
+}
+
 /// Parses `VS_VERSION_INFO` -> `StringFileInfo` -> `ProductName` from a PE32/PE32+ `.rsrc` section
 /// using bounded seek-only I/O (`<= 64 KB`), returning `None` if absent or placeholder.
 pub fn parse_pe_version_product_name<R: Read + Seek>(r: &mut R) -> Option<String> {
-    let file_len = r.seek(SeekFrom::End(0)).ok()?;
+    parse_pe_version_strings(r).product_name
+}
+
+/// Parses `VS_VERSION_INFO` -> `StringFileInfo` -> `ProductName` and `CompanyName` from a PE32/PE32+
+/// `.rsrc` section using bounded seek-only I/O (`<= 64 KB`).
+pub fn parse_pe_version_strings<R: Read + Seek>(r: &mut R) -> PeVersionStrings {
+    let mut out = PeVersionStrings::default();
+    let Ok(file_len) = r.seek(SeekFrom::End(0)) else {
+        return out;
+    };
     if file_len < 64 || r.seek(SeekFrom::Start(0)).is_err() {
-        return None;
+        return out;
     }
     let mut dos = [0u8; 64];
-    r.read_exact(&mut dos).ok()?;
+    if r.read_exact(&mut dos).is_err() {
+        return out;
+    }
     if read_u16_le(&dos, 0) != 0x5A4D {
-        return None;
+        return out;
     }
     let e_lfanew = read_u32_le(&dos, 0x3C) as u64;
     if e_lfanew < 64 || e_lfanew + 24 >= file_len {
-        return None;
+        return out;
     }
-    r.seek(SeekFrom::Start(e_lfanew)).ok()?;
+    if r.seek(SeekFrom::Start(e_lfanew)).is_err() {
+        return out;
+    }
     let mut coff = [0u8; 24];
-    r.read_exact(&mut coff).ok()?;
+    if r.read_exact(&mut coff).is_err() {
+        return out;
+    }
     if read_u32_le(&coff, 0) != 0x0000_4550 {
-        return None;
+        return out;
     }
     let num_sections = read_u16_le(&coff, 6) as usize;
     let opt_size = read_u16_le(&coff, 20) as usize;
     if !(128..=1024).contains(&opt_size) || num_sections == 0 || num_sections > 96 {
-        return None;
+        return out;
     }
     let opt_start = e_lfanew + 24;
     if opt_start + opt_size as u64 + (num_sections as u64 * 40) > file_len {
-        return None;
+        return out;
     }
     let mut opt = vec![0u8; opt_size];
-    r.read_exact(&mut opt).ok()?;
+    if r.read_exact(&mut opt).is_err() {
+        return out;
+    }
     let magic = read_u16_le(&opt, 0);
     let rsrc_dir_off = match magic {
         0x010B => 96 + 16,  // PE32 DataDirectory[2] (Resource)
         0x020B => 112 + 16, // PE32+ DataDirectory[2] (Resource)
-        _ => return None,
+        _ => return out,
     };
     if rsrc_dir_off + 8 > opt.len() {
-        return None;
+        return out;
     }
     let rsrc_rva = read_u32_le(&opt, rsrc_dir_off);
     let rsrc_size = read_u32_le(&opt, rsrc_dir_off + 4);
     if rsrc_rva == 0 || rsrc_size < 16 {
-        return None;
+        return out;
     }
 
     let mut sec_bytes = vec![0u8; num_sections * 40];
-    r.read_exact(&mut sec_bytes).ok()?;
+    if r.read_exact(&mut sec_bytes).is_err() {
+        return out;
+    }
     let mut sections = Vec::with_capacity(num_sections);
     for chunk in sec_bytes.chunks_exact(40) {
         let vsize = read_u32_le(chunk, 8);
@@ -274,7 +300,9 @@ pub fn parse_pe_version_product_name<R: Read + Seek>(r: &mut R) -> Option<String
         });
     }
 
-    let root_off = rva_to_offset(rsrc_rva, &sections)?;
+    let Some(root_off) = rva_to_offset(rsrc_rva, &sections) else {
+        return out;
+    };
     let find_entry = |r: &mut R, dir_off: u64, want_id: Option<u32>| -> Option<(u32, bool)> {
         if dir_off + 16 > file_len || r.seek(SeekFrom::Start(dir_off)).is_err() {
             return None;
@@ -305,51 +333,100 @@ pub fn parse_pe_version_product_name<R: Read + Seek>(r: &mut R) -> Option<String
     };
 
     // Level 1: RT_VERSION (16) -> Level 2: resource ID -> Level 3: language ID -> IMAGE_RESOURCE_DATA_ENTRY
-    let (lvl2_rel, is_dir2) = find_entry(r, root_off, Some(16))?;
+    let Some((lvl2_rel, is_dir2)) = find_entry(r, root_off, Some(16)) else {
+        return out;
+    };
     if !is_dir2 {
-        return None;
+        return out;
     }
-    let (lvl3_rel, is_dir3) = find_entry(r, root_off + lvl2_rel as u64, None)?;
+    let Some((lvl3_rel, is_dir3)) = find_entry(r, root_off + lvl2_rel as u64, None) else {
+        return out;
+    };
     if !is_dir3 {
-        return None;
+        return out;
     }
-    let (data_rel, is_dir4) = find_entry(r, root_off + lvl3_rel as u64, None)?;
+    let Some((data_rel, is_dir4)) = find_entry(r, root_off + lvl3_rel as u64, None) else {
+        return out;
+    };
     if is_dir4 {
-        return None;
+        return out;
     }
     let data_entry_off = root_off + data_rel as u64;
     if data_entry_off + 16 > file_len || r.seek(SeekFrom::Start(data_entry_off)).is_err() {
-        return None;
+        return out;
     }
     let mut data_entry = [0u8; 16];
-    r.read_exact(&mut data_entry).ok()?;
+    if r.read_exact(&mut data_entry).is_err() {
+        return out;
+    }
     let data_rva = read_u32_le(&data_entry, 0);
     let data_sz = read_u32_le(&data_entry, 4) as usize;
     if data_rva == 0 || data_sz < 40 {
-        return None;
+        return out;
     }
-    let data_off = rva_to_offset(data_rva, &sections)?;
+    let Some(data_off) = rva_to_offset(data_rva, &sections) else {
+        return out;
+    };
     let read_len = data_sz.min(65536).min(file_len.saturating_sub(data_off) as usize);
     if read_len < 40 || r.seek(SeekFrom::Start(data_off)).is_err() {
-        return None;
+        return out;
     }
     let mut ver_buf = vec![0u8; read_len];
-    r.read_exact(&mut ver_buf).ok()?;
-    parse_vs_version_product_name_bytes(&ver_buf)
+    if r.read_exact(&mut ver_buf).is_err() {
+        return out;
+    }
+    out = parse_vs_version_strings_bytes(&ver_buf);
+    out
+}
+
+fn sanitize_vs_string(raw: &str) -> Option<String> {
+    let clean = raw.trim();
+    if clean.len() < 2
+        || clean.to_ascii_lowercase().starts_with("todo:")
+        || clean.chars().any(|c| c.is_control() || c == '\u{FFFD}')
+    {
+        return None;
+    }
+    Some(clean.to_string())
+}
+
+fn is_generic_runtime_or_engine_stub(product: &str) -> bool {
+    let lower = product.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "microsoft® windows® operating system"
+            | "microsoft windows operating system"
+            | "microsoft® .net"
+            | "microsoft .net"
+            | "bootstrappackagedgame"
+            | "ue4game"
+            | "ue5game"
+            | "unrealgame"
+            | "electron"
+    )
 }
 
 /// Parses `ProductName` from raw `VS_VERSION_INFO` bytes.
 #[must_use]
 pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
+    parse_vs_version_strings_bytes(buf).product_name
+}
+
+/// Parses `ProductName` and `CompanyName` from raw `VS_VERSION_INFO` bytes.
+#[must_use]
+pub fn parse_vs_version_strings_bytes(buf: &[u8]) -> PeVersionStrings {
+    let mut out = PeVersionStrings::default();
     if buf.len() < 16 {
-        return None;
+        return out;
     }
     let root_len = (read_u16_le(buf, 0) as usize).min(buf.len());
     let root_val_len = read_u16_le(buf, 2) as usize;
     let root_type = read_u16_le(buf, 4);
-    let (root_key, key_end) = read_utf16le_z(buf, 6, root_len)?;
+    let Some((root_key, key_end)) = read_utf16le_z(buf, 6, root_len) else {
+        return out;
+    };
     if root_key != "VS_VERSION_INFO" {
-        return None;
+        return out;
     }
     let val_bytes = if root_type == 1 {
         root_val_len.saturating_mul(2)
@@ -366,7 +443,9 @@ pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
         let blk_end = (pos + blk_len).min(root_len);
         let blk_val_len = read_u16_le(buf, pos + 2) as usize;
         let blk_type = read_u16_le(buf, pos + 4);
-        let (blk_key, blk_key_end) = read_utf16le_z(buf, pos + 6, blk_end)?;
+        let Some((blk_key, blk_key_end)) = read_utf16le_z(buf, pos + 6, blk_end) else {
+            break;
+        };
         let blk_val_bytes = if blk_type == 1 {
             blk_val_len.saturating_mul(2)
         } else {
@@ -381,7 +460,9 @@ pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
                     break;
                 }
                 let st_end = (st_pos + st_len).min(blk_end);
-                let (_st_key, st_key_end) = read_utf16le_z(buf, st_pos + 6, st_end)?;
+                let Some((_st_key, st_key_end)) = read_utf16le_z(buf, st_pos + 6, st_end) else {
+                    break;
+                };
                 let mut str_pos = align4(st_key_end);
 
                 while str_pos + 6 <= st_end {
@@ -391,17 +472,28 @@ pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
                     }
                     let s_end = (str_pos + s_len).min(st_end);
                     let s_val_words = read_u16_le(buf, str_pos + 2) as usize;
-                    let (s_key, s_key_end) = read_utf16le_z(buf, str_pos + 6, s_end)?;
+                    let Some((s_key, s_key_end)) = read_utf16le_z(buf, str_pos + 6, s_end) else {
+                        break;
+                    };
                     let val_start = align4(s_key_end);
-                    if s_key.eq_ignore_ascii_case("ProductName") && s_val_words > 0 && val_start < s_end {
-                        let (val, _) = read_utf16le_z(buf, val_start, s_end)?;
-                        let clean = val.trim();
-                        if !clean.is_empty()
-                            && !clean.starts_with("TODO:")
-                            && !clean.eq_ignore_ascii_case("Microsoft® Windows® Operating System")
-                        {
-                            return Some(clean.to_string());
+                    if s_val_words > 0 && val_start < s_end {
+                        if let Some((val, _)) = read_utf16le_z(buf, val_start, s_end) {
+                            if s_key.eq_ignore_ascii_case("ProductName") && out.product_name.is_none() {
+                                if let Some(clean) = sanitize_vs_string(&val) {
+                                    if is_generic_runtime_or_engine_stub(&clean) {
+                                        return PeVersionStrings::default();
+                                    }
+                                    out.product_name = Some(clean);
+                                }
+                            } else if s_key.eq_ignore_ascii_case("CompanyName")
+                                && out.company_name.is_none()
+                            {
+                                out.company_name = sanitize_vs_string(&val);
+                            }
                         }
+                    }
+                    if out.product_name.is_some() && out.company_name.is_some() {
+                        return out;
                     }
                     str_pos = align4(s_end);
                 }
@@ -410,5 +502,5 @@ pub fn parse_vs_version_product_name_bytes(buf: &[u8]) -> Option<String> {
         }
         pos = align4(blk_end);
     }
-    None
+    out
 }

@@ -33,7 +33,7 @@ use y_core::model::{
     AttributionBasis, DriveInfo, FolderNode, InstalledApp, ManifestAppEntry, ScanReport,
     ScannedUnit,
 };
-use y_core::pe::{is_plausible_main_exe_name, parse_pe_version_product_name};
+use y_core::pe::is_plausible_main_exe_name;
 use y_core::tree::{
     DecompositionOptions, decompose_scanned_tree_with_options, is_root_system_file_name,
 };
@@ -956,7 +956,7 @@ fn discover_epic_manifest_apps(
 fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCandidate> {
     let rd = std::fs::read_dir(dir_path).ok()?;
     let folder_tok = normalize_app_token(folder_name);
-    let mut best: Option<(i32, u64, String, Option<String>)> = None;
+    let mut best: Option<(i32, u64, String, Option<String>, Option<String>)> = None;
     for ent in rd.flatten() {
         let Ok(ft) = ent.file_type() else {
             continue;
@@ -980,15 +980,18 @@ fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCa
         if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
             continue;
         }
-        let product_name = parse_pe_version_product_name(&mut f);
+        let ver = y_core::pe::parse_pe_version_strings(&mut f);
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let stem_tok = normalize_app_token(stem);
         let mut score = 0i32;
         if !folder_tok.is_empty() && stem_tok == folder_tok {
             score += 100;
         }
-        if product_name.is_some() {
+        if ver.product_name.is_some() {
             score += 30;
+        }
+        if ver.company_name.is_some() {
+            score += 10;
         }
         if size >= 200_000 {
             score += 10;
@@ -996,15 +999,18 @@ fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCa
         let exe_str = normalize_windows_path(&p.to_string_lossy());
         if best
             .as_ref()
-            .is_none_or(|(bs, bsz, _, _)| (score, size) > (*bs, *bsz))
+            .is_none_or(|(bs, bsz, _, _, _)| (score, size) > (*bs, *bsz))
         {
-            best = Some((score, size, exe_str, product_name));
+            best = Some((score, size, exe_str, ver.product_name, ver.company_name));
         }
     }
-    best.map(|(_, _, exe_path, product_name)| RootExeCandidate {
-        exe_path,
-        product_name,
-    })
+    best.map(
+        |(_, _, exe_path, product_name, company_name)| RootExeCandidate {
+            exe_path,
+            product_name,
+            company_name,
+        },
+    )
 }
 
 fn probe_candidate_executables(

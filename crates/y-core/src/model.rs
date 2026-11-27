@@ -75,6 +75,7 @@ pub enum AttributionBasis {
     LauncherManifest,
     ContainerRule,
     ExecutableScan,
+    CompanionReunion,
     ManualPin,
 }
 
@@ -93,6 +94,7 @@ impl AttributionBasis {
             Self::LauncherManifest => "launcher manifest",
             Self::ContainerRule => "layout rule",
             Self::ExecutableScan => "executable scan (inferred)",
+            Self::CompanionReunion => "companion reunion",
             Self::ManualPin => "manual pin",
         }
     }

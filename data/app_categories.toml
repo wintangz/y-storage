@@ -48,6 +48,56 @@ app_matches = ["minecraft", "microsoft.minecraftuwp"]
 reason = "Mojang / Microsoft sandbox game package"
 
 [[mappings]]
+category = "Games"
+app_matches = [
+  "ldplayer",
+  "ldplayer 9",
+  "ldplayer 4",
+  "bluestacks",
+  "bluestacks 5",
+  "nox",
+  "noxplayer",
+  "memu",
+  "memu play",
+  "mumu",
+  "mumu player",
+  "mumuplayer",
+  "gameloop",
+  "google play games",
+  "waydroid",
+  "retroarch",
+  "dolphin emulator",
+  "pcsx2",
+  "rpcs3",
+  "ryujinx",
+  "yuzu",
+  "citron",
+  "suyu",
+  "cemu",
+  "citra",
+  "lime3ds",
+  "azahar",
+  "ppsspp",
+  "duckstation",
+  "xemu",
+  "xenia",
+  "vita3k",
+  "melonds",
+  "desmume",
+  "mgba",
+  "visualboyadvance",
+  "snes9x",
+  "mesen",
+  "project64",
+  "redream",
+  "flycast",
+  "mame",
+  "scummvm",
+  "dosbox",
+]
+reason = "Android or console game emulator"
+
+[[mappings]]
 category = "Platforms & Launchers"
 app_matches = ["epic games launcher"]
 reason = "Epic Games storefront and game launcher"
@@ -99,8 +149,28 @@ reason = "Microsoft Store app storefront"
 
 [[mappings]]
 category = "Platforms & Launchers"
-app_matches = ["vanillartxapp"]
-reason = "Vanilla RTX Minecraft launcher / mod manager"
+app_matches = [
+  "ubisoft connect",
+  "uplay",
+  "curseforge",
+  "overwolf",
+  "playnite",
+  "heroic games launcher",
+  "itch",
+  "hoyoplay",
+  "wegame",
+  "plarium play",
+  "wargaming.net game center",
+  "prism launcher",
+  "multimc",
+  "modrinth",
+  "atlauncher",
+  "lunar client",
+  "badlion client",
+  "feather client",
+  "vanillartxapp",
+]
+reason = "Game storefront, mod platform, or game launcher"
 
 [[mappings]]
 category = "System & Runtimes"
@@ -114,13 +184,29 @@ reason = "Microsoft Edge Game Assist companion overlay widget"
 
 [[mappings]]
 category = "Browsers"
-app_matches = ["microsoft edge"]
+app_matches = ["microsoft edge", "microsoft.microsoftedge.stable"]
 reason = "Microsoft Chromium web browser"
 
 [[mappings]]
 category = "Browsers"
-app_matches = ["google chrome"]
-reason = "Google Chrome web browser"
+app_matches = [
+  "google chrome",
+  "mozilla firefox",
+  "firefox",
+  "brave",
+  "brave browser",
+  "opera",
+  "opera gx",
+  "vivaldi",
+  "zen browser",
+  "arc",
+  "waterfox",
+  "librewolf",
+  "tor browser",
+  "chromium",
+  "duckduckgo",
+]
+reason = "Desktop web browser"
 
 [[mappings]]
 category = "Communication"
@@ -146,6 +232,27 @@ reason = "Microsoft Skype communication client"
 category = "Communication"
 app_matches = ["microsoft.outlookforwindows", "windowscommunicationsapps"]
 reason = "Microsoft Mail / Outlook client"
+
+[[mappings]]
+category = "Communication"
+app_matches = [
+  "whatsapp",
+  "viber",
+  "signal",
+  "wechat",
+  "line",
+  "skype",
+  "webex",
+  "cisco webex",
+  "element",
+  "guilded",
+  "mumble",
+  "teamspeak",
+  "thunderbird",
+  "mozilla thunderbird",
+  "microsoft.people",
+]
+reason = "Messaging, email, or voice communication client"
 
 [[mappings]]
 category = "Development"
@@ -194,8 +301,59 @@ reason = "Postman API development & testing client"
 
 [[mappings]]
 category = "Development"
-app_matches = ["python launcher", "node.js", "java 8 update"]
-reason = "Programming language runtime / toolchain"
+app_matches = ["python", "python 3", "python launcher", "node.js", "nodejs", "java 8 update", "rust", "rustup", "portablegit", "git", "deno", "bun", "golang", "cmake", "msys2"]
+reason = "Programming language runtime, compiler, or CLI toolchain"
+
+[[mappings]]
+category = "Development"
+app_matches = [
+  "cursor",
+  "windsurf",
+  "zed",
+  "sublime text",
+  "notepad++",
+  "neovim",
+  "vim",
+  "emacs",
+  "eclipse",
+  "netbeans",
+  "android studio",
+  "intellij idea",
+  "pycharm",
+  "webstorm",
+  "clion",
+  "goland",
+  "rider",
+  "rubymine",
+  "phpstorm",
+  "datagrip",
+  "fleet",
+  "jetbrains toolbox",
+  "godot",
+  "unreal engine",
+  "gamemaker",
+  "docker",
+  "docker desktop",
+  "podman",
+  "github desktop",
+  "sourcetree",
+  "gitkraken",
+  "fork",
+  "insomnia",
+  "wireshark",
+  "fiddler",
+  "putty",
+  "winscp",
+  "filezilla",
+  "mobaxterm",
+  "termius",
+  "dbeaver",
+  "heidisql",
+  "pgadmin",
+  "mongodb compass",
+  "microsoft.microsoftedgedevtoolsclient",
+]
+reason = "Code editor, IDE, container runtime, or developer utility"
 
 [[mappings]]
 category = "Development"
@@ -239,8 +397,54 @@ reason = "Inkscape vector graphics & embroidery editor"
 
 [[mappings]]
 category = "Media & Creative"
-app_matches = ["adobe creative cloud"]
-reason = "Adobe Creative Cloud desktop runtime & shared assets"
+app_matches = ["adobe creative cloud", "adobe (shared data)", "adobe photoshop", "adobe lightroom", "adobe premiere pro", "adobe after effects", "adobe illustrator", "adobe indesign", "adobe audition"]
+reason = "Adobe Creative Cloud desktop suite and shared creative assets"
+
+[[mappings]]
+category = "Media & Creative"
+app_matches = [
+  "vlc",
+  "vlc media player",
+  "mpv",
+  "potplayer",
+  "mpc-hc",
+  "mpc-be",
+  "foobar2000",
+  "aimp",
+  "musicbee",
+  "audacity",
+  "reaper",
+  "fl studio",
+  "ableton live",
+  "davinci resolve",
+  "obs studio",
+  "streamlabs",
+  "handbrake",
+  "mkvtoolnix",
+  "subtitleedit",
+  "subtitle edit",
+  "aegisub",
+  "gimp",
+  "krita",
+  "paint.net",
+  "affinity photo",
+  "affinity designer",
+  "affinity publisher",
+  "blender",
+  "aseprite",
+  "blockbench",
+  "figma",
+  "canva",
+  "capcut",
+  "kdenlive",
+  "shotcut",
+  "irfanview",
+  "xnview",
+  "faststone image viewer",
+  "plex",
+  "kodi",
+]
+reason = "Audio/video player, streamer, or 2D/3D creative editor"
 
 [[mappings]]
 category = "Media & Creative"
@@ -286,6 +490,48 @@ reason = "Microsoft Power BI analytics & reporting tool"
 category = "Productivity"
 app_matches = ["microsoft.microsoftstickynotes", "microsoft.todos"]
 reason = "Microsoft notes & task management app"
+
+[[mappings]]
+category = "Productivity"
+app_matches = [
+  "obsidian",
+  "notion",
+  "evernote",
+  "logseq",
+  "joplin",
+  "anki",
+  "libreoffice",
+  "openoffice",
+  "wps office",
+  "adobe acrobat",
+  "foxit pdf reader",
+  "sumatrapdf",
+  "calibre",
+  "grammarly",
+  "todoist",
+  "ticktick",
+  "xmind",
+  "microsoft.wallet",
+  "microsoft.getstarted",
+  "microsoftcorporationii.microsoftfamily",
+]
+reason = "Document, notes, reading, or personal productivity application"
+
+[[mappings]]
+category = "System & Runtimes"
+app_matches = [
+  "nvidia container",
+  "malwarebytes",
+  "bitdefender",
+  "kaspersky",
+  "avast",
+  "norton",
+  "eset",
+  "mcafee",
+  "sophos",
+  "trend micro",
+]
+reason = "System service container or endpoint security suite"
 
 [[mappings]]
 category = "Utilities"
@@ -347,21 +593,147 @@ category = "Utilities"
 app_matches = ["appleinc.appledevices", "asuspcassistant", "asus smart display control", "b9eced6f.armourycrate"]
 reason = "Vendor hardware / mobile device management utility"
 
-# Keyword fallback rules (priority c: evaluated after authored mappings and hard signals)
+[[mappings]]
+category = "Utilities"
+app_matches = [
+  "7-zip",
+  "peazip",
+  "nanazip",
+  "winzip",
+  "everything",
+  "wiztree",
+  "windirstat",
+  "spacesniffer",
+  "rufus",
+  "balenaetcher",
+  "ventoy",
+  "cpu-z",
+  "cpuz",
+  "gpu-z",
+  "aida64",
+  "aida64extreme840",
+  "furmark",
+  "occt",
+  "cinebench",
+  "prime95",
+  "bcuninstaller",
+  "bulk crap uninstaller",
+  "revo uninstaller",
+  "geek uninstaller",
+  "ccleaner",
+  "bleachbit",
+  "powertoys",
+  "microsoft powertoys",
+  "translucenttb",
+  "translucenttb-portable-x64",
+  "lively wallpaper",
+  "wallpaper engine",
+  "rainmeter",
+  "sharex",
+  "greenshot",
+  "flameshot",
+  "lightshot",
+  "bitwarden",
+  "1password",
+  "keepass",
+  "keepassxc",
+  "dashlane",
+  "nordpass",
+  "proton pass",
+  "nordvpn",
+  "expressvpn",
+  "mullvad",
+  "mullvad vpn",
+  "protonvpn",
+  "proton vpn",
+  "surfshark",
+  "wireguard",
+  "openvpn",
+  "cloudflare warp",
+  "zerotier",
+  "qbittorrent",
+  "transmission",
+  "deluge",
+  "utorrent",
+  "bittorrent",
+  "jdownloader",
+  "free download manager",
+  "teracopy",
+  "syncthing",
+  "nextcloud",
+  "dropbox",
+  "onedrive",
+  "megasync",
+  "google drive",
+  "icloud",
+  "anydesk",
+  "parsec",
+  "moonlight",
+  "sunshine",
+  "betterjoy",
+  "ds4windows",
+  "ghelper",
+  "fancontrol",
+  "openrgb",
+  "signalrgb",
+  "corsair icue",
+  "razer synapse",
+  "steelseries gg",
+  "nzxt cam",
+  "z-controller",
+  "y-storage",
+  "adeptiscanner",
+]
+reason = "System utility, archive tool, VPN, download client, or hardware controller"
+
+# Generic class keyword rules (evaluated after authored mappings and hard signals)
 [[rules]]
-category = "Browsers"
-name_contains = ["firefox", "brave", "opera", "vivaldi"]
-reason = "Web browser name keyword"
+category = "Games"
+name_contains = ["emulator", "virtual machine"]
+publisher_contains = ["emulator"]
+reason = "Game emulator or virtual machine class keyword"
 
 [[rules]]
-category = "Communication"
-name_contains = ["slack", "telegram", "zoom", "teams", "yourphone"]
-reason = "Communication / phone-link name keyword"
+category = "Browsers"
+name_contains = ["browser", "firefox", "brave", "opera", "vivaldi"]
+reason = "Web browser class keyword"
+
+[[rules]]
+category = "Utilities"
+name_contains = ["vpn"]
+publisher_contains = ["vpn"]
+reason = "VPN utility class keyword"
+
+[[rules]]
+category = "System & Runtimes"
+name_contains = ["antivirus", "security suite"]
+publisher_contains = ["antivirus"]
+reason = "Security suite / antivirus class keyword"
+
+[[rules]]
+category = "Utilities"
+name_contains = ["torrent", "download manager"]
+reason = "Torrent or download manager class keyword"
+
+[[rules]]
+category = "Utilities"
+name_contains = ["password manager"]
+reason = "Password manager class keyword"
+
+[[rules]]
+category = "Media & Creative"
+name_contains = ["video editor", "audio editor", "photo editor"]
+reason = "Media editor class keyword"
 
 [[rules]]
 category = "Development"
-name_contains = ["sdk", "devkit", "devhome", "terminal", "code"]
-reason = "Developer SDK / terminal keyword"
+name_contains = ["code editor", "ide", "sdk", "devkit", "devhome", "terminal", "code"]
+reason = "Developer IDE, code editor, SDK, or terminal class keyword"
+
+[[rules]]
+category = "Communication"
+name_contains = ["messenger", "chat", "slack", "telegram", "zoom", "teams", "yourphone"]
+reason = "Messaging, chat, or communication class keyword"
 
 [[rules]]
 category = "Media & Creative"

@@ -480,6 +480,7 @@ fn group_node_promotes_three_children_with_group_publisher_and_no_parent_app() {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Photoshop 2025\Photoshop.exe".into(),
             product_name: Some("Adobe Photoshop 2025".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -487,6 +488,7 @@ fn group_node_promotes_three_children_with_group_publisher_and_no_parent_app() {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Illustrator 2025\Illustrator.exe".into(),
             product_name: Some("Adobe Illustrator 2025".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -494,6 +496,7 @@ fn group_node_promotes_three_children_with_group_publisher_and_no_parent_app() {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Premiere Pro 2025\Premiere.exe".into(),
             product_name: Some("Adobe Premiere Pro 2025".into()),
+            company_name: None,
         },
     );
 
@@ -593,6 +596,7 @@ fn single_child_wrapper_promotes_outer_folder_not_child() {
         RootExeCandidate {
             exe_path: r"D:\PortableTool\v2.1\PortableTool.exe".into(),
             product_name: Some("PortableTool".into()),
+            company_name: None,
         },
     );
 
@@ -690,6 +694,7 @@ fn manifest_container_includes_manifest_members_and_excludes_non_member_siblings
         RootExeCandidate {
             exe_path: r"D:\SteamLibrary\steamapps\common\OrphanMod\Mod.exe".into(),
             product_name: Some("OrphanMod".into()),
+            company_name: None,
         },
     );
 
@@ -815,6 +820,7 @@ fn personal_zone_routes_media_folder_to_your_files_without_app_hunting() {
         RootExeCandidate {
             exe_path: r"D:\Media\Jellyfin\jellyfin.exe".into(),
             product_name: Some("Jellyfin".into()),
+            company_name: None,
         },
     );
 
@@ -985,6 +991,7 @@ fn manual_pins_override_wrong_inferences_and_persist_in_config() {
         RootExeCandidate {
             exe_path: r"D:\Apps\SuiteAsOne\Sub1\a.exe".into(),
             product_name: Some("SubOne".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -992,6 +999,7 @@ fn manual_pins_override_wrong_inferences_and_persist_in_config() {
         RootExeCandidate {
             exe_path: r"D:\Apps\SuiteAsOne\Sub2\b.exe".into(),
             product_name: Some("SubTwo".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -999,6 +1007,7 @@ fn manual_pins_override_wrong_inferences_and_persist_in_config() {
         RootExeCandidate {
             exe_path: r"D:\WrapPinGroup\OnlyChild\tool.exe".into(),
             product_name: Some("Split Child App".into()),
+            company_name: None,
         },
     );
 
@@ -1254,6 +1263,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe".into(),
             product_name: Some("AutoHotkey".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -1261,6 +1271,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"C:\Program Files\AutoHotkey\UX\AutoHotkeyUX.exe".into(),
             product_name: Some("AutoHotkey".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -1268,6 +1279,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"C:\Program Files\Microsoft GameInput\x86\gameinputhost.exe".into(),
             product_name: Some("Microsoft GameInput".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -1275,6 +1287,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"C:\Program Files\Microsoft GameInput\x64\gameinputhost.exe".into(),
             product_name: Some("Microsoft® Windows® GameInput".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -1282,6 +1295,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"D:\Games\Lossless.Scaling.v3.2.2_LinkNeverDie.Com\Launcher.exe".into(),
             product_name: Some("LinkNeverDie.Com Launcher".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -1289,6 +1303,7 @@ fn app_container_children_and_installed_roots_do_not_fracture_or_misname() {
         RootExeCandidate {
             exe_path: r"D:\Games\OtherGame\Game.exe".into(),
             product_name: Some("Other Game".into()),
+            company_name: None,
         },
     );
 

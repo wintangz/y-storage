@@ -773,6 +773,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Photoshop 2025\Photoshop.exe".into(),
             product_name: Some("Adobe Photoshop 2025".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -780,6 +781,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Illustrator 2025\Illustrator.exe".into(),
             product_name: Some("Adobe Illustrator 2025".into()),
+            company_name: None,
         },
     );
     exe_map.insert(
@@ -787,6 +789,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
         RootExeCandidate {
             exe_path: r"D:\Apps\Adobe\Premiere Pro 2025\Premiere.exe".into(),
             product_name: Some("Adobe Premiere Pro 2025".into()),
+            company_name: None,
         },
     );
 

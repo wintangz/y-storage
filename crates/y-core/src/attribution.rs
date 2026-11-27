@@ -21,6 +21,7 @@ use crate::zones::classify_zone;
 pub struct RootExeCandidate {
     pub exe_path: String,
     pub product_name: Option<String>,
+    pub company_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -896,6 +897,43 @@ pub fn attribute_scan_with_options(
                 options.root_exe_candidates,
                 &exe_children_by_parent,
             ) {
+                // Component-folder reunion pass: after registered/manifest/curated claims have declined
+                // this unit and before promoting it to a standalone folder-only app, check if it is
+                // unambiguously a component companion folder of a registered app in the report.
+                if let Some((parent_idx, reunion_detail)) = try_reunite_component_folder(
+                    &buckets,
+                    installed_apps.len(),
+                    &path_lower,
+                    &leaf,
+                    options.root_exe_candidates,
+                    &exe_children_by_parent,
+                ) {
+                    if buckets[parent_idx].app.direct_install_location.is_none()
+                        && buckets[parent_idx].app.inferred_install_location.is_none()
+                    {
+                        buckets[parent_idx].app.inferred_install_location = Some(unit.path.clone());
+                    }
+                    if buckets[parent_idx].app.display_icon.is_none() {
+                        buckets[parent_idx].app.display_icon = icon;
+                    }
+                    let (zone, qual) = classify_zone(&unit.path, true);
+                    push_item_to_bucket(
+                        &mut buckets[parent_idx],
+                        BreakdownItem {
+                            path: unit.path.clone(),
+                            bytes: unit.bytes,
+                            zone: Some(zone),
+                            qualifier: qual,
+                            basis: Some(AttributionBasis::CompanionReunion),
+                            basis_detail: Some(reunion_detail),
+                            no_touch: None,
+                            drive_letter: d_letter,
+                        },
+                        AttributionBasis::CompanionReunion,
+                    );
+                    continue;
+                }
+
                 let prefix = if basis == AttributionBasis::ContainerRule {
                     "container"
                 } else {
@@ -1720,6 +1758,327 @@ fn infer_step5_app_candidate(
     }
 
     None
+}
+
+const GENERIC_COMPANION_COMPONENT_WORDS: &[&str] = &[
+    "box", "vm", "engine", "runtime", "data", "cache", "bin", "x64", "x86", "common",
+];
+
+fn normalize_company_identity(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return String::new();
+    }
+    let cleaned: String = trimmed
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
+        .collect();
+    let mut words: Vec<&str> = cleaned.split_whitespace().collect();
+    let is_legal_suffix = |w: &str| {
+        matches!(
+            w,
+            "inc"
+                | "incorporated"
+                | "corp"
+                | "corporation"
+                | "co"
+                | "company"
+                | "ltd"
+                | "limited"
+                | "llc"
+                | "gmbh"
+                | "sro"
+                | "sarl"
+                | "pte"
+                | "aps"
+                | "plc"
+                | "ab"
+                | "ag"
+                | "sa"
+                | "bv"
+                | "nv"
+                | "oy"
+                | "eu"
+                | "foundation"
+        )
+    };
+    while words.len() > 1 {
+        let len = words.len();
+        // Strip multi-token legal endings such as "s r o", "e u", "s a"
+        if len >= 4 && words[len - 3] == "s" && words[len - 2] == "r" && words[len - 1] == "o" {
+            words.truncate(len - 3);
+            continue;
+        }
+        if len >= 3 && words[len - 2] == "e" && words[len - 1] == "u" {
+            words.truncate(len - 2);
+            continue;
+        }
+        if is_legal_suffix(words[len - 1]) {
+            words.pop();
+            continue;
+        }
+        break;
+    }
+    let joined = words.join(" ");
+    if joined.len() >= 3 {
+        joined
+    } else {
+        String::new()
+    }
+}
+
+fn alpha_words_stripped_digits(name: &str) -> Vec<String> {
+    split_alnum_words(name)
+        .into_iter()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Checks if `rem` consists solely of ASCII digits and/or component words from
+/// `GENERIC_COMPANION_COMPONENT_WORDS`, containing at least one component word.
+fn remainder_is_digits_and_component_words(rem: &str) -> bool {
+    if rem.is_empty() || rem.len() > 96 {
+        return false;
+    }
+    let bytes = rem.as_bytes();
+    let n = bytes.len();
+    // state[i] = (reachable_without_word, reachable_with_at_least_one_word)
+    let mut state = vec![(false, false); n + 1];
+    state[0] = (true, false);
+    for i in 0..n {
+        let (no_word, has_word) = state[i];
+        if !no_word && !has_word {
+            continue;
+        }
+        if bytes[i].is_ascii_digit() {
+            let mut j = i + 1;
+            while j < n && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if no_word {
+                state[j].0 = true;
+            }
+            if has_word {
+                state[j].1 = true;
+            }
+        }
+        for word in GENERIC_COMPANION_COMPONENT_WORDS {
+            let wb = word.as_bytes();
+            if i + wb.len() <= n && &bytes[i..i + wb.len()] == wb {
+                state[i + wb.len()].1 = true;
+            }
+        }
+    }
+    state[n].1
+}
+
+fn leaf_matches_app_stem_tier2(leaf_compact: &str, app_name: &str) -> bool {
+    let words = alpha_words_stripped_digits(app_name);
+    if words.is_empty() {
+        return false;
+    }
+    // Check every cumulative brand/product stem prefix words[0..=k] (len >= 3).
+    // Digits inside or right after the stem are tolerated, provided leaf_compact starts
+    // immediately with words[0] (preventing mid-token false matches like "msteams" vs "Steam")
+    // and the remainder consists strictly of digits and generic component words.
+    let mut prefix_chars = 0usize;
+    for k in 0..words.len() {
+        prefix_chars += words[k].len();
+        if prefix_chars < 3 {
+            continue;
+        }
+        let mut cursor = 0usize;
+        let mut ok = true;
+        for (idx, w) in words[0..=k].iter().enumerate() {
+            if idx > 0 {
+                while cursor < leaf_compact.len() && leaf_compact.as_bytes()[cursor].is_ascii_digit()
+                {
+                    cursor += 1;
+                }
+            }
+            if leaf_compact[cursor..].starts_with(w.as_str()) {
+                cursor += w.len();
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok && remainder_is_digits_and_component_words(&leaf_compact[cursor..]) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Attempts to reunite an unclaimed folder-only Step (5) candidate with a registered app
+/// in the report via two general evidence tiers:
+/// - Tier 1 (file evidence): principal exe's PE `CompanyName` matches publisher or `ProductName` token-matches app name.
+/// - Tier 2 (stem evidence): folder leaf begins with the app's digit-stripped brand stem and its remainder
+///   consists strictly of digits and fixed generic component words (`box`, `vm`, `engine`, `runtime`, `data`,
+///   `cache`, `bin`, `x64`, `x86`, `common`), subject to a Tier 1 contradiction veto.
+/// Constitutional rule: two or more qualifying registered apps in an active tier refuse reunion (`None`).
+fn try_reunite_component_folder(
+    buckets: &[AppBucket],
+    registered_count: usize,
+    path_lower: &str,
+    leaf: &str,
+    exe_candidates: Option<&HashMap<String, RootExeCandidate>>,
+    exe_children_by_parent: &HashMap<String, Vec<(&String, &RootExeCandidate)>>,
+) -> Option<(usize, String)> {
+    let registered_limit = registered_count.min(buckets.len());
+    let eligible: Vec<usize> = (0..registered_limit)
+        .filter(|&i| !buckets[i].app.is_store_fallback && !buckets[i].app.id.starts_with("synth:"))
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+
+    let principal_exe: Option<&RootExeCandidate> = exe_candidates
+        .and_then(|m| m.get(path_lower))
+        .or_else(|| {
+            exe_children_by_parent
+                .get(path_lower)
+                .and_then(|v| if v.len() == 1 { Some(v[0].1) } else { None })
+        });
+
+    let exe_company_norm: Option<String> = principal_exe
+        .and_then(|c| c.company_name.as_deref())
+        .map(normalize_company_identity)
+        .filter(|s| s.len() >= 3);
+    let exe_product: Option<&str> = principal_exe
+        .and_then(|c| c.product_name.as_deref())
+        .map(str::trim)
+        .filter(|s| normalize_app_token(s).len() >= 3);
+
+    let company_matches: Vec<usize> = if let Some(ref cn) = exe_company_norm {
+        eligible
+            .iter()
+            .copied()
+            .filter(|&i| {
+                buckets[i]
+                    .app
+                    .publishers
+                    .iter()
+                    .any(|p| normalize_company_identity(p) == *cn)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let product_matches: Vec<usize> = if let Some(pn) = exe_product {
+        eligible
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let app = &buckets[i].app;
+                match_app_predicate(&app.display_name, pn).is_some()
+                    || match_app_predicate(pn, &app.display_name).is_some()
+                    || app.aliases.iter().any(|al| {
+                        match_app_predicate(al, pn).is_some()
+                            || match_app_predicate(pn, al).is_some()
+                    })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Tier 1 (file evidence)
+    if product_matches.len() >= 2 {
+        return None;
+    }
+    if product_matches.len() == 1 {
+        let idx = product_matches[0];
+        if exe_company_norm.is_some()
+            && !buckets[idx].app.publishers.is_empty()
+            && !company_matches.is_empty()
+            && !company_matches.contains(&idx)
+        {
+            return None;
+        }
+        return Some((
+            idx,
+            format!(
+                "companion reunion (Tier 1: PE ProductName) -> {}",
+                buckets[idx].app.display_name
+            ),
+        ));
+    }
+    if company_matches.len() == 1 {
+        let idx = company_matches[0];
+        return Some((
+            idx,
+            format!(
+                "companion reunion (Tier 1: PE CompanyName) -> {}",
+                buckets[idx].app.display_name
+            ),
+        ));
+    }
+
+    // Tier 2 (stem evidence)
+    let first_alpha = leaf.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+    if !first_alpha {
+        return None;
+    }
+    let leaf_compact: String = leaf
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if leaf_compact.len() < 4 {
+        return None;
+    }
+
+    let tier2_matches: Vec<usize> = eligible
+        .iter()
+        .copied()
+        .filter(|&i| leaf_matches_app_stem_tier2(&leaf_compact, &buckets[i].app.display_name))
+        .collect();
+    if tier2_matches.len() != 1 {
+        return None;
+    }
+    let idx = tier2_matches[0];
+
+    // Tier 1 contradiction veto: never force a Tier 2 stem match if PE file evidence points elsewhere.
+    if exe_company_norm.is_some()
+        && !buckets[idx].app.publishers.is_empty()
+        && !buckets[idx]
+            .app
+            .publishers
+            .iter()
+            .any(|p| Some(normalize_company_identity(p)) == exe_company_norm)
+    {
+        return None;
+    }
+    if let Some(pn) = exe_product {
+        if !product_matches.is_empty() && !product_matches.contains(&idx) {
+            return None;
+        }
+        let app_words = alpha_words_stripped_digits(&buckets[idx].app.display_name);
+        let pn_words = alpha_words_stripped_digits(pn);
+        let shares_word = pn_words
+            .iter()
+            .any(|pw| pw.len() >= 3 && app_words.iter().any(|aw| aw == pw));
+        if !shares_word && exe_company_norm.is_none() {
+            return None;
+        }
+    }
+
+    Some((
+        idx,
+        format!(
+            "companion reunion (Tier 2: stem+component) -> {}",
+            buckets[idx].app.display_name
+        ),
+    ))
 }
 
 enum TwoSegmentMatch {
