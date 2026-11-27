@@ -212,6 +212,28 @@ pub fn attribute_scan_with_options(
         }
     }
 
+    // If C:\XboxGames\Minecraft Launcher exists as a scanned non-empty MSIXVC unit without a Win32 Uninstall
+    // registry entry, pre-seed the "Minecraft Launcher" bucket so AppData\Roaming\.minecraft (visited earlier
+    // alphabetically than C:\XboxGames) routes to "Minecraft Launcher" regardless of NTFS unit order.
+    if find_app_matching(&buckets, &["minecraft launcher"]).is_none()
+        && scanned_units.iter().any(|u| {
+            u.bytes > 0
+                && u.kind == ScannedUnitKind::Regular
+                && !excluded_drives.contains(&u.drive_letter.to_ascii_uppercase())
+                && normalize_path_key(&u.path) == "c:\\xboxgames\\minecraft launcher"
+        })
+    {
+        ensure_synthetic_app(
+            &mut buckets,
+            &mut store_buckets,
+            "xbox:minecraft launcher",
+            "Minecraft Launcher",
+            "Microsoft Studios",
+            None,
+            false,
+        );
+    }
+
     for unit in scanned_units {
         if unit.bytes == 0 && unit.kind != ScannedUnitKind::RootSystemFile {
             continue;
@@ -2338,8 +2360,8 @@ fn find_by_token(
             false,
         ),
         (&["\\programdata\\asus"], &["asus framework service", "armoury crate"], false),
-        (&["\\program files\\ea", "\\program files\\electronic arts", "\\program files\\common files\\eainstaller", "\\programdata\\ea desktop", "\\programdata\\electronic arts", "\\programdata\\origin", "\\programdata\\eaanticheat", "\\appdata\\local\\eadesktop", "\\appdata\\local\\ealaunchhelper", "\\appdata\\local\\electronic arts", "\\appdata\\local\\origin", "\\appdata\\roaming\\ea"], &["ea app", "ea sports", "fifa 23"], false),
-        (&["\\programdata\\frostbite"], &["ea sports", "fifa 23", "ea app"], false),
+        (&["\\program files\\ea", "\\program files\\electronic arts", "\\program files\\common files\\eainstaller", "\\programdata\\ea desktop", "\\programdata\\electronic arts", "\\programdata\\origin", "\\programdata\\eaanticheat", "\\appdata\\local\\eadesktop", "\\appdata\\local\\ealaunchhelper", "\\appdata\\local\\electronic arts", "\\appdata\\local\\origin", "\\appdata\\roaming\\ea"], &["ea app"], false),
+        (&["\\programdata\\frostbite"], &["ea app"], false),
         // Discord
         (
             &[
@@ -2459,8 +2481,9 @@ fn find_by_token(
         (&["\\appdata\\local\\hoyoverse", "\\appdata\\locallow\\mihoyo", "\\appdata\\roaming\\cognosphere"], &["hoyoplay", "genshin impact"], false),
         // Rockstar
         (&["\\program files\\rockstar games", "\\program files (x86)\\rockstar games", "\\programdata\\rockstar games", "\\appdata\\local\\rockstar games"], &["rockstar games launcher"], false),
-        // Minecraft / Xbox
-        (&["c:\\xboxgames\\minecraft for windows", "c:\\xboxgames\\minecraft launcher", "c:\\xboxgames\\gamesave", "\\appdata\\roaming\\.minecraft", "\\appdata\\roaming\\minecraft bedrock", "\\appdata\\local\\minecraftinstaller"], &["xbox service"], true),
+        // Minecraft Java / Launcher (Bedrock routes directly to Store: Microsoft.MinecraftUWP below)
+        (&["c:\\xboxgames\\minecraft launcher"], &["minecraft launcher"], true),
+        (&["\\appdata\\roaming\\.minecraft", "\\appdata\\local\\minecraftinstaller"], &["minecraft launcher"], false),
         // Wacom
         (&["\\appdata\\roaming\\wtablet", "\\appdata\\roaming\\wpersistent"], &["wacom tablet"], false),
         // WinRAR, IDM, TreeSize, Tailscale, TeamViewer, RustDesk, Spotify, Inkscape, Tiled, Node, Python
@@ -2502,6 +2525,21 @@ fn find_by_token(
             if let Some(idx) = find_app_matching(buckets, app_needles) {
                 return Some((idx, *is_body));
             }
+        }
+    }
+
+    // Minecraft Bedrock product routes to the Store: Microsoft.MinecraftUWP package bucket.
+    let is_bedrock_install =
+        path_matches_token(path_lower, leaf_lower, "c:\\xboxgames\\minecraft for windows");
+    if is_bedrock_install
+        || path_matches_token(path_lower, leaf_lower, "\\appdata\\roaming\\minecraft bedrock")
+    {
+        if let Some(idx) = attribute_store_package(
+            buckets,
+            store_buckets,
+            "Microsoft.MinecraftUWP_8wekyb3d8bbwe",
+        ) {
+            return Some((idx, is_bedrock_install));
         }
     }
 
@@ -3011,6 +3049,53 @@ fn find_by_publisher(buckets: &[AppBucket], leaf: &str) -> Option<usize> {
     }
 }
 
+fn is_known_backup_suffix(seg: &str) -> bool {
+    let lower = seg.to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches(|c: char| c.is_ascii_digit());
+    matches!(trimmed, "bak" | "old" | "backup" | "copy")
+}
+
+fn is_publisher_id_shaped(seg: &str) -> bool {
+    if seg.is_empty() || is_known_backup_suffix(seg) || !seg.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if seg.len() == 13 && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return true;
+    }
+    (10..=16).contains(&seg.len())
+        && seg.chars().any(|c| c.is_ascii_alphabetic())
+        && seg.chars().any(|c| c.is_ascii_digit())
+}
+
+fn is_windowsapps_five_segment_form(parts: &[&str]) -> bool {
+    parts.len() == 5
+        && parts[1].contains('.')
+        && parts[1].chars().any(|c| c.is_ascii_digit())
+        && is_publisher_id_shaped(parts[4])
+}
+
+fn resolve_store_package_stem_and_pub_id(pkg_folder: &str) -> (&str, &str) {
+    let parts: Vec<&str> = pkg_folder.split('_').collect();
+    let stem = parts.first().copied().unwrap_or(pkg_folder);
+    if parts.len() < 2 {
+        return (stem, "");
+    }
+    if is_windowsapps_five_segment_form(&parts) {
+        return (stem, parts[4]);
+    }
+    let mut idx = parts.len() - 1;
+    while idx >= 2 {
+        let prev = parts[idx - 1];
+        let curr = parts[idx];
+        if is_publisher_id_shaped(prev) && (is_known_backup_suffix(curr) || !is_publisher_id_shaped(curr)) {
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+    (stem, parts[idx])
+}
+
 fn attribute_store_package(
     buckets: &mut Vec<AppBucket>,
     store_buckets: &mut HashMap<String, usize>,
@@ -3022,11 +3107,9 @@ fn attribute_store_package(
         return None;
     }
 
-    // Store package names are either `<FamilyStem>_<PubId>` (AppData\Local\Packages)
+    // Store package names are either `<FamilyStem>_<PubId>` (AppData\Local\Packages, possibly with backup suffix)
     // or `<FamilyStem>_<Version>_<Arch>_<ResourceId>_<PubId>` (Program Files\WindowsApps).
-    let parts: Vec<&str> = pkg_folder.split('_').collect();
-    let stem = parts.first().copied().unwrap_or(pkg_folder);
-    let pub_id = if parts.len() >= 2 { parts.last().copied().unwrap_or("") } else { "" };
+    let (stem, pub_id) = resolve_store_package_stem_and_pub_id(pkg_folder);
     let friendly = stem
         .strip_prefix("Microsoft.")
         .or_else(|| stem.strip_prefix("MicrosoftWindows."))

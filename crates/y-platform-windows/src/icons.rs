@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICO
 use y_core::dependencies::WindowsServiceEntry;
 use y_core::discovery::{
     build_registry_catalog, contains_whole_token_sequence, normalize_app_token, normalize_path_key,
-    normalize_windows_path, path_drive_letter,
+    normalize_windows_path,
 };
 use y_core::model::{AttributedApp, CachedAppIcon, NoTouchCategory, ScanReport, ZoneKind};
 
@@ -53,16 +53,24 @@ pub fn populate_report_icons(report: &mut ScanReport) {
     let needs_reg_lookup = report
         .apps
         .iter()
-        .any(|a| a.id.starts_with("reg:") && a.display_icon.is_none());
+        .any(|a| a.id.starts_with("reg:") && (a.display_icon.is_none() || a.install_location.is_none()));
 
-    let reg_icon_map: HashMap<String, String> = if needs_reg_lookup {
+    let reg_meta_map: HashMap<String, (Option<String>, Option<String>)> = if needs_reg_lookup {
         let raw_reg = enumerate_uninstall_registry();
         let steam_path = read_steam_install_path();
         let catalog = build_registry_catalog(&raw_reg, steam_path.as_deref());
         catalog
             .apps
             .into_iter()
-            .filter_map(|app| app.display_icon.map(|ic| (app.id, ic)))
+            .filter_map(|app| {
+                let install = app.primary_install_location().map(str::to_string);
+                let dicon = app.display_icon;
+                if dicon.is_some() || install.is_some() {
+                    Some((app.id, (dicon, install)))
+                } else {
+                    None
+                }
+            })
             .collect()
     } else {
         HashMap::new()
@@ -70,44 +78,36 @@ pub fn populate_report_icons(report: &mut ScanReport) {
 
     let services = enumerate_windows_services();
 
-    let excluded_drives: HashSet<char> = report
-        .drives
-        .iter()
-        .filter(|d| !d.full_walk_enabled)
-        .map(|d| d.letter.to_ascii_uppercase())
-        .collect();
-
     let mut icon_cache: HashMap<(String, i32), Option<CachedAppIcon>> = HashMap::new();
     for app in &mut report.apps {
         if app.icon_rgba.is_some() {
             continue;
         }
-        if app.id.starts_with("reg:") && app.display_icon.is_none() {
-            if let Some(ic) = reg_icon_map.get(&app.id) {
-                if path_drive_letter(ic)
-                    .is_none_or(|dl| !excluded_drives.contains(&dl.to_ascii_uppercase()))
-                {
-                    app.display_icon = Some(ic.clone());
+        let mut fallback_install_dir: Option<&str> = None;
+        if app.id.starts_with("reg:") {
+            if let Some((reg_icon, reg_install)) = reg_meta_map.get(&app.id) {
+                if app.display_icon.is_none() {
+                    if let Some(ic) = reg_icon {
+                        app.display_icon = Some(ic.clone());
+                    }
+                }
+                if app.install_location.is_none() {
+                    fallback_install_dir = reg_install.as_deref();
                 }
             }
         }
-        app.icon_rgba = extract_app_icon_cached(app, &services, &excluded_drives, &mut icon_cache);
+        app.icon_rgba = extract_app_icon_cached(app, &services, fallback_install_dir, &mut icon_cache);
     }
 }
 
 fn extract_app_icon_cached(
     app: &AttributedApp,
     services: &[WindowsServiceEntry],
-    excluded_drives: &HashSet<char>,
+    fallback_install_dir: Option<&str>,
     cache: &mut HashMap<(String, i32), Option<CachedAppIcon>>,
 ) -> Option<CachedAppIcon> {
-    let candidates = collect_icon_candidates(app, services);
+    let candidates = collect_icon_candidates(app, services, fallback_install_dir);
     for (path, icon_index) in candidates {
-        if path_drive_letter(&path)
-            .is_some_and(|dl| excluded_drives.contains(&dl.to_ascii_uppercase()))
-        {
-            continue;
-        }
         let key = (normalize_path_key(&path), icon_index);
         if let Some(cached) = cache.get(&key) {
             if cached.is_some() {
@@ -191,7 +191,18 @@ fn match_service_binaries_for_app(
 }
 
 fn find_appx_logo_pngs(pkg_dir: &str) -> Vec<String> {
-    let manifest_path = Path::new(pkg_dir).join("AppxManifest.xml");
+    let root_manifest = Path::new(pkg_dir).join("AppxManifest.xml");
+    let manifest_path = if root_manifest.is_file() {
+        root_manifest
+    } else {
+        let content_manifest = Path::new(pkg_dir).join("Content").join("AppxManifest.xml");
+        if content_manifest.is_file() {
+            content_manifest
+        } else {
+            return Vec::new();
+        }
+    };
+    let manifest_base = manifest_path.parent().unwrap_or_else(|| Path::new(pkg_dir));
     let Ok(xml) = std::fs::read_to_string(&manifest_path) else {
         return Vec::new();
     };
@@ -206,7 +217,7 @@ fn find_appx_logo_pngs(pkg_dir: &str) -> Vec<String> {
     if rel_logo.is_empty() {
         return Vec::new();
     }
-    let rel_path = Path::new(pkg_dir).join(rel_logo);
+    let rel_path = manifest_base.join(rel_logo);
     let mut hits: Vec<(i32, String)> = Vec::new();
     let push_if_png = |p: &Path, prio: i32, out: &mut Vec<(i32, String)>| {
         if p.is_file()
@@ -266,6 +277,7 @@ fn find_appx_logo_pngs(pkg_dir: &str) -> Vec<String> {
 fn collect_icon_candidates(
     app: &AttributedApp,
     services: &[WindowsServiceEntry],
+    fallback_install_dir: Option<&str>,
 ) -> Vec<(String, i32)> {
     let mut primary: Vec<(String, i32)> = Vec::new();
     let mut secondary: Vec<(String, i32)> = Vec::new();
@@ -293,10 +305,10 @@ fn collect_icon_candidates(
         push_unique(&mut primary, svc_exe, 0);
     }
 
-    // Collect non-AppData / non-cache binary search roots (InstallLocation + Body items).
+    // Collect non-AppData / non-cache binary search roots (InstallLocation, registry fallback, and Body items).
     // Services still keep a hard wall against scanning user AppData folders (e.g. `.minecraft` on Xbox Service).
     let mut scan_roots: Vec<String> = Vec::new();
-    if let Some(install_root) = app.install_location.as_deref() {
+    if let Some(install_root) = app.install_location.as_deref().or(fallback_install_dir) {
         if !is_user_or_cache_folder(install_root) {
             scan_roots.push(install_root.to_string());
         }
@@ -986,4 +998,205 @@ fn downsample_rgba_box(
     }
 
     dst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use y_core::discovery::path_drive_letter;
+    use y_core::model::{
+        AppCategory, AttributionBasis, BreakdownItem, DriveInfo, GrowthDelta,
+        RegistryDiscoveryStats,
+    };
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in data {
+            a = (a + byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    fn png_chunk(tag: &[u8; 4], payload: &[u8], out: &mut Vec<u8>) {
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(payload);
+        let mut crc_input = Vec::with_capacity(4 + payload.len());
+        crc_input.extend_from_slice(tag);
+        crc_input.extend_from_slice(payload);
+        out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    }
+
+    fn build_uncompressed_rgba_png_ico(size: u32) -> Vec<u8> {
+        let mut raw_scanlines = Vec::with_capacity((size as usize) * (size as usize * 4 + 1));
+        for y in 0..size {
+            raw_scanlines.push(0); // filter 0
+            for x in 0..size {
+                let inside = (4..size - 4).contains(&x) && (4..size - 4).contains(&y);
+                if inside {
+                    raw_scanlines.extend_from_slice(&[240, 240, 245, 255]);
+                } else {
+                    raw_scanlines.extend_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        let len = raw_scanlines.len() as u16;
+        let nlen = !len;
+        let mut zlib = Vec::with_capacity(raw_scanlines.len() + 11);
+        zlib.extend_from_slice(&[0x78, 0x01, 0x01]); // zlib header + final stored block
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&nlen.to_le_bytes());
+        zlib.extend_from_slice(&raw_scanlines);
+        zlib.extend_from_slice(&adler32(&raw_scanlines).to_be_bytes());
+
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&size.to_be_bytes());
+        ihdr.extend_from_slice(&size.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
+        png_chunk(b"IHDR", &ihdr, &mut png);
+        png_chunk(b"IDAT", &zlib, &mut png);
+        png_chunk(b"IEND", &[], &mut png);
+
+        // Wrap PNG payload inside a standard single-entry Windows .ico (width/height 0 == 256 convention / PNG entry).
+        let mut ico = Vec::with_capacity(22 + png.len());
+        ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // ICON
+        ico.extend_from_slice(&1u16.to_le_bytes()); // 1 entry
+        ico.push(0); // width (0 denotes 256 / PNG)
+        ico.push(0); // height
+        ico.push(0); // color count
+        ico.push(0); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // planes
+        ico.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&22u32.to_le_bytes()); // offset
+        ico.extend_from_slice(&png);
+        ico
+    }
+
+    #[test]
+    fn c1_icon_populates_when_display_icon_sits_on_excluded_drive() {
+        let dir = std::env::temp_dir().join(format!(
+            "y_storage_c1_icon_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ico_path = dir.join("app.ico");
+        std::fs::write(&ico_path, build_uncompressed_rgba_png_ico(32)).unwrap();
+        let ico_str = normalize_windows_path(&ico_path.to_string_lossy());
+        let icon_drive = path_drive_letter(&ico_str).unwrap_or('C').to_ascii_uppercase();
+        let other_drive = if icon_drive == 'Z' { 'D' } else { 'Z' };
+
+        let mut report = ScanReport {
+            scan_timestamp_unix: 100,
+            scan_timestamp_display: "2026-11-28 02:30:00".into(),
+            duration_ms: 1,
+            drives: vec![
+                DriveInfo {
+                    letter: icon_drive,
+                    root: format!("{icon_drive}:\\"),
+                    total_bytes: 1_000,
+                    free_bytes: 500,
+                    used_bytes: 500,
+                    is_system_drive: icon_drive == 'C',
+                    full_walk_enabled: false,
+                    exclusions: vec![],
+                    last_scanned_unix: None,
+                    last_scanned_display: None,
+                },
+                DriveInfo {
+                    letter: other_drive,
+                    root: format!("{other_drive}:\\"),
+                    total_bytes: 1_000,
+                    free_bytes: 500,
+                    used_bytes: 500,
+                    is_system_drive: false,
+                    full_walk_enabled: true,
+                    exclusions: vec![],
+                    last_scanned_unix: Some(100),
+                    last_scanned_display: Some("2026-11-28 02:30:00".into()),
+                },
+            ],
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: 1,
+                raw_with_install_location: 0,
+                canonical_apps: 1,
+                canonical_with_direct_install_location: 0,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps: vec![AttributedApp {
+                id: "synth:sample-cross-drive-tool".into(),
+                display_name: "Sample Cross-Drive Tool".into(),
+                publishers: vec!["Example Corp".into()],
+                install_location: None,
+                total_bytes: 120_000_000,
+                previous_bytes: None,
+                growth: GrowthDelta::NoBaseline,
+                per_drive_growth: BTreeMap::new(),
+                no_touch: None,
+                bases: vec![AttributionBasis::Token],
+                items: vec![BreakdownItem {
+                    path: format!("{other_drive}:\\Users\\Test\\AppData\\Roaming\\SampleTool"),
+                    bytes: 120_000_000,
+                    zone: Some(ZoneKind::Red),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::Token),
+                    basis_detail: None,
+                    no_touch: None,
+                    drive_letter: other_drive,
+                }],
+                carved_out_apps: vec![],
+                dependencies: vec![],
+                display_icon: Some(ico_str),
+                icon_rgba: None,
+                category: AppCategory::Development,
+                category_basis: "test".into(),
+            }],
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system: vec![],
+            windows_system_total_bytes: 0,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            catalog_source: "test".into(),
+            warnings: vec![],
+            applied_containers: None,
+            applied_zones: None,
+        };
+
+        populate_report_icons(&mut report);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let populated = report.apps[0]
+            .icon_rgba
+            .as_ref()
+            .expect("icon_rgba must populate even when display_icon lives on an unchecked drive");
+        assert_eq!(populated.width, APP_ICON_PX);
+        assert_eq!(populated.height, APP_ICON_PX);
+        let decoded = populated.decode_rgba().expect("valid decoded rgba");
+        assert_eq!(decoded.len(), (APP_ICON_PX as usize) * (APP_ICON_PX as usize) * 4);
+        assert!(decoded.chunks_exact(4).any(|px| px[3] >= 24));
+        assert!(report.apps[0].install_location.is_none());
+    }
 }
