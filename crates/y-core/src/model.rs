@@ -146,7 +146,9 @@ impl AppCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DependencyKind {
     PlatformLauncher,
-    AntiCheatServiceDriver,
+    AntiCheat,
+    #[serde(alias = "AntiCheatServiceDriver")]
+    ServiceOrDriver,
     SharedRuntime,
     SharedData,
 }
@@ -156,7 +158,8 @@ impl DependencyKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::PlatformLauncher => "platform/launcher client",
-            Self::AntiCheatServiceDriver => "anti-cheat, service or driver",
+            Self::AntiCheat => "anti-cheat",
+            Self::ServiceOrDriver => "service or driver",
             Self::SharedRuntime => "shared runtime",
             Self::SharedData => "shared data",
         }

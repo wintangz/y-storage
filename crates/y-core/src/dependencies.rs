@@ -303,6 +303,49 @@ struct PendingDep {
     imported_by_binary: bool,
 }
 
+fn is_anticheat_service(svc: &WindowsServiceEntry) -> bool {
+    let haystack = format!(
+        "{} {} {}",
+        svc.service_name, svc.display_name, svc.normalized_image_path
+    )
+    .to_ascii_lowercase();
+    [
+        "anticheat",
+        "anti-cheat",
+        "easyanticheat",
+        "beservice",
+        "bedaisy",
+        "battleye",
+        "vgk",
+        "vanguard",
+        "denuvo",
+        "ricochet",
+        "punkbuster",
+        "nprotect",
+        "gameguard",
+        "xigncode",
+    ]
+    .iter()
+    .any(|kw| haystack.contains(kw))
+}
+
+fn format_service_dep_name(svc: &WindowsServiceEntry) -> String {
+    let disp = svc.display_name.trim();
+    let name = svc.service_name.trim();
+    if disp.is_empty() {
+        return name.to_string();
+    }
+    if name.is_empty() || disp.eq_ignore_ascii_case(name) {
+        return disp.to_string();
+    }
+    let suffix = format!("({name})").to_ascii_lowercase();
+    if disp.to_ascii_lowercase().ends_with(&suffix) {
+        disp.to_string()
+    } else {
+        format!("{disp} ({name})")
+    }
+}
+
 fn upsert_dep(map: &mut BTreeMap<String, PendingDep>, cand: PendingDep) {
     if let Some(existing) = map.get_mut(&cand.target_id) {
         if cand.confidence == DependencyConfidence::Proven {
@@ -758,16 +801,17 @@ pub fn analyze_report_dependencies(
                 }
             } else {
                 let kind_lbl = if svc.service_type <= 8 { "driver" } else { "service" };
+                let dep_kind = if is_anticheat_service(svc) {
+                    DependencyKind::AntiCheat
+                } else {
+                    DependencyKind::ServiceOrDriver
+                };
                 upsert_dep(
                     &mut deps_map,
                     PendingDep {
                         target_id: format!("svc:{}", svc.service_name.to_ascii_lowercase()),
-                        target_name: if svc.display_name.is_empty() {
-                            svc.service_name.clone()
-                        } else {
-                            format!("{} ({})", svc.display_name, svc.service_name)
-                        },
-                        kind: DependencyKind::AntiCheatServiceDriver,
+                        target_name: format_service_dep_name(svc),
+                        kind: dep_kind,
                         present: true,
                         own_size_bytes: None,
                         shared: false,
@@ -897,16 +941,17 @@ pub fn analyze_report_dependencies(
                             }
                         } else if !deps_map.contains_key(&svc_tid) {
                             let kind_lbl = if svc.service_type <= 8 { "driver" } else { "service" };
+                            let dep_kind = if is_anticheat_service(svc) {
+                                DependencyKind::AntiCheat
+                            } else {
+                                DependencyKind::ServiceOrDriver
+                            };
                             upsert_dep(
                                 &mut deps_map,
                                 PendingDep {
                                     target_id: svc_tid,
-                                    target_name: if svc.display_name.is_empty() {
-                                        svc.service_name.clone()
-                                    } else {
-                                        format!("{} ({})", svc.display_name, svc.service_name)
-                                    },
-                                    kind: DependencyKind::AntiCheatServiceDriver,
+                                    target_name: format_service_dep_name(svc),
+                                    kind: dep_kind,
                                     present: true,
                                     own_size_bytes: None,
                                     shared: false,
@@ -1126,4 +1171,142 @@ pub fn analyze_report_dependencies(
             .then_with(|| a.target_name.cmp(&b.target_name))
     });
     report.reverse_dependencies = reverse_list;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AttributedApp, DriveInfo, RegistryDiscoveryStats};
+
+    #[test]
+    fn dependency_kind_splits_anticheat_from_ordinary_services_and_deserializes_legacy() {
+        let legacy: DependencyKind = serde_json::from_str("\"AntiCheatServiceDriver\"").unwrap();
+        assert_eq!(legacy, DependencyKind::ServiceOrDriver);
+        assert_eq!(legacy.label(), "service or driver");
+        assert_eq!(DependencyKind::AntiCheat.label(), "anti-cheat");
+
+        let cat = DependencyCatalog::load_from_disk_or_embedded();
+        let eos = cat
+            .targets
+            .iter()
+            .find(|t| t.id == "epic-online-services")
+            .unwrap();
+        assert_eq!(eos.kind, DependencyKind::ServiceOrDriver);
+        for ac_id in ["ea-anticheat", "easy-anticheat", "battleye", "vanguard", "denuvo"] {
+            let ac = cat.targets.iter().find(|t| t.id == ac_id).unwrap();
+            assert_eq!(ac.kind, DependencyKind::AntiCheat, "expected AntiCheat for {ac_id}");
+        }
+    }
+
+    #[test]
+    fn format_service_dep_name_deduplicates_trailing_service_suffix() {
+        let cat = DependencyCatalog::load_from_disk_or_embedded();
+        let edge_upd = WindowsServiceEntry {
+            service_name: "edgeupdate".into(),
+            display_name: "Microsoft Edge Update Service (edgeupdate)".into(),
+            service_type: 16,
+            raw_image_path: r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
+                .into(),
+            normalized_image_path:
+                r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe".into(),
+            depend_on_service: vec![],
+        };
+        assert_eq!(
+            format_service_dep_name(&edge_upd),
+            "Microsoft Edge Update Service (edgeupdate)"
+        );
+        assert!(!is_anticheat_service(&edge_upd));
+
+        let ac_svc = WindowsServiceEntry {
+            service_name: "EAAntiCheatService".into(),
+            display_name: "EA AntiCheat Service".into(),
+            service_type: 16,
+            raw_image_path: r"C:\Program Files\EA\AC\eaanticheat.gameservice.exe".into(),
+            normalized_image_path: r"C:\Program Files\EA\AC\eaanticheat.gameservice.exe".into(),
+            depend_on_service: vec![],
+        };
+        assert!(is_anticheat_service(&ac_svc));
+        assert_eq!(
+            format_service_dep_name(&ac_svc),
+            "EA AntiCheat Service (EAAntiCheatService)"
+        );
+
+        let mut rep = ScanReport {
+            scan_timestamp_unix: 1,
+            scan_timestamp_display: "2026-11-27 00:00:00".into(),
+            duration_ms: 1,
+            drives: vec![DriveInfo {
+                letter: 'C',
+                root: r"C:\".into(),
+                total_bytes: 1000,
+                free_bytes: 500,
+                used_bytes: 500,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
+            }],
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: 1,
+                raw_with_install_location: 1,
+                canonical_apps: 1,
+                canonical_with_direct_install_location: 1,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps: vec![AttributedApp {
+                id: "reg:edge".into(),
+                display_name: "Microsoft Edge".into(),
+                publishers: vec!["Microsoft Corporation".into()],
+                install_location: Some(r"C:\Program Files (x86)\Microsoft\Edge\Application".into()),
+                total_bytes: 100,
+                previous_bytes: None,
+                growth: crate::model::GrowthDelta::NoBaseline,
+                per_drive_growth: Default::default(),
+                no_touch: None,
+                bases: vec![crate::model::AttributionBasis::InstallLocation],
+                items: vec![crate::model::BreakdownItem {
+                    path: r"C:\Program Files (x86)\Microsoft\EdgeUpdate".into(),
+                    bytes: 100,
+                    zone: Some(crate::model::ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(crate::model::AttributionBasis::ExactName),
+                    basis_detail: None,
+                    no_touch: None,
+                    drive_letter: 'C',
+                }],
+                carved_out_apps: vec![],
+                category: crate::model::AppCategory::Browsers,
+                category_basis: String::new(),
+                dependencies: vec![],
+                display_icon: None,
+                icon_rgba: None,
+            }],
+            windows_system: vec![],
+            windows_system_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            catalog_source: String::new(),
+            warnings: vec![],
+            applied_containers: None,
+            applied_zones: None,
+        };
+        let mut ev = HashMap::new();
+        ev.insert("reg:edge".into(), AppBinaryEvidence::default());
+        let statuses = resolve_catalog_targets(&cat, &rep.apps, &[edge_upd.clone()], |_| false);
+        analyze_report_dependencies(&mut rep, &cat, &[edge_upd], &ev, &statuses);
+        let svc_dep = rep.apps[0]
+            .dependencies
+            .iter()
+            .find(|d| d.target_id == "svc:edgeupdate")
+            .unwrap();
+        assert_eq!(svc_dep.target_name, "Microsoft Edge Update Service (edgeupdate)");
+        assert_eq!(svc_dep.kind, DependencyKind::ServiceOrDriver);
+    }
 }

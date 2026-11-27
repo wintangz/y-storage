@@ -242,7 +242,7 @@ presence_paths = [
 [[targets]]
 id = "epic-online-services"
 name = "Epic Online Services"
-kind = "AntiCheatServiceDriver"
+kind = "ServiceOrDriver"
 shared = true
 registry_matches = ["epic online services"]
 service_names = ["EpicOnlineServices"]
@@ -289,7 +289,7 @@ presence_paths = []
 [[targets]]
 id = "ea-anticheat"
 name = "EA AntiCheat"
-kind = "AntiCheatServiceDriver"
+kind = "AntiCheat"
 shared = true
 registry_matches = ["ea anticheat"]
 service_names = ["EAAntiCheatService", "EAAntiCheat"]
@@ -302,7 +302,7 @@ size_folder_hint = "C:\\Program Files\\EA"
 [[targets]]
 id = "easy-anticheat"
 name = "Easy Anti-Cheat"
-kind = "AntiCheatServiceDriver"
+kind = "AntiCheat"
 shared = true
 registry_matches = ["easyanticheat"]
 service_names = ["EasyAntiCheat", "EasyAntiCheat_EOS"]
@@ -313,7 +313,7 @@ presence_paths = [
 [[targets]]
 id = "battleye"
 name = "BattlEye"
-kind = "AntiCheatServiceDriver"
+kind = "AntiCheat"
 shared = true
 registry_matches = ["battleye"]
 service_names = ["BEService", "BEDaisy"]
@@ -324,7 +324,7 @@ presence_paths = [
 [[targets]]
 id = "vanguard"
 name = "Riot Vanguard"
-kind = "AntiCheatServiceDriver"
+kind = "AntiCheat"
 shared = true
 registry_matches = ["riot vanguard"]
 service_names = ["vgc", "vgk"]
@@ -335,7 +335,7 @@ presence_paths = [
 [[targets]]
 id = "denuvo"
 name = "Denuvo Anti-Tamper"
-kind = "AntiCheatServiceDriver"
+kind = "AntiCheat"
 shared = true
 registry_matches = ["denuvo"]
 service_names = []

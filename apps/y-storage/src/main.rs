@@ -153,10 +153,13 @@ fn main() {
                 }
             }
             "--smoke-gui-ms" => {
-                if i + 2 < args.len() {
+                if i + 1 < args.len() {
                     smoke_gui_ms = args[i + 1].parse().ok();
-                    smoke_gui_out = Some(PathBuf::from(&args[i + 2]));
-                    i += 2;
+                    i += 1;
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        smoke_gui_out = Some(PathBuf::from(&args[i + 1]));
+                        i += 1;
+                    }
                 }
             }
             "--render-screenshot" => {
@@ -918,6 +921,13 @@ fn render_screenshot_frame(
             ui_state.expand_unattributed = true;
             ui_state.ledger_height_px = Some(2000.0);
         }
+        "ledger-unattrib-bottom" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(460.0);
+            ui_state.scroll_ledger_bottom = true;
+        }
         "unattributed-filter" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;
@@ -1028,6 +1038,10 @@ fn render_screenshot_frame(
         }
         "settings" => {
             ui_state.active_view = ActiveView::Settings;
+        }
+        "settings-full" => {
+            ui_state.active_view = ActiveView::Settings;
+            ui_state.settings_focus_containers = false;
         }
         "settings-containers" | "settings-zones" => {
             ui_state.active_view = ActiveView::Settings;
@@ -1294,7 +1308,7 @@ fn render_screenshot(
         };
         (rep, cfg)
     };
-    if view == "settings-zones" {
+    if view == "settings-zones" || view == "settings-full" {
         let _ = config
             .zones
             .add_explicit_zone(r"D:\Media", ZoneRuleKind::PersonalFiles);

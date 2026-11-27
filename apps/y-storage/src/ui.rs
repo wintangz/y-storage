@@ -56,8 +56,9 @@ const BADGE_PILL_H: f32 = 18.0;
 const RADIUS_BADGE_PILL: f32 = BADGE_PILL_H * 0.5;
 
 const SIZE_COL_W: f32 = 96.0;
-const PER_DRIVE_SIZE_COL_W: f32 = 176.0;
+const PER_DRIVE_SIZE_COL_W: f32 = 186.0;
 const DELTA_COL_W: f32 = 96.0;
+const GROWTH_NOISE_FLOOR_BYTES: u64 = 1_048_576; // 1 MB binary (DESIGN.md / FIX 6 noise floor)
 const APP_ICON_SIZE: f32 = 18.0;
 const PROP_BAR_W: f32 = 76.0;
 const PROP_BAR_H: f32 = 2.0;
@@ -131,6 +132,7 @@ pub struct ThemePalette {
     pub proven_text: Color32,
     pub status_green: Color32,
     pub status_red: Color32,
+    pub status_amber: Color32,
     pub delta_grew: Color32,
     pub no_touch_outline: Color32,
     pub pill_blue_fill: Color32,
@@ -164,6 +166,7 @@ impl ThemePalette {
                 proven_text: Color32::from_rgb(157, 223, 252), // #9DDFFC (crisp WT-blue ink inside Dark outline+tint pill)
                 status_green: STATUS_GREEN,                    // #28D66C
                 status_red: STATUS_RED,                        // #F04458
+                status_amber: Color32::from_rgb(229, 181, 103), // #E5B567 (FIX 9 warning token)
                 delta_grew: STATUS_RED,                        // #F04458 (ADD 3 saturated status)
                 no_touch_outline: STATUS_RED,                  // #F04458 (ADD 3 saturated status)
                 pill_blue_fill: Color32::from_rgb(18, 34, 44), // #12222C (subtle WT-blue tint fill)
@@ -192,6 +195,7 @@ impl ThemePalette {
                 proven_text: Color32::from_rgb(5, 107, 158),   // #056B9E (crisp Light outline+tint ink)
                 status_green: Color32::from_rgb(15, 168, 79),   // #0FA84F (ADD 3 saturated Light green)
                 status_red: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light red)
+                status_amber: Color32::from_rgb(154, 98, 7),    // #9A6207 (FIX 9 Light warning token)
                 delta_grew: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light delta)
                 no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444 (ADD 3 saturated Light NO-TOUCH)
                 pill_blue_fill: Color32::from_rgb(230, 246, 254), // #E6F6FE (soft WT-blue Light pill tint)
@@ -205,10 +209,23 @@ impl ThemePalette {
     }
 }
 
+#[derive(Debug, Clone)]
+enum DeltaCellKind {
+    Blank,
+    NewPill,
+    SignedValue { text: String, color: Color32 },
+}
+
+#[derive(Debug, Clone)]
+struct DeltaCellDisplay {
+    kind: DeltaCellKind,
+    tip: Option<String>,
+}
+
 struct CachedAppMeta {
     total_str: String,
     total_tip: String,
-    delta_display: Option<(String, Color32, String)>,
+    delta_display: DeltaCellDisplay,
     name_w_px: Option<f32>,
     pub_w_px: Option<f32>,
 }
@@ -284,6 +301,7 @@ pub struct StorageUiState {
     pub ledger_collapsed: bool,
     pub ledger_height_px: Option<f32>,
     ledger_drag_start_h: Option<f32>,
+    pub scroll_ledger_bottom: bool,
     pub icon_textures: HashMap<String, egui::TextureHandle>,
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
@@ -336,6 +354,7 @@ impl Default for StorageUiState {
             ledger_collapsed: false,
             ledger_height_px: None,
             ledger_drag_start_h: None,
+            scroll_ledger_bottom: false,
             icon_textures: HashMap::new(),
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
@@ -400,7 +419,7 @@ fn draw_wt_header_lockup(
     caption: &str,
     caption_color: Color32,
     pal: &ThemePalette,
-) {
+) -> Option<egui::Response> {
     const LOGO_PX: f32 = 24.0;
     let row_h = ui.max_rect().height().clamp(LOGO_PX, HEADER_CONTROL_H);
     let (icon_slot, _) = ui.allocate_exact_size(Vec2::new(LOGO_PX, row_h), Sense::hover());
@@ -425,13 +444,15 @@ fn draw_wt_header_lockup(
     ui.painter().galley(title_pos, title_galley, pal.text);
 
     if !caption.is_empty() {
-        draw_truncated_text(
+        Some(draw_truncated_text(
             ui,
             caption,
             FontId::new(11.5, FontFamily::Proportional),
             caption_color,
             false,
-        );
+        ))
+    } else {
+        None
     }
 }
 
@@ -469,32 +490,61 @@ pub fn format_exact_bytes(bytes: u64) -> String {
     format!("{formatted} bytes")
 }
 
-fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> Option<(String, Color32, String)> {
+fn new_growth_chip_style(pal: &ThemePalette) -> ChipStyle {
+    ChipStyle {
+        fill: pal.pill_green_fill,
+        stroke: pal.status_green,
+        text: pal.status_green,
+    }
+}
+
+fn format_delta_display(delta: GrowthDelta, pal: &ThemePalette) -> DeltaCellDisplay {
     match delta {
-        GrowthDelta::NoBaseline => Some((
-            "new".to_string(),
-            pal.muted,
-            "No baseline from a previous scan".to_string(),
-        )),
-        GrowthDelta::New(b) => Some((
-            "new".to_string(),
-            pal.muted,
-            format!("New since previous scan ({} total, no prior baseline)", format_exact_bytes(b)),
-        )),
-        GrowthDelta::Changed(0) => None,
-        GrowthDelta::Changed(d) if d > 0 => Some((
-            format!("+{}", format_size_2dec(d as u64)),
-            pal.delta_grew,
-            format!("+{} since previous scan", format_exact_bytes(d as u64)),
-        )),
-        GrowthDelta::Changed(d) => Some((
-            format!("-{}", format_size_2dec(d.unsigned_abs())),
-            pal.status_green,
-            format!(
+        GrowthDelta::NoBaseline => DeltaCellDisplay {
+            kind: DeltaCellKind::NewPill,
+            tip: Some("No baseline from a previous scan".to_string()),
+        },
+        GrowthDelta::New(b) => DeltaCellDisplay {
+            kind: DeltaCellKind::NewPill,
+            tip: Some(format!(
+                "New since previous scan ({} total, no prior baseline)",
+                format_exact_bytes(b)
+            )),
+        },
+        GrowthDelta::Changed(0) => DeltaCellDisplay {
+            kind: DeltaCellKind::Blank,
+            tip: None,
+        },
+        GrowthDelta::Changed(d) if d.unsigned_abs() < GROWTH_NOISE_FLOOR_BYTES => {
+            let sign = if d > 0 { "+" } else { "-" };
+            let abs = d.unsigned_abs();
+            DeltaCellDisplay {
+                kind: DeltaCellKind::Blank,
+                tip: Some(format!(
+                    "{}{} ({}) since previous scan — below 1 MB display floor",
+                    sign,
+                    format_size_2dec(abs),
+                    format_exact_bytes(abs)
+                )),
+            }
+        }
+        GrowthDelta::Changed(d) if d > 0 => DeltaCellDisplay {
+            kind: DeltaCellKind::SignedValue {
+                text: format!("+{}", format_size_2dec(d as u64)),
+                color: pal.delta_grew,
+            },
+            tip: Some(format!("+{} since previous scan", format_exact_bytes(d as u64))),
+        },
+        GrowthDelta::Changed(d) => DeltaCellDisplay {
+            kind: DeltaCellKind::SignedValue {
+                text: format!("-{}", format_size_2dec(d.unsigned_abs())),
+                color: pal.status_green,
+            },
+            tip: Some(format!(
                 "-{} since previous scan",
                 format_exact_bytes(d.unsigned_abs())
-            ),
-        )),
+            )),
+        },
     }
 }
 
@@ -990,6 +1040,7 @@ fn draw_crisp_frame<R>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonVariant {
     PrimaryOutline,
+    PodPrimaryOutline,
     SecondaryOutline,
     SubtleOutline,
 }
@@ -1208,23 +1259,25 @@ fn resolve_button_colors(
                 Color32::TRANSPARENT,
                 lerp_color(pal.bg, pal.muted, 0.55),
             ),
-            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
-                (Color32::TRANSPARENT, pal.border, pal.muted)
-            }
+            ButtonVariant::PrimaryOutline
+            | ButtonVariant::PodPrimaryOutline
+            | ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.muted),
         };
     }
     if pressed {
         let press_border = match variant {
             ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
-            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => LOGO_PINK,
+            ButtonVariant::PrimaryOutline
+            | ButtonVariant::PodPrimaryOutline
+            | ButtonVariant::SecondaryOutline => LOGO_PINK,
         };
         return (pal.widget_active, press_border, pal.text);
     }
     if hovered {
         return match variant {
-            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
-                (pal.widget_hover, pal.accent_line, pal.accent_line)
-            }
+            ButtonVariant::PrimaryOutline
+            | ButtonVariant::PodPrimaryOutline
+            | ButtonVariant::SecondaryOutline => (pal.widget_hover, pal.accent_line, pal.accent_line),
             ButtonVariant::SubtleOutline => {
                 (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
             }
@@ -1235,6 +1288,7 @@ fn resolve_button_colors(
     }
     match variant {
         ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
+        ButtonVariant::PodPrimaryOutline => (Color32::TRANSPARENT, pal.accent_line, pal.accent_line),
         ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
         ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
     }
@@ -1253,7 +1307,15 @@ fn draw_z_button(
     variant: ButtonVariant,
     pal: &ThemePalette,
 ) -> egui::Response {
-    let h_pad = if min_size.y <= 22.0 { SPACE_8 } else { SPACE_12 };
+    let h_pad = if variant == ButtonVariant::SubtleOutline && min_size.y <= 20.0 {
+        3.0
+    } else if variant == ButtonVariant::PodPrimaryOutline && min_size.x <= 52.0 {
+        6.0
+    } else if variant == ButtonVariant::PodPrimaryOutline || min_size.y <= 22.0 {
+        SPACE_8
+    } else {
+        SPACE_12
+    };
     let font_id = FontId::new(font_size, FontFamily::Proportional);
     let measure_galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), pal.text));
     let desired_w = (measure_galley.size().x + h_pad * 2.0).max(min_size.x).round();
@@ -1575,7 +1637,7 @@ fn truncate_word_boundary_px(
         let is_sep = ch.is_whitespace() || matches!(ch, '\\' | '/' | '.' | ',' | ';' | ')' | '|');
         if is_sep && !prev_sep && idx > 0 {
             let trimmed = text[..idx].trim_end_matches(|c: char| {
-                c.is_whitespace() || matches!(c, ',' | ';' | ':' | '+')
+                c.is_whitespace() || matches!(c, ',' | ';' | ':' | '+' | '(' | '[' | '-')
             });
             if !trimmed.is_empty() {
                 let cand = format!("{trimmed}…");
@@ -1631,6 +1693,7 @@ fn draw_word_capped_text_cached(
 ) -> egui::Response {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
+    font_id.family.hash(&mut hasher);
     let key = (
         hasher.finish(),
         (max_w.max(0.0) * 2.0).round() as u32,
@@ -2697,20 +2760,16 @@ fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
         + (SPACE_8 + 3.0)
 }
 
-fn format_pod_short_time(last_scanned_display: Option<&str>, compact: bool) -> String {
+fn format_pod_short_time(last_scanned_display: Option<&str>, _compact: bool) -> String {
     let Some(ts) = last_scanned_display.map(str::trim).filter(|s| !s.is_empty()) else {
-        return if compact { "Never".into() } else { "Never scanned".into() };
+        return "Never scanned".into();
     };
     let hhmm = ts
         .split_whitespace()
         .nth(1)
         .and_then(|t| t.get(..5))
         .unwrap_or(ts);
-    if compact {
-        hhmm.to_string()
-    } else {
-        format!("Scanned {hhmm}")
-    }
+    format!("Scanned {hhmm}")
 }
 
 fn draw_compact_pod_checkbox(
@@ -2718,10 +2777,11 @@ fn draw_compact_pod_checkbox(
     checked: &mut bool,
     label: &str,
     muted_look: bool,
+    hover_tip: &str,
     pal: &ThemePalette,
 ) -> bool {
     let mut toggled = false;
-    ui.horizontal(|ui| {
+    let row_resp = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_4;
         let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
         let ppp = ui.ctx().pixels_per_point();
@@ -2762,6 +2822,9 @@ fn draw_compact_pod_checkbox(
             toggled = true;
         }
     });
+    if !hover_tip.is_empty() {
+        let _ = row_resp.response.on_hover_text(hover_tip);
+    }
     toggled
 }
 
@@ -2779,12 +2842,21 @@ fn draw_drive_pods_grid(
     if rep.drives.is_empty() {
         return None;
     }
-    const MIN_POD_W: f32 = 184.0;
+    const MIN_POD_W: f32 = 180.0;
     let n = rep.drives.len();
     let avail_w = ui.available_width().max(MIN_POD_W);
-    let max_cols = ((avail_w + SPACE_8) / (MIN_POD_W + SPACE_8))
+    let fit_cols = ((avail_w + SPACE_8) / (MIN_POD_W + SPACE_8))
         .floor()
         .max(1.0) as usize;
+    // DESIGN.md §11: 1..=4 in 1 row, 5..=8 in 2 balanced rows (max_cols = 4 -> 3+2 on 5), 9+ in 5-col wrap.
+    let max_cols = if n <= 4 {
+        fit_cols.min(4)
+    } else if n <= 8 {
+        fit_cols.min(4)
+    } else {
+        fit_cols.min(5)
+    }
+    .max(1);
     let num_rows = n.div_ceil(max_cols);
     let base_per_row = n / num_rows;
     let extra = n % num_rows;
@@ -2797,12 +2869,15 @@ fn draw_drive_pods_grid(
         ui.spacing_mut().item_spacing.y = SPACE_8;
         for row_idx in 0..num_rows {
             let cols_in_row = base_per_row + usize::from(row_idx < extra);
-            let tile_w = ((avail_w - SPACE_8 * ((cols_in_row - 1) as f32)) / (cols_in_row as f32))
-                .max(140.0);
-            let compact = tile_w < 228.0;
+            let pod_col_gap = if cols_in_row >= 5 { SPACE_4 } else { SPACE_8 };
+            let tile_w =
+                ((avail_w - pod_col_gap * ((cols_in_row - 1) as f32)) / (cols_in_row as f32))
+                    .max(140.0);
+            let compact = tile_w < 220.0;
+            let pod_h_margin = if compact { SPACE_8 } else { SPACE_12 };
 
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = SPACE_8;
+                ui.spacing_mut().item_spacing.x = pod_col_gap;
                 for local_col in 0..cols_in_row {
                     let drv_idx = drv_offset + local_col;
                     let drv = &rep.drives[drv_idx];
@@ -2838,9 +2913,9 @@ fn draw_drive_pods_grid(
                         pod_fill,
                         pod_border,
                         RADIUS_PANEL,
-                        Margin::symmetric(SPACE_12, SPACE_8),
+                        Margin::symmetric(pod_h_margin, SPACE_8),
                         |ui| {
-                            let inner_w = (tile_w - SPACE_12 * 2.0 - 2.0).max(112.0);
+                            let inner_w = (tile_w - pod_h_margin * 2.0 - 2.0).max(112.0);
                             ui.set_width(inner_w);
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -2912,7 +2987,7 @@ fn draw_drive_pods_grid(
                                 let (status_txt, status_col) = if !included {
                                     ("Not scanned".to_string(), pal.muted)
                                 } else if busy_this_drive {
-                                    ("Scanning…".to_string(), pal.delta_grew)
+                                    ("Scanning…".to_string(), pal.accent_line)
                                 } else {
                                     (
                                         format_pod_short_time(
@@ -3018,31 +3093,48 @@ fn draw_drive_pods_grid(
 
                                 // Row 4: In-place Scope controls (Include checkbox + Exclusions overlay) & per-drive Rescan
                                 let (ctrl_rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(inner_w, 18.0), Sense::hover());
+                                    ui.allocate_exact_size(Vec2::new(inner_w, 24.0), Sense::hover());
+                                let rescan_btn_min_w = if compact { 48.0 } else { 64.0 };
                                 let rescan_w = if included {
-                                    if busy_this_drive { 68.0 } else { 52.0 }
+                                    if busy_this_drive {
+                                        76.0
+                                    } else if compact {
+                                        50.0
+                                    } else {
+                                        64.0
+                                    }
                                 } else {
                                     0.0
                                 };
+                                let ctrl_gap = if compact { 2.0 } else { SPACE_4 };
                                 let left_ctrl_w = if rescan_w > 0.0 {
-                                    (inner_w - rescan_w - SPACE_4).max(80.0)
+                                    (inner_w - rescan_w - ctrl_gap).max(80.0)
                                 } else {
                                     inner_w
                                 };
                                 let mut lc_ui = table_cell_ui(
                                     ui,
-                                    Rect::from_min_size(ctrl_rect.min, Vec2::new(left_ctrl_w, 18.0)),
+                                    Rect::from_min_size(ctrl_rect.min, Vec2::new(left_ctrl_w, 24.0)),
                                     Layout::left_to_right(Align::Center),
                                 );
-                                lc_ui.spacing_mut().item_spacing.x = SPACE_4;
+                                lc_ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { SPACE_4 };
 
-                                let cb_lbl = if compact { "Scan" } else { "Include" };
                                 let was_excluded = !included;
+                                let include_tip = if included {
+                                    format!(
+                                        "Include {dl}:\\ in scan scope. Excluded drives are not walked or sized at all (including registered InstallLocation folders), and apps solely on excluded drives are omitted."
+                                    )
+                                } else {
+                                    format!(
+                                        "Excluded from scan scope — {dl}:\\ is not sized at all (including registered InstallLocation folders), and apps solely on it are omitted."
+                                    )
+                                };
                                 if draw_compact_pod_checkbox(
                                     &mut lc_ui,
                                     &mut included,
-                                    cb_lbl,
+                                    "Include",
                                     was_excluded,
+                                    &include_tip,
                                     pal,
                                 ) {
                                     let mut next_cfg = config.clone();
@@ -3056,17 +3148,16 @@ fn draw_drive_pods_grid(
                                     emit(UiAction::SaveConfig(next_cfg));
                                 }
 
-                                let excl_lbl = match (compact, excl_count) {
-                                    (true, 0) => "Excl".to_string(),
-                                    (true, k) => format!("Excl ({k})"),
-                                    (false, 0) => "Exclusions".to_string(),
-                                    (false, k) => format!("Exclusions ({k})"),
+                                let excl_lbl = if excl_count == 0 {
+                                    "Exclusions".to_string()
+                                } else {
+                                    format!("Exclusions ({excl_count})")
                                 };
                                 let is_excl_open = ui_state.open_pod_scope_drive == Some(dl);
                                 let excl_resp = draw_z_button(
                                     &mut lc_ui,
                                     &excl_lbl,
-                                    Vec2::new(0.0, 18.0),
+                                    Vec2::new(0.0, 20.0),
                                     10.5,
                                     RADIUS_PILL,
                                     true,
@@ -3099,12 +3190,12 @@ fn draw_drive_pods_grid(
                                     let r_resp = draw_z_button(
                                         &mut rc_ui,
                                         r_lbl,
-                                        Vec2::new(0.0, 18.0),
-                                        10.5,
-                                        RADIUS_PILL,
+                                        Vec2::new(rescan_btn_min_w, 24.0),
+                                        if compact { 11.0 } else { 11.5 },
+                                        RADIUS_CONTROL,
                                         !busy_this_drive,
                                         false,
-                                        ButtonVariant::SubtleOutline,
+                                        ButtonVariant::PodPrimaryOutline,
                                         pal,
                                     );
                                     if r_resp
@@ -3222,7 +3313,7 @@ fn draw_pod_scope_overlay(
 
                     ui.label(
                         RichText::new(
-                            "Excluded drives are not sized at all (including registered InstallLocation folders), and apps solely on excluded drives are omitted.",
+                            "Excluded folders on this drive are not walked or sized, and content under them is not attributed to apps or Unattributed. Locked system folders (such as C:\\Windows) remain excluded and cannot be removed.",
                         )
                         .size(11.0)
                         .color(pal.muted),
@@ -3631,7 +3722,10 @@ pub fn draw_app_ui_with_drive_busy(
                 Sense::hover(),
                 |ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_8;
-                    let (status, status_color) = if any_scan_active {
+                    let last_scan_str = report
+                        .map(|r| r.scan_timestamp_display.as_str())
+                        .unwrap_or("none");
+                    let (status, status_color, caption_tip) = if any_scan_active {
                         let s = if let Some(p) = progress {
                             format!(
                                 "Read-only · {} · {} dirs · {}",
@@ -3642,14 +3736,14 @@ pub fn draw_app_ui_with_drive_busy(
                         } else {
                             "Read-only · Scanning...".to_string()
                         };
-                        (s, pal.delta_grew)
+                        (s, pal.accent_line, None)
                     } else if scope_stale {
                         (
-                            format!(
-                                "Read-only · Scope changed — rescan needed (last: {})",
-                                report.map_or("", |r| r.scan_timestamp_display.as_str())
-                            ),
-                            pal.delta_grew,
+                            "Read-only · Scope changed — rescan needed".to_string(),
+                            pal.status_amber,
+                            Some(format!(
+                                "Last scan: {last_scan_str}\nScan scope, exclusions, or zone rules changed — click Rescan needed to refresh."
+                            )),
                         )
                     } else if let Some(rep) = report {
                         (
@@ -3659,18 +3753,27 @@ pub fn draw_app_ui_with_drive_busy(
                                 rep.duration_ms as f64 / 1000.0
                             ),
                             pal.muted,
+                            None,
                         )
                     } else {
-                        ("Read-only · No cached scan — click Rescan".to_string(), pal.muted)
+                        (
+                            "Read-only · No cached scan — click Rescan".to_string(),
+                            pal.muted,
+                            None,
+                        )
                     };
-                    draw_wt_header_lockup(
+                    if let Some(cap_resp) = draw_wt_header_lockup(
                         ui,
                         &mut ui_state.wt_logo_tex,
                         "y-storage",
                         &status,
                         status_color,
                         &pal,
-                    );
+                    ) {
+                        if let Some(tip) = caption_tip {
+                            let _ = cap_resp.on_hover_text(tip);
+                        }
+                    }
                 },
                 |ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_8;
@@ -3720,14 +3823,15 @@ pub fn draw_app_ui_with_drive_busy(
                         ButtonVariant::PrimaryOutline,
                         &pal,
                     );
-                    if rescan_resp
-                        .on_hover_text(if scope_stale {
-                            "Scan scope, exclusions, or container rules changed — click to rescan enabled drives"
-                        } else {
-                            "Rescan all enabled drives and registry"
-                        })
-                        .clicked()
-                    {
+                    let rescan_tip = if scope_stale {
+                        format!(
+                            "Last scan: {}\nScan scope, exclusions, or zone rules changed — click to rescan enabled drives",
+                            report.map_or("none", |r| r.scan_timestamp_display.as_str())
+                        )
+                    } else {
+                        "Rescan all enabled drives and registry".to_string()
+                    };
+                    if rescan_resp.on_hover_text(rescan_tip).clicked() {
                         emit(UiAction::StartRescan);
                     }
 
@@ -3747,10 +3851,16 @@ pub fn draw_app_ui_with_drive_busy(
             // Collapsible & drag-resizable Pinned Bottom Panel rendered BEFORE CentralPanel so it can rise
             // up to just below masthead_panel (`max_ledger_h = client_height - masthead_height - 4.0`).
             if let Some(rep) = report {
-                const LEDGER_MIN_H: f32 = 156.0;
-                let max_ledger_h = (ctx.available_rect().height() - 4.0).max(LEDGER_MIN_H);
+                let sys_lines = rep.windows_system.len();
+                let reconcile_reserve_h = if sys_lines > 0 {
+                    SPACE_4 + (sys_lines as f32) * 24.0
+                } else {
+                    0.0
+                };
+                let max_ledger_h = (ctx.available_rect().height() - 4.0).max(156.0);
+                let min_ledger_h = (132.0 + reconcile_reserve_h).min(max_ledger_h);
                 if let Some(h) = ui_state.ledger_height_px {
-                    ui_state.ledger_height_px = Some(h.clamp(LEDGER_MIN_H, max_ledger_h));
+                    ui_state.ledger_height_px = Some(h.clamp(min_ledger_h, max_ledger_h));
                 }
                 let mut panel = egui::TopBottomPanel::bottom("pinned_groups_panel")
                     .show_separator_line(false)
@@ -3763,7 +3873,10 @@ pub fn draw_app_ui_with_drive_busy(
                     );
                 if !ui_state.ledger_collapsed {
                     if let Some(h) = ui_state.ledger_height_px {
-                        panel = panel.exact_height(h.clamp(LEDGER_MIN_H, max_ledger_h));
+                        panel = panel.exact_height(h.clamp(min_ledger_h, max_ledger_h));
+                    } else if rep.windows_system.len() > 1 {
+                        // Never allow default expansion to overflow the smallest supported window height.
+                        panel = panel.max_height(max_ledger_h);
                     }
                 }
                 panel.show(ctx, |ui| {
@@ -3794,7 +3907,7 @@ pub fn draw_app_ui_with_drive_busy(
                                 .ledger_height_px
                                 .unwrap_or_else(|| ui_state.ledger_drag_start_h.unwrap_or(panel_outer_h));
                             let next_h =
-                                (cur - grip_resp.drag_delta().y).clamp(LEDGER_MIN_H, max_ledger_h);
+                                (cur - grip_resp.drag_delta().y).clamp(min_ledger_h, max_ledger_h);
                             ui_state.ledger_height_px = Some(next_h);
                         }
                         if grip_resp.drag_stopped() {
@@ -3827,11 +3940,7 @@ pub fn draw_app_ui_with_drive_busy(
                     }
                     let body_budget_h = if !ui_state.ledger_collapsed {
                         ui_state.ledger_height_px.map(|h| {
-                            let sys_lines = ui_state
-                                .cached_report
-                                .as_ref()
-                                .map_or(1, |cr| cr.sys_reconcile.len().max(1)) as f32;
-                            (h - (SPACE_16 + 22.0 + sys_lines * 24.0 + SPACE_4 * 2.0)).max(88.0)
+                            (h - (SPACE_16 + 22.0 + reconcile_reserve_h + SPACE_4)).max(56.0)
                         })
                     } else {
                         None
@@ -4302,33 +4411,8 @@ pub fn draw_app_ui_with_drive_busy(
                         .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
-                    if let Some(rep) = report {
-                        active_pod_overlay = draw_drive_pods_grid(
-                            ui,
-                            ui_state,
-                            config,
-                            rep,
-                            scanning,
-                            rescanning_drives,
-                            &pal,
-                            emit,
-                        );
-                        ui.add_space(SPACE_8);
-                    }
                     draw_settings_view(ui, ui_state, config, report, system_windows_dir, &pal, emit);
                 });
-            if let (Some(_rep), Some((pod_dl, pod_rect))) = (report, active_pod_overlay) {
-                draw_pod_scope_overlay(
-                    ctx,
-                    ui_state,
-                    config,
-                    pod_dl,
-                    pod_rect,
-                    system_windows_dir,
-                    &pal,
-                    emit,
-                );
-            }
         }
     }
 }
@@ -4803,29 +4887,54 @@ fn draw_main_app_list(
                             } else {
                                 cached_report
                                     .as_ref()
-                                    .and_then(|cr| cr.apps[app_idx].delta_display.clone())
-                                    .or_else(|| format_delta_display(app.growth, pal))
+                                    .map(|cr| cr.apps[app_idx].delta_display.clone())
+                                    .unwrap_or_else(|| format_delta_display(app.growth, pal))
                             };
-                            if let Some((ref d_text, d_col, _)) = delta_info {
-                                let mut d_ui = table_cell_ui(
-                                    ui,
-                                    cols.delta.rect(y0, y1),
-                                    Layout::right_to_left(Align::Center),
-                                );
-                                let d_font = if d_text == "new" {
-                                    FontId::new(11.0, FontFamily::Proportional)
-                                } else {
-                                    mono_font_for(&d_ui, 11.5, false)
-                                };
-                                d_ui.add(
-                                    egui::Label::new(
-                                        RichText::new(d_text).font(d_font).color(d_col),
-                                    )
-                                    .selectable(false),
-                                );
+                            let delta_rect = cols.delta.rect(y0, y1);
+                            match delta_info.kind {
+                                DeltaCellKind::NewPill => {
+                                    let row_surface = if expanded { pal.panel_alt } else { pal.panel };
+                                    let mut d_ui = table_cell_ui(
+                                        ui,
+                                        delta_rect,
+                                        Layout::right_to_left(Align::Center),
+                                    );
+                                    let resp = paint_chip(
+                                        &mut d_ui,
+                                        "new",
+                                        new_growth_chip_style(pal),
+                                        row_surface,
+                                    );
+                                    if let Some(tip) = delta_info.tip.as_deref() {
+                                        let _ = resp.on_hover_text(tip);
+                                    }
+                                }
+                                DeltaCellKind::SignedValue { ref text, color } => {
+                                    let mut d_ui = table_cell_ui(
+                                        ui,
+                                        delta_rect,
+                                        Layout::right_to_left(Align::Center),
+                                    );
+                                    let d_font = mono_font_for(&d_ui, 11.5, false);
+                                    let resp = d_ui.add(
+                                        egui::Label::new(
+                                            RichText::new(text).font(d_font).color(color),
+                                        )
+                                        .selectable(false),
+                                    );
+                                    if let Some(tip) = delta_info.tip.as_deref() {
+                                        let _ = resp.on_hover_text(tip);
+                                    }
+                                }
+                                DeltaCellKind::Blank => {
+                                    if let Some(tip) = delta_info.tip.as_deref() {
+                                        let hover_id = ui.make_persistent_id(("delta_floor_tip", app_idx));
+                                        let _ = ui.interact(delta_rect, hover_id, Sense::hover()).on_hover_text(tip);
+                                    }
+                                }
                             }
 
-                            // 6. Primary Size column (global total OR per-drive sum + muted "of global" companion in per-drive mode)
+                            // 6. Primary Size column (global total OR per-drive sum followed by muted "of global" companion)
                             let display_bytes =
                                 per_drive_mode.map_or(app.total_bytes, |dl| app.bytes_on_drive(dl));
                             let size_cell_rect = cols.size.rect(y0, y1);
@@ -4842,7 +4951,7 @@ fn draw_main_app_list(
                                     text_rect,
                                     Layout::right_to_left(Align::Center),
                                 );
-                                s_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                s_ui.spacing_mut().item_spacing.x = 6.0;
                                 let s_font = mono_font_for(&s_ui, 13.0, false);
                                 if per_drive_mode.is_none() {
                                     let total_label = cached_report
@@ -4861,14 +4970,7 @@ fn draw_main_app_list(
                                         .selectable(false),
                                     );
                                 } else {
-                                    s_ui.add(
-                                        egui::Label::new(
-                                            RichText::new(format_size_2dec(display_bytes))
-                                                .font(s_font)
-                                                .color(pal.text),
-                                        )
-                                        .selectable(false),
-                                    );
+                                    // Right-to-left places first item on the far right: companion goes AFTER per-drive total.
                                     if app.total_bytes != display_bytes {
                                         let comp_font = mono_font_for(&s_ui, 10.5, false);
                                         s_ui.add(
@@ -4883,6 +4985,14 @@ fn draw_main_app_list(
                                             .selectable(false),
                                         );
                                     }
+                                    s_ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format_size_2dec(display_bytes))
+                                                .font(s_font)
+                                                .color(pal.text),
+                                        )
+                                        .selectable(false),
+                                    );
                                 }
 
                                 // Thin 2px muted proportion indicator relative to largest row in the active mode.
@@ -4962,7 +5072,7 @@ fn draw_main_app_list(
                                             });
                                     }
                                 } else if cols.delta.rect(y0, y1).contains(pos) {
-                                    cell_tooltip = delta_info.map(|(_, _, tip)| tip);
+                                    cell_tooltip = delta_info.tip.clone();
                                 } else if cols.category.rect(y0, y1).contains(pos) {
                                     let basis_lbl = if app.category_basis.is_empty() {
                                         "default".to_string()
@@ -5109,6 +5219,7 @@ fn draw_main_app_list(
                                         Vec2::new(panel_w, 18.0),
                                         Sense::hover(),
                                     );
+                                    let carve_cap_w = (cols.size.max_x - sub_x0).max(160.0);
                                     let mut carve_ui = table_cell_ui(
                                         ui,
                                         Rect::from_min_max(
@@ -5117,12 +5228,16 @@ fn draw_main_app_list(
                                         ),
                                         Layout::left_to_right(Align::Center),
                                     );
-                                    carve_ui.label(
-                                        RichText::new(format!(
-                                            "contains {child_name} — counted under {child_name}"
-                                        ))
-                                        .size(11.5)
-                                        .color(pal.muted),
+                                    let note = format!(
+                                        "contains {child_name} — counted under {child_name}"
+                                    );
+                                    draw_word_capped_text_cached(
+                                        &mut carve_ui,
+                                        &note,
+                                        FontId::new(11.5, FontFamily::Proportional),
+                                        pal.muted,
+                                        carve_cap_w,
+                                        truncate_cache,
                                     );
                                 }
 
@@ -5342,12 +5457,13 @@ fn draw_main_app_list(
                                                 t_rect,
                                                 Layout::left_to_right(Align::Center),
                                             );
-                                            draw_truncated_text(
+                                            draw_word_capped_text_cached(
                                                 &mut pt_ui,
                                                 &item.path,
                                                 path_font,
                                                 pal.text,
-                                                false,
+                                                max_p_w,
+                                                truncate_cache,
                                             );
                                             paint_chip(
                                                 &mut p_ui,
@@ -5361,12 +5477,13 @@ fn draw_main_app_list(
                                                 p_rect,
                                                 Layout::left_to_right(Align::Center),
                                             );
-                                            draw_truncated_text(
+                                            draw_word_capped_text_cached(
                                                 &mut p_ui,
                                                 &item.path,
                                                 path_font,
                                                 pal.text,
-                                                false,
+                                                p_rect.width(),
+                                                truncate_cache,
                                             );
                                         }
                                     }
@@ -5605,33 +5722,37 @@ fn draw_main_app_list(
 
                                         // 1. Dependency name
                                         {
+                                            let dn_rect = dep_cols.name.rect(r1y0, r1y1);
                                             let mut dn_ui = table_cell_ui(
                                                 ui,
-                                                dep_cols.name.rect(r1y0, r1y1),
+                                                dn_rect,
                                                 Layout::left_to_right(Align::Center),
                                             );
-                                            draw_truncated_text(
+                                            draw_word_capped_text_cached(
                                                 &mut dn_ui,
                                                 &dep.target_name,
                                                 FontId::new(12.0, FontFamily::Proportional),
                                                 pal.text,
-                                                false,
+                                                dn_rect.width(),
+                                                truncate_cache,
                                             );
                                         }
 
                                         // 2. Kind
                                         {
+                                            let dk_rect = dep_cols.kind.rect(r1y0, r1y1);
                                             let mut dk_ui = table_cell_ui(
                                                 ui,
-                                                dep_cols.kind.rect(r1y0, r1y1),
+                                                dk_rect,
                                                 Layout::left_to_right(Align::Center),
                                             );
-                                            draw_truncated_text(
+                                            draw_word_capped_text_cached(
                                                 &mut dk_ui,
                                                 dep.kind.label(),
                                                 FontId::new(11.0, FontFamily::Proportional),
                                                 pal.subtle_text,
-                                                false,
+                                                dk_rect.width(),
+                                                truncate_cache,
                                             );
                                         }
 
@@ -5916,15 +6037,16 @@ fn draw_reverse_dependency_overlay(
                         Sense::hover(),
                         |ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_8;
-                            let (title_font, title_fallback_strong) =
-                                prop_strong_font(ui_state.has_prop_strong, 14.0);
-                            let mut title_rt = RichText::new(&rev.target_name)
-                                .font(title_font)
-                                .color(pal.text);
-                            if title_fallback_strong {
-                                title_rt = title_rt.strong();
-                            }
-                            ui.add(egui::Label::new(title_rt).truncate().selectable(false));
+                            let (title_font, _) = prop_strong_font(ui_state.has_prop_strong, 14.0);
+                            let max_t_w = ui.available_width().max(60.0);
+                            draw_word_capped_text_cached(
+                                ui,
+                                &rev.target_name,
+                                title_font,
+                                pal.text,
+                                max_t_w,
+                                &mut ui_state.truncate_cache,
+                            );
                         },
                         |ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_8;
@@ -6045,21 +6167,25 @@ fn draw_reverse_dependency_overlay(
                                             Sense::hover(),
                                             |ui| {
                                                 ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                paint_chip(
+                                                let conf_resp = paint_chip(
                                                     ui,
                                                     c.confidence.label(),
                                                     confidence_chip_style(c.confidence, pal),
                                                     pal.panel_alt,
                                                 );
-                                                let (cn_font, cn_fallback_strong) =
+                                                let (cn_font, _) =
                                                     prop_strong_font(ui_state.has_prop_strong, 12.0);
-                                                let mut cn_rt = RichText::new(&c.app_name)
-                                                    .font(cn_font)
-                                                    .color(pal.text);
-                                                if cn_fallback_strong {
-                                                    cn_rt = cn_rt.strong();
-                                                }
-                                                ui.add(egui::Label::new(cn_rt).truncate().selectable(false));
+                                                let name_max_w =
+                                                    (ui.max_rect().max.x - conf_resp.rect.max.x - SPACE_4)
+                                                        .max(60.0);
+                                                draw_word_capped_text_cached(
+                                                    ui,
+                                                    &c.app_name,
+                                                    cn_font,
+                                                    pal.text,
+                                                    name_max_w,
+                                                    &mut ui_state.truncate_cache,
+                                                );
                                             },
                                             |ui| {
                                                 draw_right_aligned_size(
@@ -6077,12 +6203,14 @@ fn draw_reverse_dependency_overlay(
                                             SIZE_COL_W,
                                             Sense::hover(),
                                             |ui| {
-                                                draw_truncated_text(
+                                                let max_b_w = ui.available_width().max(80.0);
+                                                draw_word_capped_text_cached(
                                                     ui,
                                                     &c.basis,
                                                     FontId::new(10.5, FontFamily::Proportional),
                                                     pal.muted,
-                                                    false,
+                                                    max_b_w,
+                                                    &mut ui_state.truncate_cache,
                                                 );
                                             },
                                             |_| {},
@@ -6222,6 +6350,29 @@ fn draw_pinned_bottom_groups(
         || ui_state.expand_unattributed;
     let unattrib_tick = lerp_color(pal.border, pal.muted, 0.55);
 
+    let sys_count = ui_state
+        .cached_report
+        .as_ref()
+        .map_or(rep.windows_system.len(), |cr| cr.sys_reconcile.len());
+    let reconcile_reserve_h = if sys_count > 0 {
+        SPACE_4 + (sys_count as f32) * 24.0
+    } else {
+        0.0
+    };
+    let list_avail_h = (ui.available_height() - reconcile_reserve_h - SPACE_4).max(48.0);
+    let cards_box_max_h = match body_budget_h {
+        Some(budget) => budget.min(list_avail_h),
+        None => {
+            if any_expanded {
+                (240.0_f32).min(list_avail_h)
+            } else {
+                list_avail_h
+            }
+        }
+    }
+    .max(48.0);
+    let scroll_to_bottom = ui_state.scroll_ledger_bottom;
+
     let was_unattrib_expanded = ui_state.expand_unattributed;
     let expand_windows_system = &mut ui_state.expand_windows_system;
     let expand_your_files = &mut ui_state.expand_your_files;
@@ -6237,16 +6388,8 @@ fn draw_pinned_bottom_groups(
     let mut unattrib_facet_anchor: Option<(&'static str, Rect)> = None;
 
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
+        ui.set_width(frame_w.max(180.0));
         ui.spacing_mut().item_spacing.y = 0.0;
-        draw_crisp_frame(
-            ui,
-            pal.panel,
-            pal.border,
-            RADIUS_PANEL,
-            Margin::ZERO,
-            |ui| {
-                ui.set_width((frame_w - 2.0).max(180.0));
-                ui.spacing_mut().item_spacing.y = 0.0;
 
                 draw_pinned_group_card(
                     ui,
@@ -6305,7 +6448,7 @@ fn draw_pinned_bottom_groups(
                     ui,
                     "Your files",
                     rep.your_files_total_bytes,
-                    "Personal shell folders · unzoned · read-only",
+                    "Shell folders & Personal-files zones · read-only",
                     pal.muted,
                     expand_your_files,
                     true,
@@ -6554,26 +6697,47 @@ fn draw_pinned_bottom_groups(
                         }
                     },
                 );
-            },
-        );
     };
 
-    if any_expanded || body_budget_h.is_some() {
-        draw_synced_scroll_area(
-            ui,
-            "pinned_groups_scroll",
-            Some(body_budget_h.unwrap_or(152.0)),
-            [false, body_budget_h.is_none()],
-            pal,
-            pal.panel_alt,
-            |ui| {
-                let w = ui.available_width();
-                draw_cards(ui, w);
-            },
-        );
+    // Bounded outer 1px-bordered frame: scroll viewport clips strictly inside it above reconciliation at every window size (FIX 2).
+    let inner_scroll_max_h = (cards_box_max_h - 2.0).max(44.0);
+    let inner_box_w = if any_expanded || body_budget_h.is_some() {
+        (ui.available_width() - 2.0).max(180.0)
     } else {
-        draw_cards(ui, aligned_w);
-    }
+        (aligned_w - 2.0).max(180.0)
+    };
+    draw_crisp_frame(
+        ui,
+        pal.panel,
+        pal.border,
+        RADIUS_PANEL,
+        Margin::ZERO,
+        |ui| {
+            ui.set_width(inner_box_w);
+            draw_synced_scroll_area(
+                ui,
+                "pinned_groups_scroll",
+                Some(inner_scroll_max_h),
+                [false, true],
+                pal,
+                pal.panel,
+                |ui| {
+                    let w = (ui.available_width() - SCROLL_GUTTER_W).max(180.0);
+                    draw_cards(ui, w);
+                    if scroll_to_bottom {
+                        let last_row = Rect::from_min_size(
+                            Pos2::new(
+                                ui.min_rect().left(),
+                                (ui.cursor().min.y - 22.0).max(ui.min_rect().top()),
+                            ),
+                            Vec2::new(40.0, 22.0),
+                        );
+                        ui.scroll_to_rect(last_row, Some(Align::BOTTOM));
+                    }
+                },
+            );
+        },
+    );
     if was_unattrib_expanded && !ui_state.expand_unattributed {
         ui_state.unattrib_search_query.clear();
         ui_state.unattrib_facets = UnattributedFacetFilters::default();
@@ -6581,11 +6745,10 @@ fn draw_pinned_bottom_groups(
         ui_state.unattrib_sort = UnattributedSortMode::SizeDesc;
     }
 
+    if sys_count > 0 {
+        ui.add_space(SPACE_4);
+    }
     // Quiet exact reconciliation ledger line (green status dot + tabular Regular diff 0 B; alert chip only if diff != 0).
-    let sys_count = ui_state
-        .cached_report
-        .as_ref()
-        .map_or(0, |cr| cr.sys_reconcile.len());
     for sys_i in 0..sys_count {
         let (summary, exact, diff) = {
             let cr = ui_state.cached_report.as_ref().unwrap();
@@ -7103,178 +7266,261 @@ fn draw_settings_view(
     let mut changed = false;
     let sys_win_key = normalize_path_key(system_windows_dir);
 
-    ui.label(
-        RichText::new("Scan Scope & Exclusions")
-            .size(16.0)
-            .color(pal.text),
-    );
-    ui.add_space(SPACE_4);
-    ui.label(
-        RichText::new(
-            "Default: only the system drive is enabled with Windows excluded. Excluded drives are never walked or sized (including registered InstallLocation folders), and apps whose folders all live on excluded drives are omitted from the report.",
-        )
-        .size(12.0)
-        .color(pal.muted),
-    );
-    ui.add_space(SPACE_8);
-
     draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
-            ui.spacing_mut().item_spacing.y = SPACE_8;
-            for target in &mut draft.targets {
+        ui.spacing_mut().item_spacing.y = SPACE_4;
+        let scroll_w = ui.available_width().max(240.0);
+
+        ui.label(
+            RichText::new("Scan Scope & Exclusions")
+                .size(16.0)
+                .color(pal.text),
+        );
+        ui.label(
+            RichText::new(
+                "Default: system drive only (Windows excluded). Excluded drives are never walked or sized (including InstallLocation), and apps solely on them are omitted.",
+            )
+            .size(11.5)
+            .color(pal.muted),
+        );
+        ui.add_space(SPACE_4);
+
+        let use_two_cols = draft.targets.len() >= 2 && scroll_w >= 680.0;
+        let card_w = if use_two_cols {
+            ((scroll_w - SCROLL_GUTTER_W - SPACE_8) * 0.5).floor().max(260.0)
+        } else {
+            (scroll_w - SCROLL_GUTTER_W).max(240.0)
+        };
+        let input_w = if use_two_cols { 176.0 } else { 260.0 };
+
+        let mut draw_drive_target_card =
+            |ui: &mut egui::Ui, target: &mut y_core::config::DriveScanTarget, width_px: f32| {
                 let drv_info = report
                     .and_then(|r| r.drives.iter().find(|d| d.letter == target.letter));
                 let is_sys = drv_info.is_some_and(|d| d.is_system_drive)
                     || target.letter.eq_ignore_ascii_case(&'C');
 
-                draw_crisp_frame(
-                    ui,
-                    pal.panel,
-                    pal.border,
-                    RADIUS_PANEL,
-                    Margin::symmetric(SPACE_12, SPACE_8),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width_px, 0.0),
+                    Layout::top_down(Align::Min),
                     |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = SPACE_4;
-
-                        draw_split_row(
+                        draw_crisp_frame(
                             ui,
-                            24.0,
-                            184.0,
-                            Sense::hover(),
+                            pal.panel,
+                            pal.border,
+                            RADIUS_PANEL,
+                            Margin::symmetric(SPACE_12, 6.0),
                             |ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.label(
-                                    RichText::new(format!("Drive {}:\\", target.letter))
-                                        .size(13.5)
-                                        .color(pal.text),
-                                );
-                                let stats_str = if let Some(di) = drv_info {
-                                    if is_sys {
-                                        format!(
-                                            "System drive · {} free · {} used · {} total",
-                                            format_size_2dec(di.free_bytes),
-                                            format_size_2dec(di.used_bytes),
-                                            format_size_2dec(di.total_bytes),
-                                        )
-                                    } else {
-                                        format!(
-                                            "{} free · {} used · {} total",
-                                            format_size_2dec(di.free_bytes),
-                                            format_size_2dec(di.used_bytes),
-                                            format_size_2dec(di.total_bytes),
-                                        )
-                                    }
-                                } else if is_sys {
-                                    "System drive".to_string()
-                                } else {
-                                    String::new()
-                                };
-                                if !stats_str.is_empty() {
-                                    let resp = ui.label(
-                                        RichText::new(stats_str)
-                                            .size(11.5)
-                                            .color(pal.muted),
-                                    );
-                                    if let Some(di) = drv_info {
-                                        let _ = resp.on_hover_text(format!(
-                                            "Free: {} · Used: {} · Total: {}",
-                                            format_exact_bytes(di.free_bytes),
-                                            format_exact_bytes(di.used_bytes),
-                                            format_exact_bytes(di.total_bytes),
-                                        ));
-                                    }
-                                }
-                            },
-                            |ui| {
-                                if draw_crisp_checkbox(
+                                let inner_card_w = (width_px - SPACE_12 * 2.0 - 2.0).max(180.0);
+                                ui.set_width(inner_card_w);
+                                ui.spacing_mut().item_spacing.y = SPACE_4;
+
+                                draw_split_row(
                                     ui,
-                                    &mut target.enabled,
-                                    "Include drive in scan scope",
-                                    pal,
-                                ) {
+                                    22.0,
+                                    160.0,
+                                    Sense::hover(),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                                        ui.label(
+                                            RichText::new(format!("Drive {}:\\", target.letter))
+                                                .size(13.0)
+                                                .color(pal.text),
+                                        );
+                                        let stats_str = if let Some(di) = drv_info {
+                                            if is_sys {
+                                                format!(
+                                                    "System · {} free · {}",
+                                                    format_size_2dec(di.free_bytes),
+                                                    format_size_2dec(di.total_bytes),
+                                                )
+                                            } else {
+                                                format!(
+                                                    "{} free · {}",
+                                                    format_size_2dec(di.free_bytes),
+                                                    format_size_2dec(di.total_bytes),
+                                                )
+                                            }
+                                        } else if is_sys {
+                                            "System drive".to_string()
+                                        } else {
+                                            String::new()
+                                        };
+                                        if !stats_str.is_empty() {
+                                            let resp = ui.label(
+                                                RichText::new(stats_str)
+                                                    .size(11.0)
+                                                    .color(pal.muted),
+                                            );
+                                            if let Some(di) = drv_info {
+                                                let _ = resp.on_hover_text(format!(
+                                                    "Free: {} · Used: {} · Total: {}",
+                                                    format_exact_bytes(di.free_bytes),
+                                                    format_exact_bytes(di.used_bytes),
+                                                    format_exact_bytes(di.total_bytes),
+                                                ));
+                                            }
+                                        }
+                                    },
+                                    |ui| {
+                                        if draw_crisp_checkbox(
+                                            ui,
+                                            &mut target.enabled,
+                                            "Include in scope",
+                                            pal,
+                                        ) {
+                                            changed = true;
+                                        }
+                                    },
+                                );
+
+                                let mut remove_idx: Option<usize> = None;
+                                for (idx, ex) in target.exclusions.iter().enumerate() {
+                                    let is_locked_win = is_sys && normalize_path_key(ex) == sys_win_key;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                                        draw_truncated_text(
+                                            ui,
+                                            ex,
+                                            FontId::new(11.0, FontFamily::Monospace),
+                                            pal.text,
+                                            false,
+                                        );
+                                        if is_locked_win {
+                                            paint_chip(
+                                                ui,
+                                                "LOCKED",
+                                                no_touch_chip_style(pal),
+                                                pal.panel,
+                                            );
+                                            ui.label(
+                                                RichText::new("Always excluded")
+                                                    .size(10.5)
+                                                    .color(pal.subtle_text),
+                                            );
+                                        } else if draw_z_button(
+                                            ui,
+                                            "Remove",
+                                            Vec2::new(56.0, 20.0),
+                                            10.5,
+                                            RADIUS_CONTROL,
+                                            true,
+                                            false,
+                                            ButtonVariant::SubtleOutline,
+                                            pal,
+                                        )
+                                        .clicked()
+                                        {
+                                            remove_idx = Some(idx);
+                                        }
+                                    });
+                                }
+                                if let Some(idx) = remove_idx {
+                                    target.exclusions.remove(idx);
                                     changed = true;
                                 }
+
+                                let input = ui_state
+                                    .new_exclusion_inputs
+                                    .entry(target.letter)
+                                    .or_default();
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                                    draw_crisp_text_input(
+                                        ui,
+                                        ("exclusion_input", target.letter),
+                                        input,
+                                        input_w,
+                                        &format!("{}:\\FolderToExclude", target.letter),
+                                        pal.input_bg,
+                                        pal,
+                                    );
+                                    if draw_z_button(
+                                        ui,
+                                        "Add exclusion",
+                                        Vec2::new(98.0, 26.0),
+                                        11.5,
+                                        RADIUS_CONTROL,
+                                        true,
+                                        false,
+                                        ButtonVariant::SecondaryOutline,
+                                        pal,
+                                    )
+                                    .clicked()
+                                    {
+                                        let trimmed = input.trim().to_string();
+                                        if !trimmed.is_empty()
+                                            && !target
+                                                .exclusions
+                                                .iter()
+                                                .any(|e| normalize_path_key(e) == normalize_path_key(&trimmed))
+                                        {
+                                            target.exclusions.push(trimmed);
+                                            input.clear();
+                                            changed = true;
+                                        }
+                                    }
+                                });
                             },
                         );
+                    },
+                );
+            };
 
-                        if !target.exclusions.is_empty() {
-                            ui.label(RichText::new("Exclusions:").size(11.5).color(pal.muted));
-                        }
+        if use_two_cols {
+            let mut idx = 0;
+            while idx < draft.targets.len() {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                    draw_drive_target_card(ui, &mut draft.targets[idx], card_w);
+                    if idx + 1 < draft.targets.len() {
+                        draw_drive_target_card(ui, &mut draft.targets[idx + 1], card_w);
+                    }
+                });
+                idx += 2;
+            }
+        } else {
+            for target in &mut draft.targets {
+                draw_drive_target_card(ui, target, card_w);
+            }
+        }
 
-                        let mut remove_idx: Option<usize> = None;
-                        for (idx, ex) in target.exclusions.iter().enumerate() {
-                            let is_locked_win = is_sys && normalize_path_key(ex) == sys_win_key;
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.add_space(SPACE_8);
-                                draw_truncated_text(
-                                    ui,
-                                    ex,
-                                    FontId::new(11.5, FontFamily::Monospace),
-                                    pal.text,
-                                    false,
-                                );
-                                if is_locked_win {
-                                    paint_chip(
-                                        ui,
-                                        "LOCKED",
-                                        no_touch_chip_style(pal),
-                                        pal.panel,
-                                    );
-                                    ui.label(
-                                        RichText::new("System folder (always excluded)")
-                                            .size(11.0)
-                                            .color(pal.subtle_text),
-                                    );
-                                } else if draw_z_button(
-                                    ui,
-                                    "Remove",
-                                    Vec2::new(60.0, 22.0),
-                                    11.0,
-                                    RADIUS_CONTROL,
-                                    true,
-                                    false,
-                                    ButtonVariant::SubtleOutline,
-                                    pal,
-                                )
-                                .clicked()
-                                {
-                                    remove_idx = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_idx {
-                            target.exclusions.remove(idx);
-                            changed = true;
-                        }
+        // Unified Attribution Zone Rulebook (FIX 3 + FIX 8): grouped subheads carry the zone type once;
+        // zone chips render name + Remove only; ALL PinKind badges use neutral muted styling.
+        ui.add_space(SPACE_8);
+        let neutral_pin_style = ChipStyle {
+            fill: Color32::TRANSPARENT,
+            stroke: pal.border,
+            text: pal.muted,
+        };
+        let rulebook_frame = draw_crisp_frame(
+            ui,
+            pal.panel,
+            pal.border,
+            RADIUS_PANEL,
+            Margin::symmetric(SPACE_12, SPACE_8),
+            |ui| {
+                ui.set_width((scroll_w - SCROLL_GUTTER_W - SPACE_12 * 2.0 - 2.0).max(200.0));
+                ui.spacing_mut().item_spacing.y = SPACE_4;
 
-                        let input = ui_state
-                            .new_exclusion_inputs
-                            .entry(target.letter)
-                            .or_default();
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = SPACE_8;
-                            if target.exclusions.is_empty() {
-                                ui.label(
-                                    RichText::new("Exclude folder:")
-                                        .size(11.5)
-                                        .color(pal.muted),
-                                );
-                            }
-                            draw_crisp_text_input(
+                draw_split_row(
+                    ui,
+                    24.0,
+                    124.0,
+                    Sense::hover(),
+                    |ui| {
+                        ui.label(
+                            RichText::new("Attribution Zone Rulebook")
+                                .size(13.5)
+                                .color(pal.text),
+                        );
+                    },
+                    |ui| {
+                        if draft.zones != ZoneRulebook::default()
+                            && draw_z_button(
                                 ui,
-                                ("exclusion_input", target.letter),
-                                input,
-                                280.0,
-                                &format!("{}:\\FolderToExclude", target.letter),
-                                pal.input_bg,
-                                pal,
-                            );
-                            if draw_z_button(
-                                ui,
-                                "Add exclusion",
-                                Vec2::new(104.0, HEADER_CONTROL_H),
-                                12.0,
+                                "Reset defaults",
+                                Vec2::new(104.0, 24.0),
+                                11.5,
                                 RADIUS_CONTROL,
                                 true,
                                 false,
@@ -7282,172 +7528,213 @@ fn draw_settings_view(
                                 pal,
                             )
                             .clicked()
-                            {
-                                let trimmed = input.trim().to_string();
-                                if !trimmed.is_empty()
-                                    && !target
-                                        .exclusions
-                                        .iter()
-                                        .any(|e| normalize_path_key(e) == normalize_path_key(&trimmed))
-                                {
-                                    target.exclusions.push(trimmed);
-                                    input.clear();
-                                    changed = true;
-                                }
-                            }
-                        });
+                        {
+                            draft.zones = ZoneRulebook::default();
+                            changed = true;
+                        }
                     },
                 );
-            }
+                ui.label(
+                    RichText::new(
+                        "Rules match drive-root folder names or explicit paths. Registered install roots keep priority; Drive Root Rule tests top-level drive folders; Manual pins override inference.",
+                    )
+                    .size(11.0)
+                    .color(pal.muted),
+                );
 
-            // Unified Attribution Zone Rulebook (Part A & B(7)): AppContainer, PersonalFiles, Drive Root Rule, and Manual Pins.
-            ui.add_space(SPACE_4);
-            let zone_kind_chip_style = |kind: ZoneRuleKind| -> ChipStyle {
-                match kind {
-                    ZoneRuleKind::AppContainer => ChipStyle {
-                        fill: pal.pill_blue_fill,
-                        stroke: pal.accent_line,
-                        text: pal.proven_text,
-                    },
-                    ZoneRuleKind::PersonalFiles => qualifier_chip_style(pal),
-                }
-            };
-            let pin_kind_chip_style = |kind: PinKind| -> ChipStyle {
-                match kind {
-                    PinKind::App => ChipStyle {
-                        fill: pal.pill_blue_fill,
-                        stroke: pal.accent_line,
-                        text: pal.proven_text,
-                    },
-                    PinKind::Group => qualifier_chip_style(pal),
-                    PinKind::Personal => zone_chip_style(ZoneKind::Green, pal),
-                    PinKind::Ignore => no_touch_chip_style(pal),
-                }
-            };
-            let rulebook_frame = draw_crisp_frame(
-                ui,
-                pal.panel,
-                pal.border,
-                RADIUS_PANEL,
-                Margin::symmetric(SPACE_12, SPACE_8),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = SPACE_8;
+                let name_font = FontId::new(11.5, FontFamily::Monospace);
+                let max_row_w = (ui.available_width() - SPACE_16).max(200.0);
+                let mut remove_name_idx: Option<usize> = None;
 
-                    draw_split_row(
-                        ui,
-                        24.0,
-                        124.0,
-                        Sense::hover(),
-                        |ui| {
-                            ui.label(
-                                RichText::new("Attribution Zone Rulebook")
-                                    .size(13.5)
-                                    .color(pal.text),
-                            );
-                        },
-                        |ui| {
-                            if draft.zones != ZoneRulebook::default()
-                                && draw_z_button(
-                                    ui,
-                                    "Reset defaults",
-                                    Vec2::new(104.0, 24.0),
-                                    11.5,
-                                    RADIUS_CONTROL,
-                                    true,
-                                    false,
-                                    ButtonVariant::SecondaryOutline,
-                                    pal,
-                                )
-                                .clicked()
-                            {
-                                draft.zones = ZoneRulebook::default();
-                                changed = true;
-                            }
-                        },
-                    );
+                for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                    let group_items: Vec<(usize, String)> = draft
+                        .zones
+                        .root_zones
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, rz)| rz.kind == kind)
+                        .map(|(i, rz)| (i, rz.name.clone()))
+                        .collect();
                     ui.label(
-                        RichText::new(
-                            "One rulebook governs drive-root folder names and explicit paths: App container (immediate folders become candidate apps), Personal files (grouped into Your files — never app-hunted or Unattributed), Drive Root Rule (top-level drive folders are also tested cleanly), and Manual folder pins overriding inference. Registered install roots keep priority.",
-                        )
-                        .size(11.5)
-                        .color(pal.muted),
-                    );
-
-                    ui.label(
-                        RichText::new("Drive-root folder zones:")
-                            .size(11.5)
+                        RichText::new(kind.label())
+                            .size(11.0)
                             .color(pal.muted),
                     );
-                    let mut remove_name_idx: Option<usize> = None;
-                    let max_row_w = (ui.available_width() - SPACE_16).max(200.0);
-                    let name_font = FontId::new(11.5, FontFamily::Monospace);
-                    let badge_font = FontId::new(10.5, FontFamily::Proportional);
-                    let mut name_rows: Vec<Vec<(usize, String, ZoneRuleKind)>> = Vec::new();
-                    let mut cur_row: Vec<(usize, String, ZoneRuleKind)> = Vec::new();
-                    let mut cur_row_w = 0.0_f32;
-                    for (idx, rz) in draft.zones.root_zones.iter().enumerate() {
-                        let text_w = ui
-                            .fonts(|f| f.layout_no_wrap(rz.name.clone(), name_font.clone(), pal.text))
-                            .size()
-                            .x;
-                        let badge_w = ui
-                            .fonts(|f| {
-                                f.layout_no_wrap(
-                                    rz.kind.label().to_string(),
-                                    badge_font.clone(),
-                                    pal.text,
-                                )
-                            })
-                            .size()
-                            .x
-                            + 14.0;
-                        let chip_w = text_w + badge_w + SPACE_8 * 2.0 + SPACE_4 * 2.0 + 56.0 + 4.0;
-                        let next_w = if cur_row.is_empty() {
-                            chip_w
-                        } else {
-                            cur_row_w + SPACE_8 + chip_w
-                        };
-                        if !cur_row.is_empty() && next_w > max_row_w {
-                            name_rows.push(std::mem::take(&mut cur_row));
-                            cur_row_w = chip_w;
-                        } else {
-                            cur_row_w = next_w;
-                        }
-                        cur_row.push((idx, rz.name.clone(), rz.kind));
-                    }
-                    if !cur_row.is_empty() {
-                        name_rows.push(cur_row);
-                    }
-                    for row in name_rows {
+                    if group_items.is_empty() {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = SPACE_8;
                             ui.add_space(SPACE_8);
-                            for (idx, name, kind) in row {
+                            ui.label(
+                                RichText::new("None configured.")
+                                    .size(10.5)
+                                    .color(pal.subtle_text),
+                            );
+                        });
+                    } else {
+                        let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
+                        let mut cur_row: Vec<(usize, String)> = Vec::new();
+                        let mut cur_w = 0.0_f32;
+                        for (idx, name) in group_items {
+                            let text_w = ui
+                                .fonts(|f| f.layout_no_wrap(name.clone(), name_font.clone(), pal.text))
+                                .size()
+                                .x;
+                            let chip_w = text_w + SPACE_8 * 2.0 + SPACE_4 + 50.0 + 4.0;
+                            let next_w = if cur_row.is_empty() {
+                                chip_w
+                            } else {
+                                cur_w + SPACE_8 + chip_w
+                            };
+                            if !cur_row.is_empty() && next_w > max_row_w {
+                                rows.push(std::mem::take(&mut cur_row));
+                                cur_w = chip_w;
+                            } else {
+                                cur_w = next_w;
+                            }
+                            cur_row.push((idx, name));
+                        }
+                        if !cur_row.is_empty() {
+                            rows.push(cur_row);
+                        }
+                        for row in rows {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add_space(SPACE_8);
+                                for (idx, name) in row {
+                                    draw_crisp_frame(
+                                        ui,
+                                        pal.panel_alt,
+                                        pal.border,
+                                        RADIUS_CONTROL,
+                                        Margin::symmetric(SPACE_8, 1.0),
+                                        |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = SPACE_4;
+                                                ui.label(
+                                                    RichText::new(&name)
+                                                        .font(name_font.clone())
+                                                        .color(pal.text),
+                                                );
+                                                if draw_z_button(
+                                                    ui,
+                                                    "Remove",
+                                                    Vec2::new(48.0, 20.0),
+                                                    10.5,
+                                                    RADIUS_PILL,
+                                                    true,
+                                                    false,
+                                                    ButtonVariant::SubtleOutline,
+                                                    pal,
+                                                )
+                                                .clicked()
+                                                {
+                                                    remove_name_idx = Some(idx);
+                                                }
+                                            });
+                                        },
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                if let Some(idx) = remove_name_idx {
+                    if draft.zones.remove_root_zone(idx) {
+                        changed = true;
+                    }
+                }
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                    draw_crisp_text_input(
+                        ui,
+                        "zone_name_input",
+                        &mut ui_state.new_container_name_input,
+                        210.0,
+                        "Folder name (e.g. Tools, Media)...",
+                        pal.input_bg,
+                        pal,
+                    );
+                    for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                        let selected = ui_state.new_container_name_kind == kind;
+                        if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
+                            ui_state.new_container_name_kind = kind;
+                        }
+                    }
+                    if draw_z_button(
+                        ui,
+                        "Add root zone",
+                        Vec2::new(108.0, 26.0),
+                        11.5,
+                        RADIUS_CONTROL,
+                        true,
+                        false,
+                        ButtonVariant::SecondaryOutline,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        let candidate = ui_state.new_container_name_input.clone();
+                        if draft
+                            .zones
+                            .add_root_zone(&candidate, ui_state.new_container_name_kind)
+                        {
+                            ui_state.new_container_name_input.clear();
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.label(
+                    RichText::new("Explicit folder zones:")
+                        .size(11.0)
+                        .color(pal.muted),
+                );
+                if draft.zones.explicit_zones.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(SPACE_8);
+                        ui.label(
+                            RichText::new("No explicit folder zones configured (e.g. D:\\Media -> Personal files).")
+                                .size(10.5)
+                                .color(pal.subtle_text),
+                        );
+                    });
+                } else {
+                    let mut remove_path_idx: Option<usize> = None;
+                    for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                        let matching: Vec<(usize, String)> = draft
+                            .zones
+                            .explicit_zones
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, ez)| ez.kind == kind)
+                            .map(|(i, ez)| (i, ez.path.clone()))
+                            .collect();
+                        if matching.is_empty() {
+                            continue;
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                            ui.add_space(SPACE_8);
+                            ui.label(RichText::new(format!("{}:", kind.label())).size(10.5).color(pal.muted));
+                            for (idx, path) in matching {
                                 draw_crisp_frame(
                                     ui,
                                     pal.panel_alt,
                                     pal.border,
                                     RADIUS_CONTROL,
-                                    Margin::symmetric(SPACE_8, 2.0),
+                                    Margin::symmetric(SPACE_8, 1.0),
                                     |ui| {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = SPACE_4;
                                             ui.label(
-                                                RichText::new(&name)
+                                                RichText::new(&path)
                                                     .font(name_font.clone())
                                                     .color(pal.text),
-                                            );
-                                            paint_chip(
-                                                ui,
-                                                kind.label(),
-                                                zone_kind_chip_style(kind),
-                                                pal.panel_alt,
                                             );
                                             if draw_z_button(
                                                 ui,
                                                 "Remove",
-                                                Vec2::new(56.0, 20.0),
+                                                Vec2::new(48.0, 20.0),
                                                 10.5,
                                                 RADIUS_PILL,
                                                 true,
@@ -7457,7 +7744,7 @@ fn draw_settings_view(
                                             )
                                             .clicked()
                                             {
-                                                remove_name_idx = Some(idx);
+                                                remove_path_idx = Some(idx);
                                             }
                                         });
                                     },
@@ -7465,290 +7752,193 @@ fn draw_settings_view(
                             }
                         });
                     }
-                    if let Some(idx) = remove_name_idx {
-                        if draft.zones.remove_root_zone(idx) {
+                    if let Some(idx) = remove_path_idx {
+                        if draft.zones.remove_explicit_zone(idx) {
                             changed = true;
                         }
                     }
-
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                        draw_crisp_text_input(
-                            ui,
-                            "zone_name_input",
-                            &mut ui_state.new_container_name_input,
-                            210.0,
-                            "Folder name (e.g. Tools, Media)...",
-                            pal.input_bg,
-                            pal,
-                        );
-                        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
-                            let selected = ui_state.new_container_name_kind == kind;
-                            if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
-                                ui_state.new_container_name_kind = kind;
-                            }
-                        }
-                        if draw_z_button(
-                            ui,
-                            "Add root zone",
-                            Vec2::new(108.0, HEADER_CONTROL_H),
-                            12.0,
-                            RADIUS_CONTROL,
-                            true,
-                            false,
-                            ButtonVariant::SecondaryOutline,
-                            pal,
-                        )
-                        .clicked()
-                        {
-                            let candidate = ui_state.new_container_name_input.clone();
-                            if draft
-                                .zones
-                                .add_root_zone(&candidate, ui_state.new_container_name_kind)
-                            {
-                                ui_state.new_container_name_input.clear();
-                                changed = true;
-                            }
-                        }
-                    });
-
-                    ui.label(
-                        RichText::new("Explicit folder zones:")
-                            .size(11.5)
-                            .color(pal.muted),
-                    );
-                    if draft.zones.explicit_zones.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(SPACE_8);
-                            ui.label(
-                                RichText::new("No explicit folder zones configured (e.g. D:\\Media -> Personal files).")
-                                    .size(11.0)
-                                    .color(pal.subtle_text),
-                            );
-                        });
-                    } else {
-                        let mut remove_path_idx: Option<usize> = None;
-                        for (idx, ez) in draft.zones.explicit_zones.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.add_space(SPACE_8);
-                                draw_truncated_text(
-                                    ui,
-                                    &ez.path,
-                                    FontId::new(11.5, FontFamily::Monospace),
-                                    pal.text,
-                                    false,
-                                );
-                                paint_chip(
-                                    ui,
-                                    ez.kind.label(),
-                                    zone_kind_chip_style(ez.kind),
-                                    pal.panel,
-                                );
-                                if draw_z_button(
-                                    ui,
-                                    "Remove",
-                                    Vec2::new(60.0, 22.0),
-                                    11.0,
-                                    RADIUS_CONTROL,
-                                    true,
-                                    false,
-                                    ButtonVariant::SubtleOutline,
-                                    pal,
-                                )
-                                .clicked()
-                                {
-                                    remove_path_idx = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_path_idx {
-                            if draft.zones.remove_explicit_zone(idx) {
-                                changed = true;
-                            }
-                        }
-                    }
-
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                        draw_crisp_text_input(
-                            ui,
-                            "zone_path_input",
-                            &mut ui_state.new_container_path_input,
-                            236.0,
-                            r"D:\Media or D:\Work\PortableTools",
-                            pal.input_bg,
-                            pal,
-                        );
-                        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
-                            let selected = ui_state.new_container_path_kind == kind;
-                            if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
-                                ui_state.new_container_path_kind = kind;
-                            }
-                        }
-                        if draw_z_button(
-                            ui,
-                            "Add path zone",
-                            Vec2::new(108.0, HEADER_CONTROL_H),
-                            12.0,
-                            RADIUS_CONTROL,
-                            true,
-                            false,
-                            ButtonVariant::SecondaryOutline,
-                            pal,
-                        )
-                        .clicked()
-                        {
-                            let candidate = ui_state.new_container_path_input.clone();
-                            if draft
-                                .zones
-                                .add_explicit_zone(&candidate, ui_state.new_container_path_kind)
-                            {
-                                ui_state.new_container_path_input.clear();
-                                changed = true;
-                            }
-                        }
-                    });
-
-                    ui.label(
-                        RichText::new("Manual folder pins (override inference):")
-                            .size(11.5)
-                            .color(pal.muted),
-                    );
-                    if draft.zones.pins.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(SPACE_8);
-                            ui.label(
-                                RichText::new("No manual pins configured (App / Group / Personal / Ignore).")
-                                    .size(11.0)
-                                    .color(pal.subtle_text),
-                            );
-                        });
-                    } else {
-                        let mut remove_pin_idx: Option<usize> = None;
-                        for (idx, pin) in draft.zones.pins.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.add_space(SPACE_8);
-                                draw_truncated_text(
-                                    ui,
-                                    &pin.path,
-                                    FontId::new(11.5, FontFamily::Monospace),
-                                    pal.text,
-                                    false,
-                                );
-                                paint_chip(
-                                    ui,
-                                    pin.kind.label(),
-                                    pin_kind_chip_style(pin.kind),
-                                    pal.panel,
-                                );
-                                if draw_z_button(
-                                    ui,
-                                    "Remove",
-                                    Vec2::new(60.0, 22.0),
-                                    11.0,
-                                    RADIUS_CONTROL,
-                                    true,
-                                    false,
-                                    ButtonVariant::SubtleOutline,
-                                    pal,
-                                )
-                                .clicked()
-                                {
-                                    remove_pin_idx = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_pin_idx {
-                            if draft.zones.remove_pin(idx) {
-                                changed = true;
-                            }
-                        }
-                    }
-
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                        draw_crisp_text_input(
-                            ui,
-                            "zone_pin_input",
-                            &mut ui_state.new_pin_path_input,
-                            236.0,
-                            r"D:\Apps\CustomSuite or D:\Games\Orphan",
-                            pal.input_bg,
-                            pal,
-                        );
-                        for pk in [
-                            PinKind::App,
-                            PinKind::Group,
-                            PinKind::Personal,
-                            PinKind::Ignore,
-                        ] {
-                            let selected = ui_state.new_pin_kind == pk;
-                            if draw_filter_radio_chip(ui, pk.short_label(), selected, pal) {
-                                ui_state.new_pin_kind = pk;
-                            }
-                        }
-                        if draw_z_button(
-                            ui,
-                            "Pin folder",
-                            Vec2::new(92.0, HEADER_CONTROL_H),
-                            12.0,
-                            RADIUS_CONTROL,
-                            true,
-                            false,
-                            ButtonVariant::SecondaryOutline,
-                            pal,
-                        )
-                        .clicked()
-                        {
-                            let candidate = ui_state.new_pin_path_input.clone();
-                            if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
-                                ui_state.new_pin_path_input.clear();
-                                changed = true;
-                            }
-                        }
-                    });
-                },
-            );
-            if ui_state.settings_focus_containers {
-                ui.scroll_to_rect(rulebook_frame.response.rect, Some(Align::BOTTOM));
-                if rulebook_frame.response.rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
-                    ui_state.settings_focus_containers = false;
                 }
-            }
 
-            // About card repeating the WT header lockup (§6.4)
-            ui.add_space(SPACE_4);
-            draw_crisp_frame(
-                ui,
-                pal.panel,
-                pal.border,
-                RADIUS_PANEL,
-                Margin::symmetric(SPACE_12, SPACE_8),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), HEADER_CONTROL_H),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = SPACE_8;
-                            draw_wt_header_lockup(
-                                ui,
-                                &mut ui_state.wt_logo_tex,
-                                "y-storage",
-                                &format!(
-                                    "v{} · WT family read-only storage & dependency inspector",
-                                    env!("CARGO_PKG_VERSION")
-                                ),
-                                pal.muted,
-                                pal,
-                            );
-                        },
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                    draw_crisp_text_input(
+                        ui,
+                        "zone_path_input",
+                        &mut ui_state.new_container_path_input,
+                        236.0,
+                        r"D:\Media or D:\Work\PortableTools",
+                        pal.input_bg,
+                        pal,
                     );
-                },
-            );
-        });
+                    for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                        let selected = ui_state.new_container_path_kind == kind;
+                        if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
+                            ui_state.new_container_path_kind = kind;
+                        }
+                    }
+                    if draw_z_button(
+                        ui,
+                        "Add path zone",
+                        Vec2::new(108.0, 26.0),
+                        11.5,
+                        RADIUS_CONTROL,
+                        true,
+                        false,
+                        ButtonVariant::SecondaryOutline,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        let candidate = ui_state.new_container_path_input.clone();
+                        if draft
+                            .zones
+                            .add_explicit_zone(&candidate, ui_state.new_container_path_kind)
+                        {
+                            ui_state.new_container_path_input.clear();
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.label(
+                    RichText::new("Manual folder pins (override inference):")
+                        .size(11.0)
+                        .color(pal.muted),
+                );
+                if draft.zones.pins.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(SPACE_8);
+                        ui.label(
+                            RichText::new("No manual pins configured (App / Group / Personal / Ignore).")
+                                .size(10.5)
+                                .color(pal.subtle_text),
+                        );
+                    });
+                } else {
+                    let mut remove_pin_idx: Option<usize> = None;
+                    for (idx, pin) in draft.zones.pins.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                            ui.add_space(SPACE_8);
+                            draw_truncated_text(
+                                ui,
+                                &pin.path,
+                                FontId::new(11.0, FontFamily::Monospace),
+                                pal.text,
+                                false,
+                            );
+                            paint_chip(
+                                ui,
+                                pin.kind.label(),
+                                neutral_pin_style,
+                                pal.panel,
+                            );
+                            if draw_z_button(
+                                ui,
+                                "Remove",
+                                Vec2::new(56.0, 20.0),
+                                10.5,
+                                RADIUS_PILL,
+                                true,
+                                false,
+                                ButtonVariant::SubtleOutline,
+                                pal,
+                            )
+                            .clicked()
+                            {
+                                remove_pin_idx = Some(idx);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_pin_idx {
+                        if draft.zones.remove_pin(idx) {
+                            changed = true;
+                        }
+                    }
+                }
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                    draw_crisp_text_input(
+                        ui,
+                        "zone_pin_input",
+                        &mut ui_state.new_pin_path_input,
+                        236.0,
+                        r"D:\Apps\CustomSuite or D:\Games\Orphan",
+                        pal.input_bg,
+                        pal,
+                    );
+                    for pk in [
+                        PinKind::App,
+                        PinKind::Group,
+                        PinKind::Personal,
+                        PinKind::Ignore,
+                    ] {
+                        let selected = ui_state.new_pin_kind == pk;
+                        if draw_filter_radio_chip(ui, pk.short_label(), selected, pal) {
+                            ui_state.new_pin_kind = pk;
+                        }
+                    }
+                    if draw_z_button(
+                        ui,
+                        "Pin folder",
+                        Vec2::new(92.0, 26.0),
+                        11.5,
+                        RADIUS_CONTROL,
+                        true,
+                        false,
+                        ButtonVariant::SecondaryOutline,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        let candidate = ui_state.new_pin_path_input.clone();
+                        if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
+                            ui_state.new_pin_path_input.clear();
+                            changed = true;
+                        }
+                    }
+                });
+            },
+        );
+        if ui_state.settings_focus_containers {
+            ui.scroll_to_rect(rulebook_frame.response.rect, Some(Align::BOTTOM));
+            if rulebook_frame.response.rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
+                ui_state.settings_focus_containers = false;
+            }
+        }
+
+        // About card repeating the WT header lockup (§6.4)
+        ui.add_space(SPACE_4);
+        draw_crisp_frame(
+            ui,
+            pal.panel,
+            pal.border,
+            RADIUS_PANEL,
+            Margin::symmetric(SPACE_12, SPACE_8),
+            |ui| {
+                ui.set_width((scroll_w - SCROLL_GUTTER_W - SPACE_12 * 2.0 - 2.0).max(200.0));
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), HEADER_CONTROL_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        let _ = draw_wt_header_lockup(
+                            ui,
+                            &mut ui_state.wt_logo_tex,
+                            "y-storage",
+                            &format!(
+                                "v{} · WT family read-only storage & dependency inspector",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                            pal.muted,
+                            pal,
+                        );
+                    },
+                );
+            },
+        );
+    });
 
     if changed {
         emit(UiAction::SaveConfig(draft));
@@ -8134,7 +8324,7 @@ mod tests {
             (actual_h - expanded_estimate).abs() <= 1.0,
             "expected expanded height estimate {expanded_estimate} ~= actual {actual_h}"
         );
-        // Virtualization keeps per-frame shape count far below 262 full rows (~400+ shapes if unvirtualized).
+        // Virtualization keeps per-frame shape count bounded to visible rows (~270 shapes with "new" status pills vs >2,500 unvirtualized).
         let raw = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
             ..Default::default()
@@ -8151,7 +8341,7 @@ mod tests {
                 &mut |_| {},
             );
         });
-        assert!(out.shapes.len() < 260, "expected virtualized shape count < 260, got {}", out.shapes.len());
+        assert!(out.shapes.len() < 340, "expected virtualized shape count < 340, got {}", out.shapes.len());
     }
 
     #[test]
@@ -8849,5 +9039,114 @@ mod tests {
             },
         );
         assert!(!out.shapes.is_empty());
+    }
+
+    #[test]
+    fn growth_noise_floor_blanks_under_one_mb_and_uses_new_pill() {
+        let dark = ThemePalette::for_mode(ThemeMode::Dark);
+        let light = ThemePalette::for_mode(ThemeMode::Light);
+        assert_ne!(dark.status_amber, dark.status_red);
+        assert_ne!(light.status_amber, light.status_red);
+
+        let sub_pos = format_delta_display(GrowthDelta::Changed(614_810), &dark);
+        assert!(matches!(sub_pos.kind, DeltaCellKind::Blank));
+        assert!(sub_pos.tip.as_deref().is_some_and(|t| t.contains("614,810 bytes")));
+
+        let sub_neg = format_delta_display(GrowthDelta::Changed(-30_802), &dark);
+        assert!(matches!(sub_neg.kind, DeltaCellKind::Blank));
+        assert!(sub_neg.tip.as_deref().is_some_and(|t| t.contains("30,802 bytes")));
+
+        let at_floor = format_delta_display(GrowthDelta::Changed(1_048_576), &dark);
+        assert!(matches!(
+            at_floor.kind,
+            DeltaCellKind::SignedValue { ref text, .. } if text == "+1.00 MB"
+        ));
+
+        let is_new = format_delta_display(GrowthDelta::New(42), &dark);
+        assert!(matches!(is_new.kind, DeltaCellKind::NewPill));
+
+        let pod_colors = resolve_button_colors(
+            ButtonVariant::PodPrimaryOutline,
+            true,
+            false,
+            false,
+            false,
+            &dark,
+        );
+        assert_eq!(pod_colors.0, Color32::TRANSPARENT);
+        assert_eq!(pod_colors.1, dark.accent_line);
+        assert_eq!(pod_colors.2, dark.accent_line);
+
+        let dep_ctx = egui::Context::default();
+        configure_fonts_and_theme(&dep_ctx, ThemeMode::Dark);
+        let mut dep_capped = String::new();
+        let _ = dep_ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 120.0))),
+                ..Default::default()
+            },
+            |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    let (capped, trunc) = truncate_word_boundary_px(
+                        ui,
+                        "Microsoft Edge Elevation Service (MicrosoftEdgeElevationServiceExtraLongToken)",
+                        &FontId::new(12.0, FontFamily::Proportional),
+                        240.0,
+                    );
+                    assert!(trunc);
+                    dep_capped = capped;
+                });
+            },
+        );
+        assert_eq!(dep_capped, "Microsoft Edge Elevation Service…");
+    }
+
+    #[test]
+    fn ledger_clips_above_reconciliation_across_min_and_default_windows() {
+        let (mut report, cfg) = make_synthetic_report_for_drives(4);
+        for i in 0..80 {
+            report.unattributed.push(UnattributedItem {
+                path: format!(r"C:\Users\Win\AppData\Local\UnattribItem{i:03}"),
+                bytes: 50_000_000 - (i as u64) * 100_000,
+                zone_hint: None,
+                drive_letter: 'C',
+                is_loose_files: false,
+            });
+        }
+        for (w, h, budget) in [
+            (760.0_f32, 520.0_f32, Some(220.0_f32)),
+            (760.0_f32, 520.0_f32, Some(900.0_f32)),
+            (1020.0_f32, 720.0_f32, Some(280.0_f32)),
+            (1020.0_f32, 720.0_f32, Some(2000.0_f32)),
+        ] {
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let mut state = StorageUiState::default();
+            state.ledger_collapsed = false;
+            state.expand_unattributed = true;
+            state.ledger_height_px = budget;
+            state.scroll_ledger_bottom = true;
+            for _ in 0..2 {
+                let out = ctx.run(
+                    RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
+                        ..Default::default()
+                    },
+                    |c| {
+                        draw_app_ui(
+                            c,
+                            &mut state,
+                            &cfg,
+                            Some(&report),
+                            false,
+                            None,
+                            r"C:\Windows",
+                            &mut |_| {},
+                        );
+                    },
+                );
+                assert!(!out.shapes.is_empty());
+            }
+        }
     }
 }

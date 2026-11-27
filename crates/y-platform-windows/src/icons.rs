@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -7,14 +7,16 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::Shell::{ExtractIconExW, SHDefExtractIconW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+use y_core::dependencies::WindowsServiceEntry;
 use y_core::discovery::{
-    build_registry_catalog, normalize_app_token, normalize_path_key, normalize_windows_path,
-    path_drive_letter,
+    build_registry_catalog, contains_whole_token_sequence, normalize_app_token, normalize_path_key,
+    normalize_windows_path, path_drive_letter,
 };
-use y_core::model::{AttributedApp, CachedAppIcon, NoTouchCategory, ScanReport};
+use y_core::model::{AttributedApp, CachedAppIcon, NoTouchCategory, ScanReport, ZoneKind};
 
 use crate::paths::{expand_env_vars, to_wide_null};
 use crate::registry::{enumerate_uninstall_registry, read_steam_install_path};
+use crate::services::enumerate_windows_services;
 
 pub const APP_ICON_PX: u16 = 18;
 const EXTRACT_SRC_PX: u32 = 36;
@@ -46,7 +48,7 @@ impl Drop for DcGuard {
     }
 }
 
-/// Extracts and embeds `18x18` RGBA icons once per scan for registry applications.
+/// Extracts and embeds `18x18` RGBA icons once per scan from legitimate executables, service binaries, or MSIX logos.
 pub fn populate_report_icons(report: &mut ScanReport) {
     let needs_reg_lookup = report
         .apps
@@ -66,6 +68,8 @@ pub fn populate_report_icons(report: &mut ScanReport) {
         HashMap::new()
     };
 
+    let services = enumerate_windows_services();
+
     let excluded_drives: HashSet<char> = report
         .drives
         .iter()
@@ -75,13 +79,6 @@ pub fn populate_report_icons(report: &mut ScanReport) {
 
     let mut icon_cache: HashMap<(String, i32), Option<CachedAppIcon>> = HashMap::new();
     for app in &mut report.apps {
-        if !(app.id.starts_with("reg:")
-            || app.id.starts_with("steam:")
-            || app.id.starts_with("container:")
-            || app.id.starts_with("exe:"))
-        {
-            continue;
-        }
         if app.icon_rgba.is_some() {
             continue;
         }
@@ -94,16 +91,17 @@ pub fn populate_report_icons(report: &mut ScanReport) {
                 }
             }
         }
-        app.icon_rgba = extract_app_icon_cached(app, &excluded_drives, &mut icon_cache);
+        app.icon_rgba = extract_app_icon_cached(app, &services, &excluded_drives, &mut icon_cache);
     }
 }
 
 fn extract_app_icon_cached(
     app: &AttributedApp,
+    services: &[WindowsServiceEntry],
     excluded_drives: &HashSet<char>,
     cache: &mut HashMap<(String, i32), Option<CachedAppIcon>>,
 ) -> Option<CachedAppIcon> {
-    let candidates = collect_icon_candidates(app);
+    let candidates = collect_icon_candidates(app, services);
     for (path, icon_index) in candidates {
         if path_drive_letter(&path)
             .is_some_and(|dl| excluded_drives.contains(&dl.to_ascii_uppercase()))
@@ -127,35 +125,203 @@ fn extract_app_icon_cached(
     None
 }
 
-fn collect_icon_candidates(app: &AttributedApp) -> Vec<(String, i32)> {
+fn is_user_or_cache_folder(path: &str) -> bool {
+    let lower = normalize_path_key(path);
+    lower.contains("\\appdata\\")
+        || lower.contains("\\programdata\\package cache")
+        || lower.ends_with("\\temp")
+        || lower.contains("\\windows\\winsxs")
+        || lower.contains("\\windows\\installer")
+}
+
+fn match_service_binaries_for_app(
+    app: &AttributedApp,
+    services: &[WindowsServiceEntry],
+) -> Vec<String> {
+    let app_tok = normalize_app_token(&app.display_name);
+    let app_compact = app_tok.replace(' ', "");
+    let body_roots: Vec<String> = app
+        .install_location
+        .iter()
+        .chain(
+            app.items
+                .iter()
+                .filter(|it| it.zone == Some(ZoneKind::Body))
+                .map(|it| &it.path),
+        )
+        .map(|p| normalize_path_key(p))
+        .filter(|p| !p.is_empty() && !is_user_or_cache_folder(p))
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    for svc in services {
+        let img = normalize_windows_path(&svc.normalized_image_path);
+        if img.is_empty() || !img.to_ascii_lowercase().ends_with(".exe") {
+            continue;
+        }
+        let img_key = normalize_path_key(&img);
+        if img_key.contains("\\windows\\system32\\")
+            || img_key.contains("\\windows\\syswow64\\")
+            || !Path::new(&img).is_file()
+        {
+            continue;
+        }
+        let in_app_dir = body_roots
+            .iter()
+            .any(|r| img_key == *r || img_key.starts_with(&format!("{r}\\")));
+        let svc_tok = normalize_app_token(&svc.service_name);
+        let disp_tok = normalize_app_token(&svc.display_name);
+        let tok_match = !app_tok.is_empty()
+            && (svc_tok == app_tok
+                || disp_tok == app_tok
+                || (!app_compact.is_empty()
+                    && app_compact.len() >= 5
+                    && (svc_tok.replace(' ', "") == app_compact
+                        || disp_tok.replace(' ', "") == app_compact))
+                || (app_tok.len() >= 6
+                    && (contains_whole_token_sequence(&svc.display_name, &app_tok)
+                        || contains_whole_token_sequence(&svc.service_name, &app_tok))));
+        if in_app_dir || tok_match {
+            if !out.iter().any(|p| normalize_path_key(p) == img_key) {
+                out.push(img);
+            }
+        }
+    }
+    out
+}
+
+fn find_appx_logo_pngs(pkg_dir: &str) -> Vec<String> {
+    let manifest_path = Path::new(pkg_dir).join("AppxManifest.xml");
+    let Ok(xml) = std::fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
+    let Some(start) = xml.find("<Logo>") else {
+        return Vec::new();
+    };
+    let rest = &xml[start + 6..];
+    let Some(end) = rest.find("</Logo>") else {
+        return Vec::new();
+    };
+    let rel_logo = rest[..end].trim().trim_start_matches(['\\', '/']);
+    if rel_logo.is_empty() {
+        return Vec::new();
+    }
+    let rel_path = Path::new(pkg_dir).join(rel_logo);
+    let mut hits: Vec<(i32, String)> = Vec::new();
+    let push_if_png = |p: &Path, prio: i32, out: &mut Vec<(i32, String)>| {
+        if p.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+        {
+            let norm = normalize_windows_path(&p.to_string_lossy());
+            if !out.iter().any(|(_, existing)| normalize_path_key(existing) == normalize_path_key(&norm)) {
+                out.push((prio, norm));
+            }
+        }
+    };
+    push_if_png(&rel_path, 0, &mut hits);
+    if let (Some(parent), Some(stem), Some(ext)) = (
+        rel_path.parent(),
+        rel_path.file_stem().and_then(|s| s.to_str()),
+        rel_path.extension().and_then(|e| e.to_str()),
+    ) {
+        let stem_lower = stem.to_ascii_lowercase();
+        let ext_dot = format!(".{}", ext.to_ascii_lowercase());
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for ent in entries.flatten() {
+                let p = ent.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let fname = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if fname.starts_with(&stem_lower) && fname.ends_with(&ext_dot) {
+                    if fname.contains("contrast-white") || fname.contains("contrast-black") {
+                        continue;
+                    }
+                    let prio = if fname.contains("scale-200") {
+                        1
+                    } else if fname.contains("scale-150") {
+                        2
+                    } else if fname.contains("scale-125") {
+                        3
+                    } else if fname.contains("scale-100") {
+                        4
+                    } else {
+                        5
+                    };
+                    push_if_png(&p, prio, &mut hits);
+                }
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.into_iter().take(2).map(|(_, p)| p).collect()
+}
+
+fn collect_icon_candidates(
+    app: &AttributedApp,
+    services: &[WindowsServiceEntry],
+) -> Vec<(String, i32)> {
     let mut primary: Vec<(String, i32)> = Vec::new();
     let mut secondary: Vec<(String, i32)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push_unique = |target: &mut Vec<(String, i32)>, path: String, idx: i32| {
+        let k = format!("{}#{idx}", normalize_path_key(&path));
+        if seen.insert(k) {
+            target.push((path, idx));
+        }
+    };
 
     if let Some(raw_icon) = app.display_icon.as_deref() {
         if let Some((path, index)) = parse_display_icon_spec(raw_icon) {
             if !is_generic_shell_binary(&path) && Path::new(&path).is_file() {
                 if looks_like_uninstaller_or_setup(&path) {
-                    secondary.push((path, index));
+                    push_unique(&mut secondary, path, index);
                 } else {
-                    primary.push((path, index));
+                    push_unique(&mut primary, path, index);
                 }
             }
         }
     }
 
-    // Services without their own valid DisplayIcon stay neutral rather than grabbing helper tools.
-    let allow_folder_scan =
-        !matches!(app.no_touch, Some(NoTouchCategory::Service)) || !primary.is_empty();
-    if allow_folder_scan {
-        if let Some(install_root) = app.install_location.as_deref() {
-            for exe in find_best_exes_in_install_dir(install_root, &app.display_name) {
-                if !primary
-                    .iter()
-                    .any(|(p, _)| normalize_path_key(p) == normalize_path_key(&exe))
-                {
-                    primary.push((exe, 0));
+    for svc_exe in match_service_binaries_for_app(app, services) {
+        push_unique(&mut primary, svc_exe, 0);
+    }
+
+    // Collect non-AppData / non-cache binary search roots (InstallLocation + Body items).
+    // Services still keep a hard wall against scanning user AppData folders (e.g. `.minecraft` on Xbox Service).
+    let mut scan_roots: Vec<String> = Vec::new();
+    if let Some(install_root) = app.install_location.as_deref() {
+        if !is_user_or_cache_folder(install_root) {
+            scan_roots.push(install_root.to_string());
+        }
+    }
+    if !matches!(app.no_touch, Some(NoTouchCategory::Service)) {
+        for item in &app.items {
+            if item.zone == Some(ZoneKind::Body) && !is_user_or_cache_folder(&item.path) {
+                let k = normalize_path_key(&item.path);
+                if !scan_roots.iter().any(|r| normalize_path_key(r) == k) {
+                    scan_roots.push(item.path.clone());
                 }
             }
+        }
+    }
+
+    for root in &scan_roots {
+        for exe in find_best_exes_in_install_dir(root, &app.display_name) {
+            push_unique(&mut primary, exe, 0);
+        }
+    }
+
+    // Store / MSIX packages often keep PNG artwork declared in AppxManifest.xml <Logo> rather than Win32 RT_ICONs.
+    for root in &scan_roots {
+        for png_path in find_appx_logo_pngs(root) {
+            push_unique(&mut secondary, png_path, 0);
         }
     }
 
@@ -239,51 +405,54 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
         .filter(|w| w.len() >= 2)
         .collect();
 
-    let mut dirs_to_check = vec![root_path.to_path_buf()];
-    if let Ok(entries) = std::fs::read_dir(root_path) {
-        let mut subdirs = Vec::new();
-        for ent in entries.flatten() {
-            let Ok(ft) = ent.file_type() else { continue };
-            if ft.is_dir() && !ft.is_symlink() {
-                let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
-                if matches!(
-                    name.as_str(),
-                    "locales"
-                        | "resources"
-                        | "logs"
-                        | "cache"
-                        | "shaders"
-                        | "__installer"
-                        | "redist"
-                        | "support"
-                        | "directx"
-                        | "crashdumps"
-                        | "doc"
-                        | "docs"
-                ) {
-                    continue;
-                }
-                subdirs.push(ent.path());
-                if subdirs.len() >= 18 {
-                    break;
-                }
-            }
+    // BFS up to depth 4 (capped at 64 dirs) so launchers/UE games (`Portal\Binaries\Win64\...`)
+    // and versioned browser runtimes (`Application\<ver>\msedgewebview2.exe`) resolve cleanly.
+    let mut dirs_to_check: Vec<PathBuf> = Vec::new();
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+    queue.push_back((root_path.to_path_buf(), 0));
+    while let Some((dir, depth)) = queue.pop_front() {
+        dirs_to_check.push(dir.clone());
+        if dirs_to_check.len() >= 64 || depth >= 4 {
+            continue;
         }
-        // Check depth-2 common subdirs (`Binaries\Win64`, `app-x\...`) up to a strict cap.
-        for sub in &subdirs {
-            if let Ok(sub_entries) = std::fs::read_dir(sub) {
-                for ent in sub_entries.flatten() {
-                    let Ok(ft) = ent.file_type() else { continue };
-                    if ft.is_dir() && !ft.is_symlink() {
-                        let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
-                        if matches!(name.as_str(), "win64" | "x64" | "bin" | "binaries" | "game") {
-                            dirs_to_check.push(ent.path());
-                        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut children: Vec<PathBuf> = Vec::new();
+            for ent in entries.flatten() {
+                let Ok(ft) = ent.file_type() else { continue };
+                if ft.is_dir() && !ft.is_symlink() {
+                    let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
+                    if matches!(
+                        name.as_str(),
+                        "locales"
+                            | "resources"
+                            | "logs"
+                            | "cache"
+                            | "shaders"
+                            | "__installer"
+                            | "redist"
+                            | "support"
+                            | "directx"
+                            | "crashdumps"
+                            | "doc"
+                            | "docs"
+                            | "content"
+                            | "movies"
+                            | "paks"
+                            | "assets"
+                            | "node_modules"
+                            | "saved"
+                            | "intermediate"
+                    ) {
+                        continue;
                     }
+                    children.push(ent.path());
                 }
             }
+            children.sort();
+            for c in children.into_iter().take(20) {
+                queue.push_back((c, depth + 1));
+            }
         }
-        dirs_to_check.extend(subdirs);
     }
 
     let mut scored: Vec<(i32, u64, String)> = Vec::new();
@@ -368,7 +537,181 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
     scored.into_iter().take(4).map(|x| x.2).collect()
 }
 
+fn extract_png_via_gdiplus(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    #[repr(C)]
+    struct GdiplusStartupInput {
+        gdiplus_version: u32,
+        debug_event_callback: usize,
+        suppress_background_thread: i32,
+        suppress_external_codecs: i32,
+    }
+    #[repr(C)]
+    struct GpRect {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+    #[repr(C)]
+    struct BitmapData {
+        width: u32,
+        height: u32,
+        stride: i32,
+        pixel_format: i32,
+        scan0: *mut u8,
+        reserved: usize,
+    }
+    #[link(name = "gdiplus")]
+    unsafe extern "system" {
+        fn GdiplusStartup(
+            token: *mut usize,
+            input: *const GdiplusStartupInput,
+            output: *mut core::ffi::c_void,
+        ) -> i32;
+        fn GdipCreateBitmapFromFile(
+            filename: *const u16,
+            bitmap: *mut *mut core::ffi::c_void,
+        ) -> i32;
+        fn GdipGetImageWidth(image: *mut core::ffi::c_void, width: *mut u32) -> i32;
+        fn GdipGetImageHeight(image: *mut core::ffi::c_void, height: *mut u32) -> i32;
+        fn GdipBitmapLockBits(
+            bitmap: *mut core::ffi::c_void,
+            rect: *const GpRect,
+            flags: u32,
+            format: i32,
+            locked_bitmap_data: *mut BitmapData,
+        ) -> i32;
+        fn GdipBitmapUnlockBits(
+            bitmap: *mut core::ffi::c_void,
+            locked_bitmap_data: *mut BitmapData,
+        ) -> i32;
+    }
+    const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
+    const IMAGE_LOCK_MODE_READ: u32 = 1;
+
+    let mut token: usize = 0;
+    let input = GdiplusStartupInput {
+        gdiplus_version: 1,
+        debug_event_callback: 0,
+        suppress_background_thread: 0,
+        suppress_external_codecs: 0,
+    };
+    if unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) } != 0 || token == 0 {
+        return None;
+    }
+    struct GdipTokenGuard(usize);
+    impl Drop for GdipTokenGuard {
+        fn drop(&mut self) {
+            #[link(name = "gdiplus")]
+            unsafe extern "system" {
+                fn GdiplusShutdown(token: usize);
+            }
+            unsafe { GdiplusShutdown(self.0) };
+        }
+    }
+    let _token_guard = GdipTokenGuard(token);
+
+    let wide = to_wide_null(path);
+    let mut gp_bmp: *mut core::ffi::c_void = std::ptr::null_mut();
+    if unsafe { GdipCreateBitmapFromFile(wide.as_ptr(), &mut gp_bmp) } != 0 || gp_bmp.is_null() {
+        return None;
+    }
+    struct GdipImgGuard(*mut core::ffi::c_void);
+    impl Drop for GdipImgGuard {
+        fn drop(&mut self) {
+            #[link(name = "gdiplus")]
+            unsafe extern "system" {
+                fn GdipDisposeImage(image: *mut core::ffi::c_void) -> i32;
+            }
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = GdipDisposeImage(self.0);
+                }
+            }
+        }
+    }
+    let _img_guard = GdipImgGuard(gp_bmp);
+
+    let (mut w, mut h) = (0u32, 0u32);
+    if unsafe { GdipGetImageWidth(gp_bmp, &mut w) } != 0
+        || unsafe { GdipGetImageHeight(gp_bmp, &mut h) } != 0
+        || w == 0
+        || h == 0
+        || w > 1024
+        || h > 1024
+    {
+        return None;
+    }
+
+    let rect = GpRect {
+        x: 0,
+        y: 0,
+        width: w as i32,
+        height: h as i32,
+    };
+    let mut bd = BitmapData {
+        width: 0,
+        height: 0,
+        stride: 0,
+        pixel_format: 0,
+        scan0: std::ptr::null_mut(),
+        reserved: 0,
+    };
+    if unsafe {
+        GdipBitmapLockBits(
+            gp_bmp,
+            &rect,
+            IMAGE_LOCK_MODE_READ,
+            PIXEL_FORMAT_32BPP_ARGB,
+            &mut bd,
+        )
+    } != 0
+        || bd.scan0.is_null()
+    {
+        return None;
+    }
+
+    let uw = w as usize;
+    let uh = h as usize;
+    let mut rgba = Vec::with_capacity(uw * uh * 4);
+    for y in 0..uh {
+        let row_ptr = unsafe { bd.scan0.offset((y as isize) * (bd.stride as isize)) };
+        let row = unsafe { std::slice::from_raw_parts(row_ptr, uw * 4) };
+        for px in row.chunks_exact(4) {
+            rgba.push(px[2]);
+            rgba.push(px[1]);
+            rgba.push(px[0]);
+            rgba.push(px[3]);
+        }
+    }
+    unsafe {
+        let _ = GdipBitmapUnlockBits(gp_bmp, &mut bd);
+    }
+    Some((uw, uh, rgba))
+}
+
 fn extract_icon_from_file(path: &str, icon_index: i32) -> Option<CachedAppIcon> {
+    if path
+        .rsplit('.')
+        .next()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+    {
+        let (src_w, src_h, src_rgba) = extract_png_via_gdiplus(path)?;
+        if !src_rgba.chunks_exact(4).any(|px| px[3] >= 24) {
+            return None;
+        }
+        let target = APP_ICON_PX as usize;
+        let out_rgba = if src_w == target && src_h == target {
+            src_rgba
+        } else {
+            downsample_rgba_box(&src_rgba, src_w, src_h, target, target)
+        };
+        if !out_rgba.chunks_exact(4).any(|px| px[3] >= 24) {
+            return None;
+        }
+        return Some(CachedAppIcon::from_rgba(APP_ICON_PX, APP_ICON_PX, &out_rgba));
+    }
+
     let wide = to_wide_null(path);
 
     let mut hicon: HICON = std::ptr::null_mut();
