@@ -114,3 +114,45 @@
 | `Y:\Apps\ArtCraft` (`PublisherProduct`) | `ArtCraft` (`545,911,230 B`) | `PhotoCraft` (`295.4 MB`) + `FilmCraft` (`224.0 MB`) + `ArtCraft Launcher` (`26.5 MB`) | PASS |
 | Literal `[files]` / `[root files]` tags | `23` | **`0`** (`4drive`) / **`0`** (`c_only`) | PASS |
 | Reconciliation `diff` (`C:`, `D:`, `Y:`, `Z:`) | `0 B` each | **`0 B` each** (`C:` `c_only` also `0 B`) | PASS |
+
+
+---
+
+## App-Count Bridge (`270 → 269` Default `C:`-Only Smoke & `270 → 272 → 298 → 299` 4-Drive)
+
+### Why `--smoke-gui-ms 500` Reports `269` Instead of Including Secondary-Drive Promotions
+
+- `--smoke-gui-ms 500` loads `%LOCALAPPDATA%\y-storage\last_scan.json`, which reflects the user's persisted **`C:`-only default scope** (`C:` `enabled = true`; `D:`, `Y:`, `Z:` `enabled = false`).
+- Under `drive-scope-coverage-1` FIX 7(b) (*Scope Honesty*), excluded drives (`D:`, `Y:`, `Z:`) are never walked or sized, so secondary-drive-only apps (**`DBSZ v3022.021.003.012.015`** on `D:\`, **`DS Awakening v1.1.1`** on `Z:\`, **`Lossless Scaling v3.2.2`** on `Z:\`, **`Sid Meier's Civilization VI`** on `D:\`) appear in the **4-drive scan (`299` apps)** and are intentionally omitted from the **`C:`-only scan (`269` apps)**.
+
+### Exact Row-by-Row Bridge on Default `C:`-Only Scope (`270 → 267 → 269`)
+
+| Stage / Transition | Delta | Exact Apps & Reason |
+|---|---:|---|
+| Pre-round `C:` baseline (`ad61871`, `substring-matcher-fix`) | `270` | Registered `InstallLocation` folders on `D:` / `Z:` were still sized and listed before FIX 7(b). |
+| Disappeared in `d348e97` (`drive-scope-coverage-1` FIX 7(b) Scope Honesty) | **`-3`** | **`CPM 2`** (`D:\Games\Steam\steamapps\common\CPM2`, `5,456,917,328 B` — `0 B` on `C:`) · **`EA SPORTS™ FIFA 23`** (`D:\Games\Steam\steamapps\common\FIFA 23`, `51,372,195,955 B` pre-hardlink / `107,199,710,486 B` walked — `0 B` on `C:`) · **`Slay the Spire 2`** (`Z:\Games\Steam\steamapps\common\Slay the Spire 2`, `3,168,269,485 B` — `0 B` on `C:`). Omitted because `D:` and `Z:` are excluded. |
+| Post-`drive-scope-coverage-1` `C:`-only (`d348e97`) | `267` | Verified in `smoke_fix789.json` (`apps_count = 267`). |
+| Appeared in `859ee90` (`attribution-engine-2` Part B(5) executable inference) | **`+2`** | **`LightingService`** (`C:\Program Files (x86)\LightingService`, `14,227,636 B`, `ExecutableScan`) · **`NVIDIA Container`** (`C:\Program Files\NVIDIA Corporation\NvContainer`, `2,960,096 B`, `ExecutableScan` under group node `C:\Program Files\NVIDIA Corporation`). Both promoted from `C:\` `Unattributed`. |
+| Merged / Renamed on `C:` | `0` | None. |
+| **Post-`attribution-engine-2` `C:`-only / `--smoke-gui-ms 500` (`859ee90`)** | **`269`** | **`270 − 3 + 2 = 269` apps** (**0 unexplained delta**). |
+
+### Exact Row-by-Row Bridge on Full 4-Drive Scope (`270 → 272 → 298 → 299`)
+
+1. **`270` (`ad61871` `C:`-only) → `272` (pre-FIX-6 4-drive baseline, `+2` rows walked on `D:\`)**:
+   - `+` **`Grand Theft Auto V Enhanced`** (`D:\Games\Grand Theft Auto V Enhanced`) — matched when `D:\` was walked.
+   - `+` **`My dream setup`** (`D:\Games\Steam\steamapps\common\My dream setup`) — matched when `D:\` was walked.
+
+2. **`272` → `298` (`d348e97`, `drive-scope-coverage-1` FIX 6, `+26` rows promoted on `D:\` / `Y:\` / `Z:\`, `0` removed)**:
+   - **Appeared via `ContainerRule` (`+24`)**: `AdeptiScanner` (`Z:\Softwares\AdeptiScanner`), `ArtCraft` (`Y:\Apps\ArtCraft`), `Aseprite v1.3` (`D:\Softwares\Aseprite.v1.3`), `Aseprite v1.3.5-dev` (`Z:\Softwares\Aseprite.v1.3.5-dev`), `BCUninstaller 6.3.0 net8.0-windows10.0.18362.0` (`Z:\Softwares\BCUninstaller_6.3.0_net8.0-windows10.0.18362.0`), `BetterJoy v7.1` (`Z:\Softwares\BetterJoy_v7.1`), `Blockbench` (`D:\Softwares\Blockbench`), **`DBSZ v3022.021.003.012.015`** (`D:\Games\DBSZ.v3022.021.003.012.015_LinkNeverDie.Com`), **`DS Awakening v1.1.1`** (`Z:\Games\DS.Awakening.v1.1.1_LinkNeverDie.Com`), **`Epic`** (`D:\Games\Epic`), `FIFA Mod Manager v2.2.2` (`D:\Games\FIFA Mod Manager v2.2.2`), `FurMark win64` (`Z:\Softwares\FurMark_win64`), `GHelper` (`Z:\Softwares\GHelper`), `Genshin Tools` (`Z:\Games\Genshin Tools`), **`Lossless Scaling v3.2.2`** (`Z:\Games\Lossless.Scaling.v3.2.2_LinkNeverDie.Com`), `Minecraft` (`D:\Games\Minecraft`), `PortableGit` (`Y:\Apps\PortableGit`), `Rust` (`Y:\Apps\Rust`), `TranslucentTB-portable-x64` (`Y:\Apps\TranslucentTB-portable-x64`), `aida64extreme840` (`Z:\Softwares\aida64extreme840`), `cpu-z 3.01-en` (`Z:\Softwares\cpu-z_3.01-en`), `nodejs` (`Y:\Apps\nodejs`), `y-storage` (`Y:\Apps\y-storage`), `z-controller` (`Y:\Apps\z-controller`).
+   - **Appeared via Steam `appmanifest_*.acf` (`+2`)**: `Spacewar` (`Z:\Games\Steam\steamapps\common\Spacewar`), `Steamworks Common Redistributables` (`Z:\Games\Steam\steamapps\common\Steamworks Shared`).
+   - **Subtotal**: **`272 + 24 + 2 = 298` apps**.
+
+3. **`298` (`before_ae2_4drive.json`, `d348e97`) → `299` (`after_ae2_4drive.json`, `859ee90`, net `+1` row)**:
+   - **Replaced 1-for-1 (`-1` / `+1`, net `0`)**:
+     - `-` **`Epic`** (`D:\Games\Epic`, `19,670,833,651 B`, `ContainerRule`) → `+` **`Sid Meier's Civilization VI`** (`D:\Games\Epic\SidMeiersCivilizationVI`, `19,670,833,651 B`, Epic `.item` manifest; `Civilization VI : Aztec DLC` excluded).
+   - **Merged into existing rows (`-1` row)**:
+     - `-` **`ArtCraft`** (`Y:\Apps\ArtCraft`, `545,911,230 B`, `ContainerRule`) — publisher folder split and **merged into 3 already-present app rows** that previously held only `C:\Users\Win\AppData\...` folders: **`PhotoCraft`** (`334,175 B` → `295,710,886 B`), **`FilmCraft`** (`3,995 B` → `224,034,289 B`), and **`ArtCraft Launcher`** (`1,964,985 B` → `28,469,210 B` via `PublisherProduct`).
+   - **Appeared (`+2` rows)**:
+     - `+` **`LightingService`** (`C:\Program Files (x86)\LightingService`, `14,227,636 B`, `ExecutableScan`) — promoted from `Unattributed`.
+     - `+` **`NVIDIA Container`** (`C:\Program Files\NVIDIA Corporation\NvContainer`, `2,960,096 B`, `ExecutableScan`) — promoted from `Unattributed`.
+   - **Reconciliation**: **`298 − 1 + 1 − 1 + 2 = 299` apps** (**0 unexplained delta**).
