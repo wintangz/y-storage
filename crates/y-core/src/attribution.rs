@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::config::{ContainerRulebook, PinKind, ZoneRulebook};
+use crate::dependencies::WindowsServiceEntry;
 use crate::discovery::{
-    AppTokenMatchKind, contains_whole_token_sequence, extract_guid, is_subpath_of,
+    AppTokenMatchKind, contains_whole_token_sequence, extract_guid,
+    has_windows_service_registration_evidence, is_subpath_of, match_adobe_product_subfolder,
     match_app_predicate, normalize_app_token, normalize_path_key, path_drive_letter,
     split_alnum_words, versioned_family_identity_key,
 };
@@ -28,6 +30,7 @@ pub struct AttributionOptions<'a> {
     pub manifest_entries: &'a [ManifestAppEntry],
     pub steam_library_roots: &'a [String],
     pub root_exe_candidates: Option<&'a HashMap<String, RootExeCandidate>>,
+    pub services: &'a [WindowsServiceEntry],
 }
 
 struct AppBucket {
@@ -80,11 +83,23 @@ pub fn attribute_scan_with_options(
     let mut buckets: Vec<AppBucket> = installed_apps
         .iter()
         .cloned()
-        .map(|app| AppBucket {
-            app,
-            bases: Vec::new(),
-            items: Vec::new(),
-            total_bytes: 0,
+        .map(|mut app| {
+            if app.no_touch.is_none()
+                && !options.services.is_empty()
+                && has_windows_service_registration_evidence(
+                    &app.display_name,
+                    &app.all_install_locations,
+                    options.services,
+                )
+            {
+                app.no_touch = Some(NoTouchCategory::Service);
+            }
+            AppBucket {
+                app,
+                bases: Vec::new(),
+                items: Vec::new(),
+                total_bytes: 0,
+            }
         })
         .collect();
 
@@ -580,6 +595,31 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
+        // Part E: Adobe shared containers (`Common Files\Adobe`, `AppData\*\Adobe`, `com.adobe.dunamis`)
+        // attribute product-named subfolders to their installed Adobe product app and route unidentifiable
+        // residue to a genuinely registered Creative Cloud app or the family label `"Adobe (shared data)"`.
+        if let Some((idx, is_install_override)) =
+            resolve_adobe_shared_path(&mut buckets, &mut store_buckets, &path_lower, false)
+        {
+            let (zone, qual) = classify_zone(&unit.path, is_install_override);
+            let nt = buckets[idx].app.no_touch;
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(zone),
+                    qualifier: qual,
+                    basis: Some(AttributionBasis::Token),
+                    basis_detail: None,
+                    no_touch: nt,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::Token,
+            );
+            continue;
+        }
+
         // Step (4): Two-Segment Publisher\Product Composition BEFORE leaf-only matching.
         match find_by_two_segment_composition(&buckets, &unit.path) {
             TwoSegmentMatch::Unique(idx) => {
@@ -938,6 +978,30 @@ pub fn attribute_scan_with_options(
     for app in installed_apps {
         if !installed_registry_names.contains(&app.display_name) {
             installed_registry_names.push(app.display_name.clone());
+        }
+    }
+
+    // Part F: Verify Windows service registration evidence for folder-only/inferred apps after their items land.
+    if !options.services.is_empty() {
+        for b in &mut buckets {
+            if b.app.no_touch.is_none() && b.total_bytes > 0 {
+                let mut locs = b.app.all_install_locations.clone();
+                for it in &b.items {
+                    if it.zone == Some(ZoneKind::Body) {
+                        locs.push(it.path.clone());
+                    }
+                }
+                if has_windows_service_registration_evidence(
+                    &b.app.display_name,
+                    &locs,
+                    options.services,
+                ) {
+                    b.app.no_touch = Some(NoTouchCategory::Service);
+                    for it in &mut b.items {
+                        it.no_touch = Some(NoTouchCategory::Service);
+                    }
+                }
+            }
         }
     }
 
@@ -2134,6 +2198,79 @@ fn find_best_versioned_bucket(
     best.map(|(i, _, _)| i)
 }
 
+fn resolve_adobe_shared_path(
+    buckets: &mut Vec<AppBucket>,
+    store_buckets: &mut HashMap<String, usize>,
+    path_lower: &str,
+    is_loose: bool,
+) -> Option<(usize, bool)> {
+    const ADOBE_ROOT_MARKERS: &[&str] = &[
+        "\\common files\\adobe",
+        "\\appdata\\roaming\\adobe",
+        "\\appdata\\local\\adobe",
+        "\\appdata\\locallow\\adobe",
+    ];
+    let is_dunamis = path_matches_token(path_lower, "", "\\appdata\\roaming\\com.adobe.dunamis");
+    let matched_marker = ADOBE_ROOT_MARKERS
+        .iter()
+        .find(|m| path_matches_token(path_lower, "", m));
+    if !is_dunamis && matched_marker.is_none() {
+        return None;
+    }
+
+    if !is_loose {
+        if let Some(marker) = matched_marker {
+            let with_slash = format!("{marker}\\");
+            if let Some(pos) = path_lower.find(&with_slash) {
+                let rest = &path_lower[pos + with_slash.len()..];
+                let child_seg = rest.split('\\').next().unwrap_or("").trim();
+                if !child_seg.is_empty() {
+                    let mut exact_hits = Vec::new();
+                    let mut slice_hits = Vec::new();
+                    for (i, b) in buckets.iter().enumerate() {
+                        match match_adobe_product_subfolder(&b.app, child_seg) {
+                            Some(AppTokenMatchKind::ExactFullToken) => exact_hits.push(i),
+                            Some(AppTokenMatchKind::WholeWordSlice) => slice_hits.push(i),
+                            None => {}
+                        }
+                    }
+                    let winner = if !exact_hits.is_empty() {
+                        exact_hits
+                    } else {
+                        slice_hits
+                    };
+                    if winner.len() == 1 {
+                        return Some((winner[0], false));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(cc_idx) = buckets.iter().position(|b| {
+        !b.app.is_store_fallback
+            && !b.app.id.starts_with("app:")
+            && (match_app_predicate(&b.app.display_name, "adobe creative cloud").is_some()
+                || b.app
+                    .aliases
+                    .iter()
+                    .any(|al| match_app_predicate(al, "adobe creative cloud").is_some()))
+    }) {
+        return Some((cc_idx, false));
+    }
+
+    let idx = ensure_synthetic_app(
+        buckets,
+        store_buckets,
+        "app:adobe-shared-data",
+        "Adobe (shared data)",
+        "Adobe Inc.",
+        None,
+        false,
+    );
+    Some((idx, false))
+}
+
 fn find_by_token(
     buckets: &mut Vec<AppBucket>,
     store_buckets: &mut HashMap<String, usize>,
@@ -2251,13 +2388,23 @@ fn find_by_token(
                             return Some((idx, false));
                         }
                     }
-                    // Route to matching major .NET SDK version (7.* vs 10.*, mapping MSI v56.* -> 7, v80.*/v81.* -> 10).
+                    // Route to matching major .NET SDK version.
+                    // Encoding basis for Microsoft's WiX MSI ProductVersion (major byte fits in 0..=255):
+                    // - SDK Toolset & Templates MSIs (dotnet/installer, dotnet/templating): MSI_Major = DotNet_Major * 4 + DotNet_Minor
+                    //   -> v28.* = 7.0 SDK (7 * 4), v40.* = 10.0 SDK (10 * 4).
+                    // - Runtime / Host / Targeting / ASP.NET Core MSIs (dotnet/runtime, dotnet/aspnetcore):
+                    //   MSI_Major = DotNet_Major * 8 + DotNet_Minor, MSI_Minor = Patch * 4
+                    //   -> v48.* = 6.0, v56.* = 7.0, v64.* = 8.0, v80.* = 10.0.
+                    // - SDK Workload Manifest MSIs (dotnet/emsdk, Mono toolchain): MSI_Major = DotNet_Major * 8 + 1
+                    //   -> v81.200.* = .NET SDK 10.0.100 workload manifests (even when the bundle targets net6/net7!).
+                    // Always evaluate explicit product versions (e.g. Manifest-10.0.100) and MSI major codes
+                    // BEFORE generic TFM substrings (net6/net7) so net6/net7 workload packs for .NET SDK 10 route to SDK 10.
                     let inferred_sdk_ver: Option<String> = named_ver
                         .as_deref()
                         .and_then(|v| {
-                            if v.starts_with("6.") || v.starts_with("7.") || an_lower.contains("net6") || an_lower.contains("net7") {
+                            if v.starts_with("6.") || v.starts_with("7.") {
                                 Some("7.0.0".to_string())
-                            } else if v.starts_with("10.") || v.starts_with("26.") || an_lower.contains("net10") || an_lower.contains("net8") || an_lower.contains("net9") {
+                            } else if v.starts_with("10.") || v.starts_with("26.") || v.starts_with("36.") {
                                 Some("10.0.0".to_string())
                             } else {
                                 None
@@ -2274,6 +2421,15 @@ fn find_by_token(
                                     None
                                 }
                             })
+                        })
+                        .or_else(|| {
+                            if an_lower.contains("net6") || an_lower.contains("net7") {
+                                Some("7.0.0".to_string())
+                            } else if an_lower.contains("net8") || an_lower.contains("net9") || an_lower.contains("net10") {
+                                Some("10.0.0".to_string())
+                            } else {
+                                None
+                            }
                         });
                     if let Some(idx) = find_best_versioned_bucket(
                         buckets,
@@ -2612,20 +2768,6 @@ fn find_by_token(
             false,
         ),
         (
-            &[
-                "\\common files\\adobe",
-                "\\appdata\\roaming\\adobe",
-                "\\appdata\\local\\adobe",
-                "\\appdata\\locallow\\adobe",
-                "\\appdata\\roaming\\com.adobe.dunamis",
-            ],
-            &["adobe creative cloud", "adobe acrobat"],
-            "app:adobe-creative-cloud",
-            "Adobe Creative Cloud",
-            "Adobe Inc.",
-            false,
-        ),
-        (
             &["\\colossal order\\cities skylines ii"],
             &["cities: skylines ii", "cities skylines ii"],
             "app:cities-skylines-ii",
@@ -2664,6 +2806,13 @@ fn find_by_token(
             );
             return Some((idx, *is_body));
         }
+    }
+
+    // Adobe shared container loose files / dunamis telemetry resolve to Creative Cloud (if registered) or family pool.
+    if let Some((idx, is_body)) =
+        resolve_adobe_shared_path(buckets, store_buckets, path_lower, true)
+    {
+        return Some((idx, is_body));
     }
 
     // EdgeWebView2 Runtime when SystemComponent=1 filtered it out of canonical registry apps.
@@ -3147,6 +3296,11 @@ fn attribute_store_package(
         || lower.starts_with("microsoft.bioenrollment")
         || lower.starts_with("microsoft.lockapp")
         || lower.starts_with("windows.")
+        // Inbox C:\Windows\SystemApps\* packages whose AppxManifest.xml <Identity Name> is a GUID:
+        // - 1527c705-839a-4832-9118-54d4bd6a0c89 -> Microsoft.Windows.FilePicker_cw5n1h2txyewy
+        // - c5e2524a-ea46-4f67-841f-6a9465d9d515 -> Microsoft.Windows.FileExplorer_cw5n1h2txyewy
+        // - e2a4f912-2574-4a75-9bb0-0d023378592b -> Microsoft.Windows.AppResolverUX_cw5n1h2txyewy
+        // - f46d4000-fd22-4db4-ac8e-4e1ddde828fe -> Microsoft.Windows.AddSuggestedFoldersToLibraryDialog_cw5n1h2txyewy
         || lower.starts_with("1527c705-")
         || lower.starts_with("c5e2524a-")
         || lower.starts_with("e2a4f912-")

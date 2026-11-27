@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::attribution::RootExeCandidate;
 use crate::config::{ContainerRulebook, PinKind, ZoneRulebook};
 use crate::discovery::{
-    is_subpath_of, normalize_app_token, normalize_path_key, path_drive_letter, split_alnum_words,
+    AppTokenMatchKind, is_adobe_product_app, is_subpath_of, match_adobe_product_subfolder,
+    normalize_app_token, normalize_path_key, path_drive_letter, split_alnum_words,
 };
 use crate::model::{FolderNode, InstalledApp, ManifestAppEntry, ScannedUnit, ScannedUnitKind};
 
@@ -147,6 +148,7 @@ struct ClaimIndex {
     all_claim_keys: Vec<String>,
     installed_composed_names: HashSet<Vec<String>>,
     installed_exact_tokens: HashSet<String>,
+    adobe_product_apps: Vec<InstalledApp>,
 }
 
 impl ClaimIndex {
@@ -228,7 +230,26 @@ impl ClaimIndex {
             all_claim_keys: key_set.into_iter().collect(),
             installed_composed_names,
             installed_exact_tokens,
+            adobe_product_apps: apps
+                .iter()
+                .filter(|app| is_adobe_product_app(app))
+                .cloned()
+                .collect(),
         }
+    }
+
+    fn has_adobe_product_child(&self, node: &FolderNode) -> bool {
+        if self.adobe_product_apps.is_empty() {
+            return false;
+        }
+        node.children.iter().any(|ch| {
+            self.adobe_product_apps.iter().any(|app| {
+                matches!(
+                    match_adobe_product_subfolder(app, &ch.name),
+                    Some(AppTokenMatchKind::ExactFullToken | AppTokenMatchKind::WholeWordSlice)
+                )
+            })
+        })
     }
 
     fn has_own_app_claim(&self, node: &FolderNode, pk: &str) -> bool {
@@ -534,6 +555,14 @@ fn carve_inside_personal(
     let _ = pk;
 }
 
+fn is_adobe_shared_container_key(pk: &str) -> bool {
+    let trimmed = pk.trim_end_matches('\\');
+    trimmed.ends_with("\\common files\\adobe")
+        || trimmed.ends_with("\\appdata\\roaming\\adobe")
+        || trimmed.ends_with("\\appdata\\local\\adobe")
+        || trimmed.ends_with("\\appdata\\locallow\\adobe")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit_node(
     node: &FolderNode,
@@ -585,6 +614,7 @@ fn visit_node(
     let must_split = !node.children.is_empty()
         && (claims.has_strict_nested_claim(&pk)
             || is_structural_container_dir(&node.path, &pk, zones, manifest_containers)
+            || (is_adobe_shared_container_key(&pk) && claims.has_adobe_product_child(node))
             || claims.should_split_for_two_segment(node, &pk)
             || should_split_for_inference(node, &pk, zones, claims, opts));
 

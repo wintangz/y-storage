@@ -25,7 +25,7 @@ use y_core::dependencies::{
     parse_epic_manifest_item, parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf,
 };
 use y_core::discovery::{
-    build_registry_catalog, is_subpath_of, normalize_app_token, normalize_path_key,
+    build_registry_catalog_with_services, is_subpath_of, normalize_app_token, normalize_path_key,
     normalize_windows_path, path_drive_letter,
 };
 use y_core::history::{HistoryEntryRef, ScanHistory, recompute_report_growth_from_history};
@@ -1339,6 +1339,7 @@ pub fn execute_scoped_fixture_scan_for_test(
             manifest_entries: &[],
             steam_library_roots: &[],
             root_exe_candidates: None,
+            services: &[],
         },
     );
     (report, walked_letters)
@@ -1408,7 +1409,8 @@ fn execute_scan_internal(
 
     let raw_reg = enumerate_uninstall_registry();
     let steam_path = read_steam_install_path();
-    let mut catalog = build_registry_catalog(&raw_reg, steam_path.as_deref());
+    let services = crate::services::enumerate_windows_services();
+    let mut catalog = build_registry_catalog_with_services(&raw_reg, steam_path.as_deref(), &services);
     let shell_folders = resolve_effective_shell_folders(&drives, &config.zones);
     let shell_keys: HashSet<String> = shell_folders
         .iter()
@@ -1538,6 +1540,7 @@ fn execute_scan_internal(
         manifest_entries: &manifest_entries,
         steam_library_roots: &steam_lib_roots,
         root_exe_candidates: Some(&root_exe_candidates),
+        services: &services,
     };
     let mut report = attribute_scan_with_options(
         ts_unix,

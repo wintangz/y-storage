@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
+use crate::dependencies::WindowsServiceEntry;
 use crate::model::{InstalledApp, NoTouchCategory, RawRegistryApp, RegistryDiscoveryStats};
 
 pub struct RegistryCatalog {
@@ -182,9 +183,8 @@ pub fn extract_guid(input: &str) -> Option<String> {
 }
 
 #[must_use]
-pub fn classify_no_touch(display_name: &str, publisher: &str) -> Option<NoTouchCategory> {
+pub fn classify_no_touch(display_name: &str, _publisher: &str) -> Option<NoTouchCategory> {
     let n = display_name.to_ascii_lowercase();
-    let p = publisher.to_ascii_lowercase();
 
     if n.contains("anticheat")
         || n.contains("anti-cheat")
@@ -226,20 +226,196 @@ pub fn classify_no_touch(display_name: &str, publisher: &str) -> Option<NoTouchC
         return Some(NoTouchCategory::SystemRuntime);
     }
 
-    if n.ends_with(" service")
+    // Curated OS/hardware companion services without requiring SCM lookup in unit tests.
+    // Arbitrary "<App> Service" name suffixes require real Windows service registration evidence.
+    if n.contains("xbox service")
         || n.contains("framework service")
+        || n.contains("armoury crate service")
         || n.contains("gamesdk service")
         || n.contains("rog live service")
-        || n.contains("xbox service")
-        || n.contains("update health tools")
         || n.contains("aura service")
         || n.contains("aura lighting effect")
-        || (p.contains("asus") && (n.contains("service") || n.contains("lighting")))
+        || n.contains("update health tools")
     {
         return Some(NoTouchCategory::Service);
     }
 
     None
+}
+
+/// Returns `true` when SCM / driver registry evidence proves the app itself IS a Windows service or driver,
+/// without misclassifying desktop GUI applications (Chrome, Edge, TeamViewer, etc.) that merely bundle a helper service.
+#[must_use]
+pub fn has_windows_service_registration_evidence(
+    display_name: &str,
+    install_locations: &[String],
+    services: &[WindowsServiceEntry],
+) -> bool {
+    if services.is_empty() {
+        return false;
+    }
+    let app_words = split_alnum_words(display_name);
+    let app_compact: String = app_words.concat();
+    if app_compact.len() < 3 {
+        return false;
+    }
+    let app_declares_service_role = app_words
+        .iter()
+        .any(|w| matches!(w.as_str(), "service" | "services" | "svc") || w.ends_with("service"));
+    let loc_keys: Vec<String> = install_locations
+        .iter()
+        .map(|p| normalize_path_key(p))
+        .filter(|k| k.len() > 3)
+        .collect();
+
+    for svc in services {
+        let img_key = normalize_path_key(&svc.normalized_image_path);
+        let img_in_app_loc = !loc_keys.is_empty()
+            && !img_key.is_empty()
+            && !img_key.contains("\\windows\\system32\\")
+            && !img_key.contains("\\windows\\syswow64\\")
+            && loc_keys.iter().any(|lk| is_subpath_of(&img_key, lk));
+        let svc_name_words = split_alnum_words(&svc.service_name);
+        let svc_disp_words = if svc.display_name.trim_start().starts_with('@') {
+            Vec::new()
+        } else {
+            split_alnum_words(&svc.display_name)
+        };
+        let name_matches_svc = (!svc_name_words.is_empty() && svc_name_words == app_words)
+            || (!svc_disp_words.is_empty() && svc_disp_words == app_words);
+
+        let img_leaf = img_key.rsplit('\\').next().unwrap_or("");
+        let img_stem = img_leaf
+            .strip_suffix(".exe")
+            .or_else(|| img_leaf.strip_suffix(".sys"))
+            .unwrap_or(img_leaf);
+        let img_stem_compact: String = split_alnum_words(img_stem).concat();
+
+        let is_driver = (svc.service_type & 0x03) != 0;
+        let is_win32_svc = (svc.service_type & 0x30) != 0;
+        if is_driver && (name_matches_svc || img_in_app_loc) {
+            return true;
+        }
+        if is_win32_svc {
+            if (img_in_app_loc || name_matches_svc)
+                && !img_stem_compact.is_empty()
+                && img_stem_compact == app_compact
+            {
+                return true;
+            }
+            if app_declares_service_role && (name_matches_svc || img_in_app_loc) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[must_use]
+pub fn classify_no_touch_with_services(
+    display_name: &str,
+    publisher: &str,
+    install_locations: &[String],
+    services: &[WindowsServiceEntry],
+) -> Option<NoTouchCategory> {
+    classify_no_touch(display_name, publisher).or_else(|| {
+        has_windows_service_registration_evidence(display_name, install_locations, services)
+            .then_some(NoTouchCategory::Service)
+    })
+}
+
+fn is_known_adobe_shared_infra_folder(sub_lower: &str) -> bool {
+    matches!(
+        sub_lower,
+        "uxp"
+            | "cep"
+            | "color"
+            | "common"
+            | "oobe"
+            | "caps"
+            | "vulcan"
+            | "slcache"
+            | "sonar"
+            | "webview2"
+            | "ngl"
+            | "crlogs"
+            | "linguistics"
+            | "typesupport"
+            | "licflags"
+            | "typequest"
+            | "ccx welcome"
+            | "adobe desktop common"
+            | "adobe pcd"
+            | "coresyncextension"
+            | "installers"
+            | "creative cloud libraries"
+            | "cameraraw"
+            | "adobe pdf"
+            | "flash player"
+    )
+}
+
+#[must_use]
+pub fn is_adobe_product_app(app: &InstalledApp) -> bool {
+    if app.is_store_fallback || app.id.starts_with("app:") {
+        return false;
+    }
+    if match_app_predicate(&app.display_name, "adobe creative cloud").is_some()
+        || app
+            .aliases
+            .iter()
+            .any(|al| match_app_predicate(al, "adobe creative cloud").is_some())
+    {
+        return false;
+    }
+    contains_whole_token_sequence(&app.display_name, "adobe")
+        || app
+            .aliases
+            .iter()
+            .any(|al| contains_whole_token_sequence(al, "adobe"))
+        || app
+            .publishers
+            .iter()
+            .any(|p| contains_whole_token_sequence(p, "adobe"))
+}
+
+#[must_use]
+pub fn match_adobe_product_subfolder(
+    app: &InstalledApp,
+    subfolder_name: &str,
+) -> Option<AppTokenMatchKind> {
+    let trimmed = subfolder_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let sub_lower = trimmed.to_ascii_lowercase();
+    if is_known_adobe_shared_infra_folder(&sub_lower) {
+        return None;
+    }
+    let sub_tok = normalize_app_token(trimmed);
+    if sub_tok.is_empty() || sub_tok == "adobe" || !is_adobe_product_app(app) {
+        return None;
+    }
+
+    let sub_stem_owned = sub_tok.strip_prefix("adobe ").unwrap_or(&sub_tok).to_string();
+    let mut best: Option<AppTokenMatchKind> = None;
+    for cand_name in std::iter::once(app.display_name.as_str())
+        .chain(app.aliases.iter().map(String::as_str))
+    {
+        let cand_tok = normalize_app_token(cand_name);
+        let cand_stem = cand_tok.strip_prefix("adobe ").unwrap_or(&cand_tok);
+        let hit = match_app_predicate(cand_name, trimmed)
+            .into_iter()
+            .chain(match_app_predicate(cand_stem, trimmed))
+            .chain(match_app_predicate(cand_stem, &sub_stem_owned))
+            .max();
+        if let Some(kind) = hit {
+            if best.is_none_or(|prev| kind > prev) {
+                best = Some(kind);
+            }
+        }
+    }
+    best
 }
 
 #[must_use]
@@ -518,6 +694,14 @@ pub fn build_registry_catalog(
     raw_entries: &[RawRegistryApp],
     steam_path: Option<&str>,
 ) -> RegistryCatalog {
+    build_registry_catalog_with_services(raw_entries, steam_path, &[])
+}
+
+pub fn build_registry_catalog_with_services(
+    raw_entries: &[RawRegistryApp],
+    steam_path: Option<&str>,
+    services: &[WindowsServiceEntry],
+) -> RegistryCatalog {
     let raw_display_name_entries = raw_entries.len();
     let mut raw_with_install_location = 0usize;
     let mut guid_to_app_name: HashMap<String, String> = HashMap::new();
@@ -714,6 +898,32 @@ pub fn build_registry_catalog(
             is_store_fallback: false,
             display_icon: display_icon_clean,
         });
+    }
+
+    // Check registered Windows Service evidence after all registry entries and InstallLocations have merged.
+    if !services.is_empty() {
+        for app in &mut apps {
+            if app.no_touch.is_none() {
+                let pub_joined = app.publishers.join(" ");
+                let direct_match = classify_no_touch_with_services(
+                    &app.display_name,
+                    &pub_joined,
+                    &app.all_install_locations,
+                    services,
+                );
+                let alias_match = direct_match.or_else(|| {
+                    app.aliases.iter().find_map(|al| {
+                        has_windows_service_registration_evidence(
+                            al,
+                            &app.all_install_locations,
+                            services,
+                        )
+                        .then_some(NoTouchCategory::Service)
+                    })
+                });
+                app.no_touch = alias_match;
+            }
+        }
     }
 
     // Ensure unique IDs if normalized tokens collided on distinct locations.

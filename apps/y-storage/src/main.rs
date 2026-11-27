@@ -852,6 +852,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
             manifest_entries: &[],
             steam_library_roots: &[],
             root_exe_candidates: Some(&exe_map),
+            services: &[],
         },
     );
     y_core::categories::classify_report_apps(&mut report, |_| false);
