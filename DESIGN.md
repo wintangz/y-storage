@@ -1,10 +1,11 @@
 # WT Native Instrument Design System (`DESIGN.md`)
 
 > **Canonical Ecosystem Standard**: This document is the canonical design standard for **all WT applications** (`z-controller`, `y-storage`, `WT Manager`, and future WT native utilities).
-> **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
-> **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
+> **WT UI Library Governance (`wt-ui-library`)**: **Part I — Shared Core is governed by `WT_UI_LIBRARY.md`** (installed globally under the `wt-ui-library` skill). Every component exists in **Blue** and **Pink** variants; buttons never carry gradients (gradients live strictly on container rims and meter/progress bars using the logo's 6 stops); status components (`§4B`) use conventional green/amber/red only; and every component's variant choice comes exclusively from that app's own **Scope Decision Table** under Part II (`§11.1` for `y-storage`) — blank / `OPEN` rows are never guessed. Wherever anything in `DESIGN.md` Part I conflicts with `WT_UI_LIBRARY.md`, **`WT_UI_LIBRARY.md` wins**.
+> **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for shared controls, theme tokens, rim shaders, and outline geometry.
+> **Adoption Rule**: Application-specific layouts, domain widgets, and per-instance Blue/Pink variant choices (via the Scope Decision Table) belong strictly inside that application's own section under **Part II — App-Specific Sections**.
 
-**Last Updated**: 2026-11-27 (`ui-polish-4`)
+**Last Updated**: 2026-11-28 (`ui-polish-4` · `WT_UI_LIBRARY`)
 
 ---
 
@@ -54,10 +55,10 @@ All WT applications share one dual-mode palette calibrated against `z-controller
 
 | Token | Dark Mode | Light Mode | Role |
 |---|---|---|---|
-| `accent_1` (`accent_line`) | `#69CBFC` | `#0090D9` | **Rationed** (`§6`): `PrimaryOutline` CTA, `PodPrimaryOutline` Rescan, selected/active states, lower-tier button hover, chevrons |
-| `accent_2` | `#FA80CB` | `#FA29AA` | Repeated local pod `PodPrimaryOutline` border & label, pressed control outlines, location qualifier badge stroke |
-| `pill_blue_fill` | `#253141` (text `#AFE3FD`) | `#E2F4FC` (text `#0090D9`) | Subtle fill for `PrimaryOutline` global CTA, active filter pills, checkboxes, provenance badges |
-| `pill_pink_fill` | `#382C3C` (text `#FBBBE3`) | `#FCECF6` (text `#FA29AA`) | Fill for `PodPrimaryOutline` local pod `Rescan` buttons and soft backdrop for location qualifier badges (`stroke: accent_2`) |
+| `accent_1` (`accent_line`) | `#69CBFC` | `#0090D9` | **Blue variant accent** (`WT_UI_LIBRARY §2.1`): outline borders, active indicators, and Blue-scoped button/control text |
+| `accent_2` | `#FA80CB` | `#FA29AA` | **Pink variant accent** (`WT_UI_LIBRARY §2.1`): Pink variant outline borders & labels, pressed indicators, Pink-scoped badges |
+| `pill_blue_fill` | `#253141` (text `#AFE3FD`) | `#E2F4FC` (text `#0090D9`) | Blue variant soft fill for `PrimaryOutline(Blue)` buttons, Blue badges, and Blue-scoped selections |
+| `pill_pink_fill` | `#382C3C` (text `#FBBBE3`) | `#FCECF6` (text `#FA29AA`) | Pink variant soft fill for `PrimaryOutline(Pink)` buttons, Pink badges, and Pink-scoped selections |
 | `WT_RIM_GRADIENT_STOPS` | `#54B9F2 → #7CD0FA → #A5E6FF → #D8A6FF → #F7A8D8 → #FFC7E3` | `#54B9F2 → #7CD0FA → #A5E6FF → #D8A6FF → #F7A8D8 → #FFC7E3` | Unnamed 6-stop logo-file sweep for active/expanded container rims (`§5`) and included drive capacity meters |
 | `STATUS_GREEN` (`status_green`) | `#28D66C` | `#0A7A3C` (`#28D66C` dots/marks) | Saturated positive/healthy semantic status (`§8`) |
 | `pill_green_fill` | `#102E20` | `#E4F9EC` | Soft backdrop for saturated green semantic status pills |
@@ -116,7 +117,7 @@ The signature continuous gradient rim is a **state signal**, never decorative ch
 
 All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controller\apps\z-controller\src\ui.rs`) so headers, forms, dialogs, and scrollbars feel built from one binary toolkit.
 
-> **Accent Rationing Family Rule (`button-discipline-1` — scope split updated in `ui-polish-4`)**: **PrimaryOutline splits by scope: the view's single global primary is `accent_1` blue; repeated local primaries (one per repeated card/pod) are `accent_2` pink. Buttons never carry gradient borders; gradients live on container rims and meters only.** `accent_line` (`#69CBFC` Dark / `#0090D9` Light) is reserved strictly for **(1)** the single global primary CTA of a view (`PrimaryOutline`, e.g., header `Rescan` / `Rescan needed`), **(2)** selected/active states (active filter chip, active sort arrow, checked checkbox, focused input border, active scrollbar drag, expanded chevron, open reverse-dependency trigger/overlay), and **(3)** hover feedback on neutral/quiet lower-tier buttons. Repeated local primary CTAs (`PodPrimaryOutline`, one per drive pod) take `accent_2` pink (`#FA80CB` on `#382C3C` Dark; `#FA29AA` on `#FCECF6` Light). Everything else is **neutral** (`SecondaryOutline`) or **quiet** (`SubtleOutline`) at rest.
+> **WT UI Library Dual-Variant & Scope Rule (`WT_UI_LIBRARY.md §1`)**: Every shared interactive component exists in both **Blue** (`accent_1`) and **Pink** (`accent_2`) variants. Which variant an app uses for a given instance is decided solely by that app's **Scope Decision Table** under Part II (`§11.1` for `y-storage`) — never by size, position, or importance rules invented ad hoc. **Buttons never carry gradient borders or gradient fills**; the 6-stop logo gradient lives strictly on container rims and meter/progress bars. Unaccented actions remain **neutral** (`SecondaryOutline`) or **quiet** (`SubtleOutline`) at rest, and semantic alerts/deltas use **§4B Status** (`Green`/`Amber`/`Red`) only.
 
 ### 6.1 Crisp Outline Geometry & Padding
 - **Perimeter ring rendering**: Controls use pixel-snapped `RADIUS_CONTROL = 6.0px` / `RADIUS_PILL = 4.0px` / `RADIUS_PANEL = 8.0px` geometry via a single concentric physical-pixel-feathered rounded-box mesh (`32` segments per quadrant, `1px` edge AA feathering on curves with exact pixel-snapped straight H/V edges) and `egui` `bezier_tolerance = 0.015`, guaranteeing smooth corner anti-aliasing with zero binary stair-steps or corner gaps at `100%`, `125%`, and `150%` display scaling. When `border_color == Color32::TRANSPARENT` (`SubtleOutline` / row-level actions), no perimeter border is drawn at rest or on hover.
@@ -126,16 +127,16 @@ All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controlle
 
 | Variant / State | Background Fill | `1px` Outline Stroke | Text / Glyph Foreground | Typical Use |
 |---|---|---|---|---|
-| **`PrimaryOutline`** (rest) | `pill_blue_fill` (`#253141` / `#E2F4FC`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | **Single** global primary CTA of a view (`Rescan` / `Rescan needed` in main header) |
-| **`PodPrimaryOutline`** (rest) | `pill_pink_fill` (`#382C3C` / `#FCECF6`) | `accent_2` (`#FA80CB` / `#FA29AA`) | `accent_2` (`#FA80CB` / `#FA29AA`) | **Repeated** local primary CTA (`Rescan` on each drive pod, `y-storage §11`) |
+| **`PrimaryOutline (Blue)`** (rest) | `pill_blue_fill` (`#253141` / `#E2F4FC`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | Labelled primary button — Blue variant (selected via app Scope Table) |
+| **`PrimaryOutline (Pink)`** (rest) | `pill_pink_fill` (`#382C3C` / `#FCECF6`) | `accent_2` (`#FA80CB` / `#FA29AA`) | `accent_2` (`#FA80CB` / `#FA29AA`) | Labelled primary button — Pink variant (selected via app Scope Table) |
 | **`SecondaryOutline`** (rest) | `TRANSPARENT` | `border` (`#26263A` / `#D9E4F0`) | `text` (`#EDEDF2` / `#1C2733`) | **Neutral** view/utility/overlay/card buttons (`Settings`, `Back to Apps`, `ThemeToggle`, overlay `All` / `Close`, `Add exclusion`) |
-| **`SubtleOutline` / Row-Level** (rest) | `TRANSPARENT` | `TRANSPARENT` (no border) | `muted` (`#9A9AB0` / `#5F7186`) | **Quiet** repeated row actions & inline resets (`Locate`, `Web search`, `used by N apps >`, `Remove`, `Clear`) — stacked rows read as one quiet text column |
-| **Hovered** (`PrimaryOutline` / `SecondaryOutline`) | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | Hover feedback promotes border & label/glyph to blue accent |
-| **Hovered** (`PodPrimaryOutline`) | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `accent_2` (`#FA80CB` / `#FA29AA`) | `accent_2` (`#FA80CB` / `#FA29AA`) | Hover feedback keeps local pod primary button in `accent_2` pink |
+| **`SubtleOutline` / Row-Level** (rest) | `TRANSPARENT` | `TRANSPARENT` (no border) | `muted` (`#9A9AB0` / `#5F7186`) | **Quiet** repeated row actions & inline resets (`Locate`, `Web search`, `used by N apps >`, `Remove`, `Clear`, `Exclusions`) — stacked rows read as one quiet text column |
+| **Hovered** (`PrimaryOutline (Blue)` / `SecondaryOutline`) | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | Hover feedback promotes border & label/glyph to Blue accent |
+| **Hovered** (`PrimaryOutline (Pink)`) | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `accent_2` (`#FA80CB` / `#FA29AA`) | `accent_2` (`#FA80CB` / `#FA29AA`) | Hover feedback promotes border & label/glyph to Pink accent |
 | **Hovered** (`SubtleOutline` / Row-Level) | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `TRANSPARENT` (no border) | `accent_line` (`#69CBFC` / `#0090D9`) | Muted surface fill (`4px`/`6px` pill) + accent label with zero border box |
-| **Pressed** (`is_pointer_button_down_on`) | `widget_active` (`#142832` / `#D8EEF9`) | `accent_2` (`#FA80CB` / `#FA29AA`; `TRANSPARENT` on `SubtleOutline`) | `text` (`#EDEDF2` / `#1C2733`) | Active pointer press feedback |
+| **Pressed** (`is_pointer_button_down_on`) | `widget_active` (`#142832` / `#D8EEF9`) | `accent_line` (`accent_2` for Pink variant; `TRANSPARENT` on `SubtleOutline`) | `text` (`#EDEDF2` / `#1C2733`) | Active pointer press feedback in the owning component's variant |
 | **Hovered List / Ledger Row** | `widget_hover` (`#1F1F31` / `#E8F4FB`) | `TRANSPARENT` | — | Full-row highlight across collapsed table rows and expanded ledger rows (including action cells) |
-| **Active-Highlight** (open/selected trigger) | `pill_blue_fill` (`#253141` / `#E2F4FC`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | Open/latched cross-reference trigger (e.g., active `used by N apps >`) |
+| **Active-Highlight** (open/selected trigger) | `pill_blue_fill` (`#253141` / `#E2F4FC`) | `accent_line` (`#69CBFC` / `#0090D9`) | `accent_line` (`#69CBFC` / `#0090D9`) | Open/latched cross-reference trigger (e.g., active `used by N apps >`; `pill_pink_fill` / `accent_2` for Pink variant) |
 | **Disabled** (`!enabled`) | `TRANSPARENT` | `border` (`TRANSPARENT` on `SubtleOutline`) | `muted` (`lerp(bg, muted, 0.55)` on `SubtleOutline`) | Unavailable action (`Scanning...`, missing-on-disk `Locate` with zero box stroke) |
 
 ### 6.3 Shared Header & Form Controls
@@ -187,7 +188,7 @@ Before accepting screenshots of any WT application, verify **`FC1`–`FC9`**:
 - **FC3 (State-Signal Gradient Rim Only)**: Diagonal gradient rims (`#54B9F2 -> #7CD0FA -> #A5E6FF -> #D8A6FF -> #F7A8D8 -> #FFC7E3`) appear strictly on active/expanded containers; zero collapsed containers or non-status pills use solid pastel fills.
 - **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, full-pill (`0.5 * h`) status badges, and `0px` hairline ledger rows.
 - **FC5 (Saturated Status Discipline)**: Saturated `#28D66C` / `#F04458` (`#0A7A3C` / `#E02444` Light) marks appear strictly on live status dots, threshold/battery alerts, signed deltas, safety locks, and zone marks — while metadata, proportions, dependency kind chips, and qualifiers stay calm pastel (`accent_1`/`accent_2`) or quiet neutral.
-- **FC6 (Outline Button Hierarchy & Scope-Split Accents)**: Global `Rescan` (`PrimaryOutline`) uses `accent_1` blue (`#69CBFC` / `#0090D9` + `pill_blue_fill`); repeated per-pod `Rescan` (`PodPrimaryOutline`) uses `accent_2` pink (`#FA80CB` on `#382C3C` Dark / `#FA29AA` on `#FCECF6` Light); buttons never carry gradient borders; `ThemeToggle` & `Settings` (`SecondaryOutline`) render neutral `border` + `text` at rest with smooth anti-aliased `1px` perimeter rings and clean moon/sun contrast; row-level `SubtleOutline` actions (`Locate`, `Web search`, `used by N apps >`, `Exclusions`) stay borderless and `muted` at rest (`widget_hover` + `accent_line` text on hover).
+- **FC6 (Outline Button Hierarchy & WT UI Library Scope)**: Global and pod `Rescan` (`PrimaryOutline(Blue)`) follow `y-storage`'s Scope Decision Table (`§11.1`); buttons never carry gradient borders; `ThemeToggle` & `Settings` (`SecondaryOutline`) render neutral `border` + `text` at rest with smooth anti-aliased `1px` perimeter rings and clean moon/sun contrast; row-level `SubtleOutline` actions (`Locate`, `Web search`, `used by N apps >`, `Exclusions`) stay borderless and `muted` at rest (`widget_hover` + `accent_line` text on hover).
 - **FC7 (`>= 10.5pt` Floor)**: All visible labels, badges, captions, and tooltips meet or exceed `10.5pt`.
 - **FC8 (Dual-Mode Surface & Input Separation)**: Both Dark (`#0A0A10` / `#10101A` / `#14141F`) and Light (`#EEF4FA` / `#F4F8FC` / `#FFFFFF`) preserve distinct surface tiers and recessed `input_bg` wells.
 - **FC9 (Content-Hugging & Top-Left Sparse States)**: Empty or sparse panels align top-left cleanly without floating centred whitespace or orphaned headers.
@@ -209,12 +210,32 @@ Each section below documents only what is unique to an individual WT application
 
 ## 11. App-Specific: `y-storage`
 
+### 11.1 Scope Decision Table (`y-storage`)
+
+> App name: `y-storage` · Date: `2026-11-28` · Decided by: `Win` · Library: [`WT_UI_LIBRARY.md`](file:///C:/Users/Win/.gemini/config/skills/wt-ui-library/references/WT_UI_LIBRARY.md)
+> An agent may only colour an instance from this table. **`OPEN` rows below must NOT be guessed and keep their current rendering unchanged until the owner fills them.**
+
+| # | Screen / place | Component instance | Variant (`Blue` / `Pink` / `§4B Status` / `Gradient` / `OPEN`) | Form (`Outlined` / `Filled` / `Soft` / `Gradient`) | Note |
+|---|---|---|---|---|---|
+| 1 | Masthead (`Main` / `Settings` / `Dependencies`) | `Rescan` / `Rescan needed` labelled primary button | **Blue** | Outlined + soft fill (`PrimaryOutline(Blue)`) | Labelled primary CTA (`#69CBFC` + `#253141` Dark; `#0090D9` + `#E2F4FC` Light) |
+| 2 | Drive pods (`Main`) | Per-pod `Rescan` labelled primary button | **Blue** | Outlined + soft fill (`PrimaryOutline(Blue)`) | Labelled primary CTA (same Blue variant as header `Rescan`) |
+| 3 | Any view / future UI | Any future labelled primary CTA | **Blue** | Outlined + soft fill (`PrimaryOutline(Blue)`) | Labelled primary CTA rule |
+| 4 | App table (`Growth delta`) | `"new"` growth state | **§4B Status (Green)** | Soft status pill (`status_green` + `pill_green_fill`) | Semantic status family only (`#28D66C` / `#0A7A3C`) |
+| 5 | Masthead, app table, drawers, ledger, Settings | `NO-TOUCH` / `LOCKED` / `missing` badges, `● GREEN` / `● RED` zone badges, stale-data warning masthead (`status_amber`), reconciliation `diff` dot/indicator, signed deltas, error states | **§4B Status (Green / Amber / Red)** | Status pill / dot / status text (`§4B`) | Semantic status family only (`#28D66C` / `#0A7A3C`, `#F5B83D` / `#A66C07`, `#F04458` / `#E02444`) |
+| 6 | Drive pods & app table (`Total size` / `Size on X:`) | Drive capacity meters / proportion bars | **Gradient sweep (logo stops)** | Meter / progress bar (`WT_UI_LIBRARY §2.3` / `§4 #25`) | Original 6-stop logo sweep (`#54B9F2 → #7CD0FA → #A5E6FF → #D8A6FF → #F7A8D8 → #FFC7E3`), kept as currently rendered |
+| 7 | Drive pods & Settings | Checkbox checked state (`Include`, `Include in scope`) | **OPEN** | *(current rendering kept)* | Owner to fill separately — do NOT change or guess |
+| 8 | Main filter bar, Unattributed sort bar, Settings zone-kind toggles | Active filter chip (`All`, `Grew`, `App container`, `Personal files`, etc.) | **OPEN** | *(current rendering kept)* | Owner to fill separately — do NOT change or guess |
+| 9 | Sticky app table column header | Active sort arrow (`↓` / `↑`) | **OPEN** | *(current rendering kept)* | Owner to fill separately — do NOT change or guess |
+| 10 | Expanded drawer `Locations` & ledger rows | Qualifier chips (`Roaming config`, `ProgramData · shared`, `loose files`, `HARDLINK`, `ESTIMATE`) | **OPEN** | *(current rendering kept)* | Owner to fill separately — do NOT change or guess |
+
+---
+
 - **Masthead & Settings Lockup**: Top masthead band (`Main`, `Settings`, `Dependencies`) renders `[24x24 WT mark] + 8px + "y-storage" (16.0pt text) + 8px + status caption` (`11.5pt muted` for `"Read-only · Last scan: <timestamp> · <duration>s"`, `accent_line` during active scans, or `status_amber` `"Read-only · Scope changed — rescan needed"` on stale scope with last-scan timestamp preserved on hover), paired with right-aligned `[ThemeToggle] [Rescan / Rescan needed] [Settings / Back to Apps]`. `Settings` houses naturally stacked, non-occluding sections (`Scan Scope & Exclusions` per-drive scope cards, unified **Attribution Zone Rulebook** grouping chips under `"App container"` / `"Personal files"` subheads with neutral muted `Manual pins`, and the `8px` `panel` About card repeating the `24px` WT lockup).
 - **Adaptive Drive Instrument Header & In-Place Scope**: Physical fixed drives sit inside `CentralPanel` above the search/filter bar in a responsive `8px` `panel` pod grid (`1..=4` drives in 1 row, `5..=8` in 2 balanced rows, `9+` in a 5-column wrap; `1px border`, `Margin::symmetric(SPACE_12, SPACE_8)`, `SPACE_4`/`SPACE_8` multiples-of-4 gaps). Excluded drives are never walked or sized at all (including registered `InstallLocation` folders), and apps whose folders all live on excluded drives are omitted from the report; the Settings scope section and pod `Include` tooltip explain drive exclusion, while the `Exclusions` popover explains folder-level exclusion. Each pod uses consistent production copy across all drive counts (`1..10`):
   1. `"C:\"` (`13.0pt` `Segoe UI Semibold` `text`) + right-aligned `"{used} of {total}"` (`11.0pt` / `10.5pt` compact `Consolas Regular`);
   2. `"Scanned HH:MM"` (or `"Not scanned"` when excluded / `"Scanning…"` during active per-drive rescan) + right-aligned `"{free} free"`;
   3. Flush `2.0px` proportional bar in the 6-stop WT logo gradient when included (`lerp(pod_fill, muted, 0.35)` greyed bar + dimmed surface/border when excluded; `STATUS_RED` only if drive read fails/`0` capacity);
-  4. Compact in-place control strip (`24px`, single `"Hx"` optical baseline across `"Include"` and `"Exclusions"` sharing one `11.0pt` / compact `10.5pt` font size): quiet `"Include"` checkbox + quiet `"Exclusions"` / `"Exclusions (N)"` (`SubtleOutline`) overlay trigger + right-aligned per-drive `"Rescan"` (`PodPrimaryOutline`: `accent_2` pink stroke + `accent_2` label over `pill_pink_fill`, `24px` min height — scope-split local CTA per `§6`). Scope or zone-rulebook edits mark the cached report stale (`Rescan needed`) cleanly without auto-triggering a surprise walk.
+  4. Compact in-place control strip (`24px`, single `"Hx"` optical baseline across `"Include"` and `"Exclusions"` sharing one `11.0pt` / compact `10.5pt` font size): quiet `"Include"` checkbox + quiet `"Exclusions"` / `"Exclusions (N)"` (`SubtleOutline`) overlay trigger + right-aligned per-drive `"Rescan"` (`PrimaryOutline(Blue)`: `accent_1` blue border + label over `pill_blue_fill`, `24px` min height per `§11.1` Row 2). Scope or zone-rulebook edits mark the cached report stale (`Rescan needed`) cleanly without auto-triggering a surprise walk.
 - **Unified Attribution Zone Rulebook & Bottom-Up Claim Resolution**:
   - **Zone Rulebook Types (`AppConfig.zones`)**:
     - **`AppContainer`**: immediate subfolders become candidate apps (defaults: `Apps`, `Games`, `Game`, `Programs`, `Program Files`, `Software`, `Softwares`, `PortableApps`).

@@ -1,10 +1,10 @@
-# Plan `024-ui-polish-4`
+# Plan `024-ui-polish-4` (REVISED)
 
-1. **Before Baseline & Macro Crops (`ac4e9e4`)**: Capture `--dpi 120` (`125%`) Dark/Light main and Settings screenshots and extract `4x` nearest-neighbor macro crops (`checkbox`, `pod-corner`, `button-corner`, `pod-row`).
-2. **Amended FIX 1, FIX 2 AA, FIX 3 Baselines (`apps/y-storage/src/ui.rs`)**:
-   - Update `resolve_button_colors` (`PodPrimaryOutline` -> `pal.pill_pink_fill` / `pal.accent_2` / `pal.accent_2`; `PrimaryOutline` stays `accent_1` blue; zero button gradients; meter bars unchanged).
-   - Add `build_feathered_rounded_box_mesh` (`32` segments/quadrant, `1px` edge feathering) + `TessellationOptions` (`bezier_tolerance = 0.015`, `feathering_size_in_pixels = 1.0`) for `paint_crisp_bordered_box`, `draw_crisp_frame`, table outer panel, and `build_cached_rim_geometry`.
-   - Unify pod control row `"Include"` & `"Exclusions"` on `11.0pt` (`10.5pt` compact) and shared `"Hx"` optical center baseline; sweep ledger footer, reconciliation lines, drawer strips, filter bar, and Settings rows.
-   - Update/add unit tests for scope-split buttons, multi-DPI corner AA, and `<= 1px` pod row baseline alignment.
-3. **Design System & Spec Docs**: Update `DESIGN.md` (`§2.2`, `§6`, `§6.1`, `§6.2`, `§9 FC6`, `§11`) and author `specs/024-ui-polish-4/{spec.md,plan.md,tasks.md,verification.md}`.
-4. **Verify, Render AFTER Proof, Deploy & Push**: Run `cargo test --workspace` + `cargo build --release --bin y-storage` (0 warnings), render AFTER PNGs & `4x` crops, visually inspect all before/after PNGs & macro crops via `read_file`, deploy to `Y:\Apps\y-storage\y-storage.exe`, run `--smoke-gui-ms 500`, commit, and push `origin/main`.
+1. **Pre-Round Baseline (`ac4e9e4`)**: Keep `before-main-{dark,light}.png`, `before-settings-dark.png`, and `4x` `before-macro-{checkbox,pod-corner,button-corner,pod-row}-dark.png` at `--dpi 120` (`125%`).
+2. **WT UI Library Dual Variants, Scope Table Implementation, FIX 2 & FIX 3 (`apps/y-storage/src/ui.rs`)**:
+   - Define `BrandVariant::{Blue, Pink}` with full Dark & Light dual-variant support on `ButtonVariant::PrimaryOutline(BrandVariant)` and `resolve_checkbox_colors(BrandVariant, ...)`.
+   - Set header `Rescan` / `Rescan needed` and per-pod `Rescan` to `ButtonVariant::PrimaryOutline(BrandVariant::Blue)` per `y-storage`'s Scope Decision Table (`DESIGN.md §11.1`); keep all Status (`§4B`), Meter, and `OPEN` rows unchanged.
+   - Stabilize `45°` corner AA density in `build_feathered_rounded_box_mesh` (`diag_pad = ±0.42 * px` transitioning smoothly to `0` on straight H/V tangents) and fix `● diff 0 B` leading dot order in `right_to_left` footer rows.
+   - Update unit tests to assert both Blue and Pink library variants across both Dark and Light themes plus DPI corner AA and `<= 1px` pod-row baseline alignment.
+3. **Design System & Spec Docs**: Update `DESIGN.md` to declare Part I governed by `WT_UI_LIBRARY.md`, embed `y-storage`'s Part II Scope Decision Table (`§11.1`) including explicit `OPEN` rows, and update `specs/024-ui-polish-4/`.
+4. **Verify, Re-Render AFTER Proof, Deploy & Push**: Run `cargo test --workspace` + `cargo build --release --bin y-storage` (0 warnings), render updated `after-*.png` and `4x` `after-macro-*.png`, visually inspect via `read_file`, deploy to `Y:\Apps\y-storage\y-storage.exe`, run `--smoke-gui-ms 500`, commit, and push `origin/main`.

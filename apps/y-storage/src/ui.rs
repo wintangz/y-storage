@@ -806,9 +806,10 @@ fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec
 }
 
 /// Emits fixed-count (`4 * 33 = 132`) rounded-rect perimeter vertices so concentric rings align 1:1.
-fn sample_rounded_rect_ring(rect: Rect, radius: f32, out: &mut Vec<Pos2>) {
+fn sample_rounded_rect_ring(rect: Rect, radius: f32, diag_pad: f32, out: &mut Vec<Pos2>) {
     out.clear();
     let r = radius.clamp(0.0, 0.5 * rect.width().min(rect.height()));
+    let eff_diag = if r > 0.5 { diag_pad } else { 0.0 };
     let centers = [
         Pos2::new(rect.left() + r, rect.top() + r),
         Pos2::new(rect.right() - r, rect.top() + r),
@@ -818,7 +819,9 @@ fn sample_rounded_rect_ring(rect: Rect, radius: f32, out: &mut Vec<Pos2>) {
     let arcs = corner_unit_arcs();
     for (center, arc) in centers.into_iter().zip(arcs.iter()) {
         for &(nx, ny) in arc {
-            out.push(center + Vec2::new(nx * r, ny * r));
+            let factor = ((nx.abs() + ny.abs()) - 1.0) / 0.414_213_56;
+            let rad = (r + eff_diag * factor).max(0.0);
+            out.push(center + Vec2::new(nx * rad, ny * rad));
         }
     }
 }
@@ -924,46 +927,54 @@ fn build_feathered_rounded_box_mesh(
         }
         let mut r0_pts = Vec::with_capacity(132);
         let mut r1_pts = Vec::with_capacity(132);
-        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, &mut r0_pts);
+        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
         let rect1 = if snapped.width() > px && snapped.height() > px {
             snapped.shrink(half_px)
         } else {
             snapped
         };
-        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), &mut r1_pts);
+        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), 0.0, &mut r1_pts);
         stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
         add_ring_center_fan(&mut mesh, &r1_pts, snapped.center(), fill);
         return mesh;
     }
 
     let bw = (border_px.max(1.0)) * px;
-    let mut r0_pts = Vec::with_capacity(132);
-    let mut r1_pts = Vec::with_capacity(132);
-    let mut r2_pts = Vec::with_capacity(132);
-
-    sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, &mut r0_pts);
     let rect1 = if snapped.width() > px && snapped.height() > px {
         snapped.shrink(half_px)
     } else {
         snapped
     };
-    sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), &mut r1_pts);
-    stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
+    let mut r0_pts = Vec::with_capacity(132);
+    let mut r1_pts = Vec::with_capacity(132);
+    let mut r2_pts = Vec::with_capacity(132);
 
     let r1b_pts = if bw > px * 1.05 {
+        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
+        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), 0.0, &mut r1_pts);
+        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
         let mut pts = Vec::with_capacity(132);
         let s1b = (bw - half_px).min(snapped.width().min(snapped.height()) * 0.45);
-        sample_rounded_rect_ring(snapped.shrink(s1b), (r - s1b).max(0.0), &mut pts);
+        sample_rounded_rect_ring(snapped.shrink(s1b), (r - s1b).max(0.0), 0.0, &mut pts);
         stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &pts, border_color);
         pts
     } else {
-        r1_pts
+        // Compensate 1.414px diagonal grid spacing at 45-degree corner midpoints so 1px strokes keep even optical density.
+        let diag_pad = 0.42 * px;
+        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, diag_pad, &mut r0_pts);
+        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), diag_pad, &mut r1_pts);
+        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
+        let mut r1_in_pts = Vec::with_capacity(132);
+        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), -diag_pad, &mut r1_in_pts);
+        stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
+        r1_in_pts
     };
 
     let inner_shrink = bw + half_px;
     if snapped.width() > inner_shrink * 2.0 && snapped.height() > inner_shrink * 2.0 {
         let rect2 = snapped.shrink(inner_shrink);
-        sample_rounded_rect_ring(rect2, (r - inner_shrink).max(0.0), &mut r2_pts);
+        let inner_diag = if bw <= px * 1.05 { -0.42 * px } else { 0.0 };
+        sample_rounded_rect_ring(rect2, (r - inner_shrink).max(0.0), inner_diag, &mut r2_pts);
         stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
         add_ring_center_fan(&mut mesh, &r2_pts, rect2.center(), fill);
     } else {
@@ -1177,9 +1188,15 @@ fn draw_crisp_frame<R>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrandVariant {
+    Blue,
+    #[allow(dead_code)]
+    Pink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonVariant {
-    PrimaryOutline,
-    PodPrimaryOutline,
+    PrimaryOutline(BrandVariant),
     SecondaryOutline,
     SubtleOutline,
 }
@@ -1404,8 +1421,8 @@ fn paint_bottom_fade_overlay(painter: &egui::Painter, rect: Rect, surface_bg: Co
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Resolves `(fill, border_col, text_color)` under the WT accent-rationing rule:
-/// accent colour is reserved for the view's primary CTA, active/selected states, and hover feedback.
+/// Resolves `(fill, border_col, text_color)` under WT_UI_LIBRARY §1/§3:
+/// PrimaryOutline exists identically in Blue and Pink; the calling app's Scope Decision Table picks which variant is used where.
 fn resolve_button_colors(
     variant: ButtonVariant,
     enabled: bool,
@@ -1421,44 +1438,77 @@ fn resolve_button_colors(
                 Color32::TRANSPARENT,
                 lerp_color(pal.bg, pal.muted, 0.55),
             ),
-            ButtonVariant::PrimaryOutline
-            | ButtonVariant::PodPrimaryOutline
-            | ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.muted),
+            ButtonVariant::PrimaryOutline(_) | ButtonVariant::SecondaryOutline => {
+                (Color32::TRANSPARENT, pal.border, pal.muted)
+            }
         };
     }
     if pressed {
         let press_border = match variant {
             ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
-            ButtonVariant::PrimaryOutline
-            | ButtonVariant::PodPrimaryOutline
-            | ButtonVariant::SecondaryOutline => pal.accent_2,
+            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => pal.accent_2,
+            ButtonVariant::PrimaryOutline(BrandVariant::Blue) | ButtonVariant::SecondaryOutline => {
+                pal.accent_line
+            }
         };
         return (pal.widget_active, press_border, pal.text);
     }
     if hovered {
         return match variant {
-            ButtonVariant::PrimaryOutline => {
+            ButtonVariant::PrimaryOutline(BrandVariant::Blue) | ButtonVariant::SecondaryOutline => {
                 (pal.widget_hover, pal.accent_line, pal.accent_line)
             }
-            ButtonVariant::PodPrimaryOutline => (pal.widget_hover, pal.accent_2, pal.accent_2),
-            ButtonVariant::SecondaryOutline => (pal.widget_hover, pal.accent_line, pal.accent_line),
+            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
+                (pal.widget_hover, pal.accent_2, pal.accent_2)
+            }
             ButtonVariant::SubtleOutline => {
                 (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
             }
         };
     }
     if active_highlight {
-        return (pal.pill_blue_fill, pal.accent_line, pal.accent_line);
+        return match variant {
+            ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
+                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
+            }
+            _ => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
+        };
     }
     match variant {
-        ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
-        ButtonVariant::PodPrimaryOutline => (pal.pill_pink_fill, pal.accent_2, pal.accent_2),
+        ButtonVariant::PrimaryOutline(BrandVariant::Blue) => {
+            (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+        }
+        ButtonVariant::PrimaryOutline(BrandVariant::Pink) => {
+            (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
+        }
         ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
         ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
     }
 }
 
-/// Renders an outline or quiet row-level button enforcing the 3-tier WT accent-rationing hierarchy.
+/// Resolves `(fill, border_col, check_col)` for both Blue and Pink Checkbox variants (`WT_UI_LIBRARY §4 #6`).
+fn resolve_checkbox_colors(
+    variant: BrandVariant,
+    checked: bool,
+    hovered: bool,
+    pal: &ThemePalette,
+) -> (Color32, Color32, Color32) {
+    let (accent, soft_fill) = match variant {
+        BrandVariant::Blue => (pal.accent_line, pal.pill_blue_fill),
+        BrandVariant::Pink => (pal.accent_2, pal.pill_pink_fill),
+    };
+    let fill = if checked {
+        soft_fill
+    } else if hovered {
+        pal.widget_hover
+    } else {
+        pal.input_bg
+    };
+    let border_col = if checked || hovered { accent } else { pal.border };
+    (fill, border_col, accent)
+}
+
+/// Renders an outline or quiet row-level button enforcing the WT_UI_LIBRARY outline/quiet hierarchy.
 #[allow(clippy::too_many_arguments)]
 fn draw_z_button(
     ui: &mut egui::Ui,
@@ -1473,9 +1523,12 @@ fn draw_z_button(
 ) -> egui::Response {
     let h_pad = if variant == ButtonVariant::SubtleOutline && min_size.y <= 20.0 {
         3.0
-    } else if variant == ButtonVariant::PodPrimaryOutline && min_size.x <= 52.0 {
+    } else if matches!(variant, ButtonVariant::PrimaryOutline(_))
+        && min_size.y <= 24.0
+        && min_size.x <= 52.0
+    {
         6.0
-    } else if variant == ButtonVariant::PodPrimaryOutline || min_size.y <= 22.0 {
+    } else if min_size.y <= 24.0 {
         SPACE_8
     } else {
         SPACE_12
@@ -1565,18 +1618,8 @@ fn draw_crisp_checkbox(
     let row_h = 22.0_f32.max(text_galley.size().y);
     let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, row_h), Sense::click());
     let ppp = ui.ctx().pixels_per_point();
-    let fill = if *checked {
-        pal.pill_blue_fill
-    } else if resp.hovered() {
-        pal.widget_hover
-    } else {
-        pal.input_bg
-    };
-    let border_col = if *checked || resp.hovered() {
-        pal.accent_line
-    } else {
-        pal.border
-    };
+    let (fill, border_col, check_col) =
+        resolve_checkbox_colors(BrandVariant::Blue, *checked, resp.hovered(), pal);
     let box_rect = Rect::from_center_size(
         Pos2::new(hit_rect.min.x + 8.0, hit_rect.center().y),
         Vec2::splat(16.0),
@@ -1585,7 +1628,7 @@ fn draw_crisp_checkbox(
         paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
     if *checked {
         let c = snapped.center();
-        let st = Stroke::new(1.75_f32, pal.accent_line);
+        let st = Stroke::new(1.75_f32, check_col);
         ui.painter().add(egui::Shape::line(
             vec![
                 Pos2::new(c.x - 4.0, c.y + 0.5),
@@ -3018,18 +3061,8 @@ fn draw_compact_pod_checkbox(
     let alloc_h = row_h.max(16.0);
     let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, alloc_h), Sense::click());
     let ppp = ui.ctx().pixels_per_point();
-    let fill = if *checked {
-        pal.pill_blue_fill
-    } else if resp.hovered() {
-        pal.widget_hover
-    } else {
-        pal.input_bg
-    };
-    let border_col = if *checked || resp.hovered() {
-        pal.accent_line
-    } else {
-        pal.border
-    };
+    let (fill, border_col, check_col) =
+        resolve_checkbox_colors(BrandVariant::Blue, *checked, resp.hovered(), pal);
     let box_rect = Rect::from_center_size(
         Pos2::new(hit_rect.min.x + 7.0, hit_rect.center().y),
         Vec2::splat(14.0),
@@ -3038,7 +3071,7 @@ fn draw_compact_pod_checkbox(
         paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
     if *checked {
         let c = snapped.center();
-        let st = Stroke::new(1.6_f32, pal.accent_line);
+        let st = Stroke::new(1.6_f32, check_col);
         ui.painter().add(egui::Shape::line(
             vec![
                 Pos2::new(c.x - 3.5, c.y + 0.5),
@@ -3444,7 +3477,7 @@ fn draw_drive_pods_grid(
                                         RADIUS_CONTROL,
                                         !busy_this_drive,
                                         false,
-                                        ButtonVariant::PodPrimaryOutline,
+                                        ButtonVariant::PrimaryOutline(BrandVariant::Blue),
                                         pal,
                                     );
                                     if r_resp
@@ -4069,7 +4102,7 @@ pub fn draw_app_ui_with_drive_busy(
                         RADIUS_CONTROL,
                         !any_scan_active,
                         false,
-                        ButtonVariant::PrimaryOutline,
+                        ButtonVariant::PrimaryOutline(BrandVariant::Blue),
                         &pal,
                     );
                     let rescan_tip = if scope_stale {
@@ -6527,8 +6560,6 @@ fn draw_pinned_bottom_groups(
                 if let Some((exact, diff)) = &first_reconcile {
                     if *diff == 0 {
                         ui.add_space(SPACE_8);
-                        let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                        ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
                         draw_truncated_text(
                             ui,
                             "diff 0 B",
@@ -6537,6 +6568,8 @@ fn draw_pinned_bottom_groups(
                             false,
                         )
                         .on_hover_text(exact);
+                        let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
                     } else {
                         paint_chip(
                             ui,
@@ -7032,8 +7065,6 @@ fn draw_pinned_bottom_groups(
                     |ui| {
                         if diff == 0 {
                             ui.add_space(SPACE_8);
-                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                            ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
                             let _ = draw_truncated_text(
                                 ui,
                                 "diff 0 B",
@@ -7041,6 +7072,8 @@ fn draw_pinned_bottom_groups(
                                 pal.status_green,
                                 false,
                             );
+                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
                         } else {
                             paint_chip(
                                 ui,
@@ -8740,24 +8773,60 @@ mod tests {
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
             let pal = ThemePalette::for_mode(mode);
 
-            // 1. PrimaryOutline (single global CTA): accent_1 blue at rest + on hover
+            // 1. PrimaryOutline dual-variant catalog (Blue & Pink in both Dark and Light)
             assert_eq!(
-                resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, false, false, &pal),
+                resolve_button_colors(
+                    ButtonVariant::PrimaryOutline(BrandVariant::Blue),
+                    true,
+                    false,
+                    false,
+                    false,
+                    &pal
+                ),
                 (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
             );
             assert_eq!(
-                resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, true, false, &pal),
+                resolve_button_colors(
+                    ButtonVariant::PrimaryOutline(BrandVariant::Blue),
+                    true,
+                    false,
+                    true,
+                    false,
+                    &pal
+                ),
                 (pal.widget_hover, pal.accent_line, pal.accent_line)
             );
-
-            // 1b. PodPrimaryOutline (repeated local pod CTA): accent_2 pink at rest + on hover
             assert_eq!(
-                resolve_button_colors(ButtonVariant::PodPrimaryOutline, true, false, false, false, &pal),
+                resolve_button_colors(
+                    ButtonVariant::PrimaryOutline(BrandVariant::Pink),
+                    true,
+                    false,
+                    false,
+                    false,
+                    &pal
+                ),
                 (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
             );
             assert_eq!(
-                resolve_button_colors(ButtonVariant::PodPrimaryOutline, true, false, true, false, &pal),
+                resolve_button_colors(
+                    ButtonVariant::PrimaryOutline(BrandVariant::Pink),
+                    true,
+                    false,
+                    true,
+                    false,
+                    &pal
+                ),
                 (pal.widget_hover, pal.accent_2, pal.accent_2)
+            );
+
+            // 1b. Checkbox dual-variant catalog (Blue & Pink)
+            assert_eq!(
+                resolve_checkbox_colors(BrandVariant::Blue, true, false, &pal),
+                (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
+            );
+            assert_eq!(
+                resolve_checkbox_colors(BrandVariant::Pink, true, false, &pal),
+                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
             );
 
             // 2. SecondaryOutline (Settings, ThemeToggle, All, Close, Add exclusion): neutral at rest, accent on hover
@@ -9355,16 +9424,16 @@ mod tests {
         assert!(matches!(is_new.kind, DeltaCellKind::NewPill));
 
         let pod_colors = resolve_button_colors(
-            ButtonVariant::PodPrimaryOutline,
+            ButtonVariant::PrimaryOutline(BrandVariant::Blue),
             true,
             false,
             false,
             false,
             &dark,
         );
-        assert_eq!(pod_colors.0, dark.pill_pink_fill);
-        assert_eq!(pod_colors.1, dark.accent_2);
-        assert_eq!(pod_colors.2, dark.accent_2);
+        assert_eq!(pod_colors.0, dark.pill_blue_fill);
+        assert_eq!(pod_colors.1, dark.accent_line);
+        assert_eq!(pod_colors.2, dark.accent_line);
 
         let dep_ctx = egui::Context::default();
         configure_fonts_and_theme(&dep_ctx, ThemeMode::Dark);
