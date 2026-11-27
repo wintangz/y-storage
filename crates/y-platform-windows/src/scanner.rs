@@ -676,16 +676,6 @@ fn scan_drive_parallel_tier(
     (root_node, rs)
 }
 
-#[allow(dead_code)]
-fn size_single_directory(
-    dir_path: &str,
-    exclusions: &[String],
-    sys_win_key: &str,
-    progress: &ProgressCounters,
-) -> u64 {
-    sum_subtree_bytes_iterative(dir_path, exclusions, sys_win_key, progress)
-}
-
 fn find_steamapps_dirs_in_node(node: &FolderNode, depth: usize, out: &mut BTreeSet<String>) {
     let pk = normalize_path_key(&node.path);
     if pk.ends_with("\\steamapps") {
@@ -978,6 +968,113 @@ pub fn scan_directory_tree_for_test(
         &progress,
         None,
     )
+}
+
+/// Fixture helper exercising real scoped walking (`drv.full_walk_enabled`) + tree decomposition + attribution
+/// without enumerating host volumes or touching registry/disk outside `fixture_drives`.
+pub fn execute_scoped_fixture_scan_for_test(
+    fixture_drives: Vec<(DriveInfo, String)>,
+    installed_apps: Vec<InstalledApp>,
+    sys_win_dir: &str,
+    config: &AppConfig,
+) -> (ScanReport, Vec<char>) {
+    let sys_win_key = normalize_path_key(sys_win_dir);
+    let progress = ProgressCounters::new(Arc::new(AtomicBool::new(false)));
+    let shell_keys: HashSet<String> = HashSet::new();
+
+    let mut walked_letters = Vec::new();
+    let mut all_units = Vec::new();
+    let mut drives = Vec::with_capacity(fixture_drives.len());
+
+    let replace_root_prefix = |path: &str, src_root: &str, dst_drive: char| -> String {
+        let norm_p = normalize_windows_path(path);
+        let norm_r = normalize_windows_path(src_root).trim_end_matches('\\').to_string();
+        if let Some(rest) = norm_p.strip_prefix(&norm_r) {
+            let trimmed = rest.trim_start_matches('\\');
+            if trimmed.is_empty() {
+                format!("{dst_drive}:\\")
+            } else {
+                format!("{dst_drive}:\\{trimmed}")
+            }
+        } else {
+            norm_p
+        }
+    };
+
+    for (mut drv, root_dir) in fixture_drives {
+        let dl = drv.letter.to_ascii_uppercase();
+        drv.full_walk_enabled = config.is_drive_enabled(dl);
+        drv.exclusions = config.exclusions_for_drive(dl);
+        if drv.full_walk_enabled {
+            walked_letters.push(dl);
+            let (mut tree, mut root_sys) = parallel_scan_drive_root(
+                &root_dir,
+                &drv.exclusions,
+                &sys_win_key,
+                &shell_keys,
+                &progress,
+            );
+            fn rewrite_tree(node: &mut FolderNode, src_root: &str, dl: char) {
+                let norm_p = normalize_windows_path(&node.path);
+                let norm_r = normalize_windows_path(src_root).trim_end_matches('\\').to_string();
+                if let Some(rest) = norm_p.strip_prefix(&norm_r) {
+                    let trimmed = rest.trim_start_matches('\\');
+                    node.path = if trimmed.is_empty() {
+                        format!("{dl}:\\")
+                    } else {
+                        format!("{dl}:\\{trimmed}")
+                    };
+                }
+                for ch in &mut node.children {
+                    rewrite_tree(ch, src_root, dl);
+                }
+            }
+            rewrite_tree(&mut tree, &root_dir, dl);
+            for (rp, _) in &mut root_sys {
+                *rp = replace_root_prefix(rp, &root_dir, dl);
+            }
+            let units = decompose_scanned_tree_with_containers(
+                &tree,
+                &installed_apps,
+                &[],
+                &root_sys,
+                &config.containers,
+            );
+            all_units.extend(units);
+        }
+        drives.push(drv);
+    }
+
+    let stats = y_core::model::RegistryDiscoveryStats {
+        raw_display_name_entries: installed_apps.len(),
+        raw_with_install_location: installed_apps
+            .iter()
+            .filter(|a| a.direct_install_location.is_some())
+            .count(),
+        canonical_apps: installed_apps.len(),
+        canonical_with_direct_install_location: installed_apps
+            .iter()
+            .filter(|a| a.direct_install_location.is_some())
+            .count(),
+        canonical_with_inferred_install_location: 0,
+    };
+    let report = attribute_scan_with_options(
+        1000,
+        "2026-11-27 19:00:00".to_string(),
+        1,
+        drives,
+        stats,
+        &installed_apps,
+        &HashMap::new(),
+        &all_units,
+        None,
+        &AttributionOptions {
+            containers: Some(&config.containers),
+            steam_library_roots: &[],
+            root_exe_candidates: None,
+        },
+    );
+    (report, walked_letters)
 }
 
 pub fn execute_scan_with_progress(

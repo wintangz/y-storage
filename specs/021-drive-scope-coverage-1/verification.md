@@ -1,112 +1,113 @@
-# Verification Report: `drive-scope-coverage-1`
+# Verification Report: `drive-scope-coverage-1` (incl. Add-On FIX 7–9)
 
 **Date**: 2026-11-27  
-**Base Commit**: `ad61871` (`main`)  
-**Deploy Path**: `Y:\Apps\y-storage\y-storage.exe` (`5,412,864` bytes; pre-existing running GUI PID `25608` from `17:47:34` was preserved by renaming its locked executable to `Y:\Apps\y-storage\y-storage.prev.exe` before copying the updated binary; `--smoke-gui-ms 500` passed with `working_set_bytes = 33,181,696`, `private_bytes = 13,168,640`, `apps_count = 270`, `has_cached_report = true`)  
-**User Config Integrity**: `%APPDATA%\y-storage\config.toml` verified identical to pre-task backup (`Compare-Object` returned zero differences).
+**Deploy Path**: `Y:\Apps\y-storage\y-storage.exe` (`5,443,072` bytes; `--smoke-gui-ms 500` passed with exit `0`, `working_set_bytes = 33,595,392`, `private_bytes = 16,297,984`, `apps_count = 267`, `has_cached_report = true`)  
+**User Config Integrity**: `%APPDATA%\y-storage\config.toml` verified against pre-task backup — drive targets remain `C:`-only (only the new FIX 6 `[containers]` section was added).
 
 ---
 
-## 1. Automated Test Suite & Release Build
+## Summary Verdicts
 
-- `cargo build --release --bin y-storage`: **0 warnings**, exit `0`
-- `cargo test --workspace`: **54 passed, 0 failed, 0 skipped, 0 warnings**
+| Scope | Verdict | Summary |
+|---|---|---|
+| FIX 1 – FIX 6 (`drive-scope-coverage-1`) | **PASS** | All automated tests, live 4-drive scans (`diff = 0 B`), and inspected screenshots pass. |
+| **FIX 7** (Per-Drive Size View + Scope Honesty) | **PASS** | `Size on <D>:` mode works for both `Drive` facet and `Has C: footprint` chip; excluded drives are never walked/sized and out-of-scope apps (`FIFA 23`) are omitted in `C:`-only scans. |
+| **FIX 8** (`Locate` + `Web search` on All Location Rows) | **PASS** | Shared `SubtleOutline` `Locate` & `Web search` buttons render cleanly on all app drawer `Locations` rows and `Your files` / `Shared & system caches` / `Unattributed` rows; intentionally omitted on `Windows & system`. |
+| **FIX 9** (Accent Derived from the WT Logo) | **PASS** | Sampled `assets/logo-mark.png` blue stop (`#85D4FB` Dark / `#067EB9` lightness-adjusted Light) applied across accent-derived tokens and documented in `DESIGN.md`, verified in before/after Dark & Light pairs. |
+
+---
+
+## 1. Automated Test Suite & Release Build (After All Edits)
+
+- `cargo test --workspace`: **59 passed, 0 failed, 0 skipped, 0 warnings**
   - `y-core` `core_tests.rs`: **6 passed**
   - `y-core` `round2_tests.rs`: **6 passed**
   - `y-core` `round3_tests.rs`: **8 passed**
-  - `y-core` `round4_tests.rs`: **4 passed** (`container_rule_claims_unowned_children_and_registry_beats_container_without_double_count`, `steam_vdf_and_appmanifest_discover_unregistered_steam_game`, `executable_inference_pe_product_name_and_os_folder_exclusion_behave_conservatively`, `per_drive_rescan_merges_cleanly_and_computes_deltas_only_against_same_drive_history`)
-  - `y-platform-windows` `windows_scanner_tests.rs`: **2 passed**
-  - `y-storage` unit & UI tests: **28 passed** (including new tests `unattributed_assist::tests::search_query_uses_natural_question_template_without_quote_fragments`, `list_query::tests::unattributed_facets_combine_with_and_and_classify_all_seven_zones`, `ui::tests::ledger_covers_pods_and_filter_row_at_max_height`, `ui::tests::pod_scope_controls_and_settings_container_rulebook_render_and_mark_stale`, `ui::tests::adaptive_drive_pod_grid_fits_1_2_5_10_drives_without_overflow`)
+  - `y-core` `round4_tests.rs`: **5 passed** (includes `excluded_drive_omits_apps_and_ignores_out_of_scope_units_and_install_locations`, `per_drive_rescan_merges_cleanly_and_computes_deltas_only_against_same_drive_history`, `container_rule_claims_unowned_children_and_registry_beats_container_without_double_count`, `steam_vdf_and_appmanifest_discover_unregistered_steam_game`, `executable_inference_pe_product_name_and_os_folder_exclusion_behave_conservatively`)
+  - `y-platform-windows` `windows_scanner_tests.rs`: **3 passed** (includes `excluded_drive_apps_are_omitted_and_install_folders_are_never_sized`)
+  - `y-storage` unit & UI tests: **31 passed** (includes `list_query::tests::per_drive_size_mode_switches_size_and_sorting_for_drive_facet_and_has_c_chip`, `ui::tests::per_drive_size_mode_relabels_header_and_renders_companion_totals`, `ui::tests::expanded_app_drawer_locations_render_locate_and_web_search_with_missing_folder_guard`, `ui::tests::button_hierarchy_reserves_accent_for_primary_active_and_hover`)
+- `cargo build --release --bin y-storage`: **0 warnings**, exit `0`
 
 ---
 
-## 2. Same-State Live 4-Drive Comparison (`C:`, `D:`, `Y:`, `Z:`)
+## 2. FIX 7 — Per-Drive Size View & Scope Honesty: **PASS**
 
-Measured via `--scan-cli ... --ephemeral --all-drives` before edits (`18:25:32`) vs after edits (`18:47:15`) on the same live filesystem state:
+### Verification Measurements (`4-Drive Scan` vs `Default C:-Only Scan`)
 
-| Metric | Before | After | Verdict |
-|---|---:|---:|---|
-| `EA SPORTS™ FIFA 23` | `107,199,710,486` B | `107,199,710,486` B | Identical byte-for-byte (registry `InstallLocation` beats `Games` container & Steam manifest) |
-| `Store: MSTeams` | `279,428,566` B | `279,428,566` B | Identical byte-for-byte |
-| Recognized Apps (`apps.len()`) | `272` | `298` | `+26` folder-only / Steam manifest apps |
-| `Unattributed` Total | `349` (`281,779,694,485` B) | `317` (`189,172,372,945` B) | `-32` folders, `-92,607,321,540` B (`-92.61` GB) |
-| OS-named `AttributedApp` rows | — | `0` | Zero `$RECYCLE.BIN` / `System Volume Information` / `Recovery` / `Config.Msi` pollution |
+Measured on the live system with `target\release\y-storage.exe --scan-cli`:
+- **4-Drive Ephemeral Scan** (`C:`, `D:`, `Y:`, `Z:` enabled): `298` apps, `317` unattributed items (`267` apps with a `C:` footprint totaling `83,380,338,473` B = `77.65` GB on `C:`), all 4 drives reconciled at **`diff = 0 B`**:
+  - `C:`: `apps = 83,380,338,473` B, `shared = 11,713,553,441` B, `your_files = 3,211,739,251` B, `unattributed = 1,488,078,782` B (`307`), `win_sys = 48,695,071,877` B, `hardlink_overlap = 0` B, **`diff = 0` B**
+  - `D:`: `apps = 284,767,374,596` B, `unattributed = 155,456,054,869` B (`5`), `win_sys = 2,553,552,763` B, `hardlink_overlap = 56,492,610,260` B, **`diff = 0` B**
+  - `Y:`: `apps = 22,338,811,862` B, `unattributed = 32,289,290,441` B (`2`), `win_sys = 129` B, `hardlink_overlap = 2,090,037,536` B, **`diff = 0` B**
+  - `Z:`: `apps = 201,325,647,317` B, `unattributed = 16,527,521` B (`3`), `win_sys = 1,453,238,666` B, `hardlink_overlap = 0` B, **`diff = 0` B**
+- **Default `C:`-Only Live Scan** (`C:` enabled; `D:`, `Y:`, `Z:` excluded): `267` apps, `307` unattributed items, `C:` `apps = 83,381,417,551` B, `shared = 11,713,553,441` B, `your_files = 3,211,739,251` B, `unattributed = 1,488,078,778` B (`307`), `win_sys = 48,695,487,843` B, **`diff = 0` B** on `C:` (excluded drives `D:`, `Y:`, `Z:` unwalked with `0` bytes walked/sized).
 
-### Per-Drive `Unattributed` & Reconciliation Breakdown
+### Worked Examples (`Before/Global 4-Drive` vs `Per-Drive C:` / `C:-Only Scan`)
 
-| Drive | Unattributed Before | Unattributed After | OS Folders (`Windows & system`) | Hardlink Offset | Reconciliation Diff |
-|---|---:|---:|---|---|---:|
-| `C:` | `308` (`3,933,870,425` B) | `307` (`1,487,369,013` B) | `C:\$Recycle.Bin` (`2,446,012,773` B) | `0` B | **`0` B** |
-| `D:` | `14` (`215,567,293,487` B) | `5` (`155,456,054,869` B) | `D:\$RECYCLE.BIN` (`2,553,552,763` B) | `56,492,610,260` B | **`0` B** |
-| `Y:` | `10` (`39,440,252,620` B) | `2` (`32,212,421,542` B) | `Y:\$RECYCLE.BIN` (`129` B) | `2,084,035,581` B | **`0` B** |
-| `Z:` | `17` (`22,838,277,953` B) | `3` (`16,527,521` B) | `Z:\$RECYCLE.BIN` (`486,211,838` B) | `0` B | **`0` B** |
-
-> **NTFS Hardlink Reconciliation Finding**: `D:\Games\Steam\steamapps\common\FIFA 23\FIFAModData` and `Y:\Repos\...\node_modules` contain NTFS hardlinked files sharing file-ID extents across paths. Directory walks sum logical paths, so recording `hardlink_overlap_bytes` (`walked_sum - drive_used_bytes`) preserves `FIFA 23` and `Repos` at exact folder byte counts while reconciling every drive to `diff = 0 B`.
-
----
-
-## 3. FIX 6: Newly Recognized Folder-Only & Steam Manifest Apps (26 Rows)
-
-| App | Size (B) | Install Location | Bases & Rule Detail |
+| App | Global (`4-Drive` Total) | `4-Drive` By Drive (`C:` / Other) | `C:`-Only Live Scan Result |
 |---|---:|---|---|
-| `DBSZ v3022.021.003.012.015` | `36,916,383,905` | `D:\Games\DBSZ.v3022.021.003.012.015_LinkNeverDie.Com` | `ContainerRule` (`layout rule: Games`) |
-| `DS Awakening v1.1.1` | `21,359,544,654` | `Z:\Games\DS.Awakening.v1.1.1_LinkNeverDie.Com` | `ContainerRule` (`layout rule: Games`) |
-| `Epic` | `19,670,833,651` | `D:\Games\Epic` | `ContainerRule` (`layout rule: Games`) |
-| `nodejs` | `3,990,653,494` | `Y:\Apps\nodejs` | `ContainerRule` (`layout rule: Apps`) |
-| `Rust` | `2,472,937,548` | `Y:\Apps\Rust` | `ContainerRule` (`layout rule: Apps`) |
-| `Steam` | `2,128,394,846` | `Z:\Games\Steam` | `InstallLocation, Token, SteamManifest` |
-| `Minecraft` | `812,231,332` | `D:\Games\Minecraft` | `ContainerRule` (`layout rule: Games`) |
-| `Steamworks Common Redistributables` | `724,157,710` | `Z:\Games\Steam\steamapps\common\Steamworks Shared` | `SteamManifest` |
-| `ArtCraft` | `545,911,230` | `Y:\Apps\ArtCraft` | `ContainerRule` (`layout rule: Apps`) |
-| `PortableGit` | `411,138,092` | `Y:\Apps\PortableGit` | `ContainerRule` (`layout rule: Apps`) |
-| `Lossless Scaling v3.2.2` | `191,670,171` | `Z:\Games\Lossless.Scaling.v3.2.2_LinkNeverDie.Com` | `ContainerRule` (`layout rule: Games`) |
-| `Aseprite v1.3.5-dev` | `158,936,042` | `Z:\Softwares\Aseprite.v1.3.5-dev` | `ContainerRule` (`layout rule: Softwares`) |
-| `Genshin Tools` | `155,817,331` | `Z:\Games\Genshin Tools` | `ContainerRule` (`layout rule: Games`) |
-| `aida64extreme840` | `103,584,477` | `Z:\Softwares\aida64extreme840` | `ContainerRule` (`layout rule: Softwares`) |
-| `FIFA Mod Manager v2.2.2` | `70,440,364` | `D:\Games\FIFA Mod Manager v2.2.2` | `ContainerRule` (`layout rule: Games`) |
-| `Blockbench` | `69,628,864` | `D:\Softwares\Blockbench` | `ContainerRule` (`layout rule: Softwares`) |
-| `FurMark win64` | `51,561,234` | `Z:\Softwares\FurMark_win64` | `ContainerRule` (`layout rule: Softwares`) |
-| `AdeptiScanner` | `46,289,496` | `Z:\Softwares\AdeptiScanner` | `ContainerRule` (`layout rule: Softwares`) |
-| `BCUninstaller 6.3.0 net8.0-windows10.0.18362.0` | `44,080,958` | `Z:\Softwares\BCUninstaller_6.3.0_net8.0-windows10.0.18362.0` | `ContainerRule` (`layout rule: Softwares`) |
-| `z-controller` | `22,030,629` | `Y:\Apps\z-controller` | `ContainerRule` (`layout rule: Apps`) |
-| `Aseprite v1.3` | `17,616,238` | `D:\Softwares\Aseprite.v1.3` | `ContainerRule` (`layout rule: Softwares`) |
-| `cpu-z 3.01-en` | `13,396,688` | `Z:\Softwares\cpu-z_3.01-en` | `ContainerRule` (`layout rule: Softwares`) |
-| `BetterJoy v7.1` | `6,570,948` | `Z:\Softwares\BetterJoy_v7.1` | `ContainerRule` (`layout rule: Softwares`) |
-| `GHelper` | `6,123,624` | `Z:\Softwares\GHelper` | `ContainerRule` (`layout rule: Softwares`) |
-| `y-storage` | `5,123,355` | `Y:\Apps\y-storage` | `ContainerRule` (`layout rule: Apps`) |
-| `TranslucentTB-portable-x64` | `3,684,413` | `Y:\Apps\TranslucentTB-portable-x64` | `ContainerRule` (`layout rule: Apps`) |
+| **`EA SPORTS™ FIFA 23`** | `107,199,710,486` B (`99.84 GB`, `D:\Games\Steam\steamapps\common\FIFA 23`) | `D: 107,199,710,486` B, `C: 0` B | **ABSENT (omitted completely)** — excluded drive `D:` is neither walked nor sized, and apps solely on excluded drives are omitted |
+| `Genshin Impact` | `175,442,801,779` B (`163.39 GB`) | `C: 2,451,149,093` B (`2.28 GB`), `Z: 172,991,652,686` B | `2,451,149,093` B (`C:` only) |
+| `Microsoft Visual Studio Code (User)` | `3,097,101,688` B (`2.88 GB`, `install: Y:\Apps\Microsoft VS Code`) | `C: 1,943,522,044` B, `Y: 1,153,579,644` B | `1,943,522,044` B (`C:` only; out-of-scope `Y:` `install_location` cleared) |
+| `Unity 6000.3.27f1` | `9,258,545,090` B (`8.62 GB`, `install: Y:\Apps\Unity`) | `C: 446,628,164` B, `Y: 8,811,916,926` B | `446,628,164` B (`C:` only; out-of-scope `Y:` `install_location` cleared) |
+| `Microsoft Edge` | `8,277,248,159` B (`7.71 GB`) | `C: 8,277,248,159` B (`7.71 GB`) | `8,277,295,320` B (`C:` only) |
 
-### Remaining Non-Software `Unattributed` Folders on `D:`, `Y:`, `Z:`
+### Visual Verification (`fix7-*` Dark Screenshots)
 
-All non-software / data / repo directories stay honestly `Unattributed` (`0` false promotions):
-- `D:` (`5` items): `D:\Media` (`153,011,056,894` B), `D:\FIFA Mod Manager` (`2,229,355,683` B — data/profile folder without executables), `D:\Projects` (`184,470,168` B), `D:\Softwares\[files]` (`30,914,851` B), `D:\Documents` (`257,273` B)
-- `Y:` (`2` items): `Y:\AI Models` (`21,116,498,308` B), `Y:\Repos` (`11,095,923,234` B)
-- `Z:` (`3` items): `Z:\Cracks` (`12,088,801` B), `Z:\Softwares\[files]` (`4,438,028` B), `Z:\Keystores` (`692` B)
+- [fix7-per-drive-c-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix7-per-drive-c-dark.png): With `Drive: C:\` selected, the table header switches to **`Size on C: ↓`**, the facet summary displays **`267 apps · 77.65 GB on C:`**, rows sort by their `C:` footprint (`Microsoft Edge 7.71 GB`, `Xbox Service 7.54 GB`, ..., `Genshin Impact` showing muted **`of 163.39 GB`** alongside **`2.28 GB`**), and `EA SPORTS™ FIFA 23` is excluded.
+- [fix7-unfiltered-global-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix7-unfiltered-global-dark.png): Unfiltered list cleanly reverts to **`Total size ↓`**, **`298 of 298 apps`**, and global totals (`Genshin Impact 163.39 GB`, `EA SPORTS™ FIFA 23 99.84 GB`).
+- [fix9-accent-after-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix9-accent-after-dark.png): Confirms **`Has C: footprint`** chip alone also triggers **`Size on C: ↓`** mode and **`267 apps · 77.65 GB on C:`**.
+- [b-pod-exclusions-overlay-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/b-pod-exclusions-overlay-dark.png) & [f-settings-container-rulebook-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/f-settings-container-rulebook-dark.png): Both surfaces display the plain one-sentence scope honesty explanation cleanly without clipping.
 
 ---
 
-## 4. FIX 5 Facet Parity Rationale (Why the Other 3 Groups Omit Facet Bars)
+## 3. FIX 8 — Locate + Web Search on All Location Rows: **PASS**
 
-- **`Unattributed`** is an exploratory triage workspace spanning hundreds of unknown folders (`317` live) across multiple drives, orders of magnitude (`KB` to `150+ GB`), and OS locations (`AppData Local/Roaming/LocalLow`, `ProgramData`, `Program Files`, user profile root, custom drive roots), so `Drive`, `Size`, and `Zone` `SecondaryOutline` facet dropdowns + `Reset filters` meaningfully accelerate review without mutating group totals.
-- **`Windows & system`**, **`Your files`**, and **`Shared & system caches`** each contain a short, single-purpose homogeneous set (a handful of shell/system items or top `40` regenerable caches), so adding facet selectors there would only introduce redundant chrome over already trivial lists.
+### Row Coverage & Omission Rationale
+
+- **App drawer `Locations`** (`draw_app_drawer` -> `LocationsTableColumns` with `actions_w = 144.0` px) and ledger folder groups (**`Your files`**, **`Shared & system caches`**, **`Unattributed`**) share `draw_ledger_folder_item_row`, rendering identical `SubtleOutline` **`Locate`** and **`Web search`** buttons, full-row hover fill, missing-path disabled guard (`"no longer on disk"`), and FIX 1's natural-question search preview (`"what is the {folder} folder in {parent}"`).
+- **Intentionally omitted group — `Windows & system`**: Entries in `Windows & system` mix non-folder/synthetic accounting items (`Hardlink extent overlap`, `Scanned non-system bytes`, root page/hibernation/swap/system files) and protected OS system roots where opening Explorer `/select` or launching web-triage queries (`"what is the ... folder"`) is either non-existent on disk or unsafe/misleading for user cleanup triage.
+
+### Worked Example (`Microsoft Edge` Expanded Drawer)
+
+`Microsoft Edge` (`8,277,248,159` B / `7.71 GB`) in [fix8-edge-drawer-locations-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix8-edge-drawer-locations-dark.png) shows all 5 `Locations` rows with crisp, non-overlapping `Locate` and `Web search` buttons:
+1. `RED` — `C:\Users\Win\AppData\Local\Microsoft\Edge` (`4,639,824,683` B / `4.32 GB`)
+2. `BODY` — `C:\Program Files (x86)\Microsoft\EdgeCore` (`2,050,554,248` B / `1.91 GB`)
+3. `BODY` — `C:\Program Files (x86)\Microsoft\Edge\Application` (`1,233,185,300` B / `1.15 GB`)
+4. `BODY` — `C:\Program Files (x86)\Microsoft\EdgeUpdate` (`337,725,844` B / `322.08 MB`)
+5. `RED` (`ProgramData · shared`) — `C:\ProgramData\Microsoft\EdgeUpdate` (`15,958,084` B / `15.22 MB`)
+
+Also confirmed on folder-only apps (`DBSZ v3022.021.003.012.015` `BODY` row) in [g-folder-only-apps-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/g-folder-only-apps-dark.png).
 
 ---
 
-## 5. Screenshot Critique (All 12 Rendered PNGs Inspected via `read_file`)
+## 4. FIX 9 — Accent Derived from the WT Logo: **PASS**
 
-All 12 screenshots in [specs/021-drive-scope-coverage-1/](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/) were inspected directly after rendering:
-- [a-pods-scope-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/a-pods-scope-dark.png): All 4 drive pods (`C:\`, `D:\`, `Y:\`, `Z:\`) display per-drive timestamps (`Scanned 18:47`), `Include`, `Exclusions`, and per-drive `Rescan` cleanly at `>= 10.5pt`.
-- [b-pod-exclusions-overlay-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/b-pod-exclusions-overlay-dark.png): Anchored `Drive C:\ exclusions` overlay shows `C:\WINDOWS` (`LOCKED`), input well, `Add`, and `Close` clearly framed over the list.
-- [c-drive-excluded-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/c-drive-excluded-dark.png) & [c-drive-excluded-light.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/c-drive-excluded-light.png): Excluded `D:\` pod is dimmed with a neutral grey bar, `"Not scanned"`, and hidden per-pod `Rescan`, while the masthead shows `"Scope changed — rescan needed"` and `"Rescan needed"` in both Dark and Light themes.
-- [d-ledger-covers-filters-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/d-ledger-covers-filters-dark.png): Dragged-to-max ledger extends right up to `4px` below the masthead row, completely covering drive pods, search box, filter chips, and facet dropdowns while keeping all 4-drive `diff 0 B` lines visible.
-- [e-unattributed-facets-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/e-unattributed-facets-dark.png): Expanded `Unattributed` displays `Drive: D:\`, `Size: >= 1 GB`, `Zone: All`, `"2 of 317 folders · 144.58 GB"`, `Reset filters`, and the open `Location zone` dropdown with all 7 zone buckets + counts.
-- [f-settings-container-rulebook-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/f-settings-container-rulebook-dark.png): Settings view displays matching `"Include drive in scan scope"` wording and the full **App Container Rulebook** panel with all 8 default names (`Apps`, `Games`, `Game`, `Programs`, `Program Files`, `Software`, `Softwares`, `PortableApps`) cleanly wrapped onto two rows plus `Add name` and `Explicit container folder paths`.
-- [g-folder-only-apps-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/g-folder-only-apps-dark.png): Expanded `DBSZ v3022.021.003.012.015` drawer shows extracted game icon, quiet `inferred` pill, `BODY` location at `D:\Games\...` with `layout rule: Games`, and Proven PE runtime dependencies.
-- Layout simulations at `1020x720`: [sim-1-drive-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-1-drive-dark.png), [sim-2-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-2-drives-dark.png), [sim-5-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-5-drives-dark.png), and [sim-10-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-10-drives-dark.png) all scale across 1, 2, 5, and 10 drives without horizontal clipping, text collision, or overflow, ending cleanly with green `diff 0 B`.
+### Sampled `assets/logo-mark.png` Stops vs Shipped `ThemePalette` Tokens
+
+Measured directly from [assets/logo-mark.png](file:///y:/Repos/y-storage/assets/logo-mark.png) (`1200x1200` RGBA):
+
+| Token / Role | Sampled Logo / Previous Shipped | Shipped Value | Contrast / Notes |
+|---|---|---|---|
+| Blue Accent Stop (`W` upper stroke `(885, 335)`, `A=230`) | **Sampled**: `#85D4FB` `RGB(133, 212, 251)` (`H=199.8°, S=93.7%, L=75.3%`; median `#7DD0F9`) | **Dark `accent_line`**: **`#85D4FB`** (unchanged from sampled stop; replaced previous `#54B9F2`) | **`12.04:1`** on Dark `bg` `#0A0A10`; **`10.30:1`** on Dark `pill_blue_fill` `#12222C` |
+| Light Accent (`accent_line` + active chip/button/ring) | Previous Light accent: `#2F9BE8`; Unadjusted `#85D4FB` gives **`1.48:1`** on `#EEF4FA` (`1.64:1` on `#FFFFFF`) | **Light `accent_line`**: **`#067EB9`** `RGB(6, 126, 185)` | Lightness lowered (`L=75.3% -> 37.5%`) while preserving exact hue/saturation (`H=199.8°, S=93.7%`) for **`4.01:1`** on `#EEF4FA` and **`4.46:1`** on `#FFFFFF` |
+| Accent-Derived Blue Companions | Derived from Dark `#85D4FB` / Light `#067EB9` | Dark `pill_blue_fill` `#12222C`, `widget_active` `#142832`, `proven_text` `#9DDFFC`; Light `pill_blue_fill` `#E6F6FE`, `widget_hover` `#E8F4FB`, `widget_active` `#D8EEF9`, `proven_text` `#056B9E` | Preserves button hierarchy & crisp contrast |
+| Pink / Lavender Gradient Stops (`T` `(489, 424)` / `(649, 924)`) | **Sampled**: `#F7ACD9` `RGB(247, 172, 217)` (`H=324.0°, S=82.4%, L=82.2%`), `#D7A5FF` `RGB(215, 165, 255)` | **`LOGO_PINK`** `#F7ACD9`, **`LOGO_LAVENDER`** `#D7A5FF` | Scoped strictly to active/expanded rims, logo mark, and button press states |
+| Semantic `STATUS_GREEN` / `STATUS_RED` | Unchanged (`#34D399`/`#059669`, `#F87171`/`#DC2626`) | Untouched | Reserved strictly for health/growth/diff and `NO-TOUCH`/`RED` |
+
+### Before / After Accent Comparison Screenshots (Dark & Light)
+
+- **Dark Before -> After** (header `Rescan`, active `Has C: footprint` chip, open `Category` facet dropdown):  
+  [fix9-accent-before-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix9-accent-before-dark.png) -> [fix9-accent-after-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix9-accent-after-dark.png)
+- **Light Before -> After** (header `Rescan`, active `Has C: footprint` chip, open `Category` facet dropdown):  
+  [fix9-accent-before-light.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix9-accent-before-light.png) -> [fix9-accent-after-light.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/fix9-accent-after-light.png)
 
 ---
 
-## 6. Logged Assumptions
+## 5. FIX 6 Live Attribution Breakdown & Remaining Inspected Screenshots
 
-- **A-001 (Multi-Drive Hardlink Reconciliation)**: Volumes containing NTFS hardlinked directories (`FIFA 23\FIFAModData`, `node_modules`) exceed physical `drive_used_bytes` when directory trees are summed logically. Tracking `hardlink_overlap_bytes` under `SystemDriveBreakdown` keeps app sizes exact while ensuring every drive reconciles to `diff = 0 B`.
-- **A-002 (`Program Files` Inbox Exclusions)**: Windows system inbox folders inside `C:\Program Files` / `C:\Program Files (x86)` (such as `Common Files`, `WindowsApps`, `Windows Defender`, `Reference Assemblies`, `WindowsPowerShell`) are excluded from container promotion so OS inbox folders never masquerade as third-party apps.
+All remaining round artifacts were re-rendered with shipped FIX 7–9 UI/palette tokens and inspected:
+- [a-pods-scope-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/a-pods-scope-dark.png), [b-pod-exclusions-overlay-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/b-pod-exclusions-overlay-dark.png), [c-drive-excluded-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/c-drive-excluded-dark.png), [c-drive-excluded-light.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/c-drive-excluded-light.png), [d-ledger-covers-filters-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/d-ledger-covers-filters-dark.png), [e-unattributed-facets-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/e-unattributed-facets-dark.png), [f-settings-container-rulebook-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/f-settings-container-rulebook-dark.png), [g-folder-only-apps-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/g-folder-only-apps-dark.png)
+- Responsive grid simulations: [sim-1-drive-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-1-drive-dark.png), [sim-2-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-2-drives-dark.png), [sim-5-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-5-drives-dark.png), [sim-10-drives-dark.png](file:///y:/Repos/y-storage/specs/021-drive-scope-coverage-1/sim-10-drives-dark.png)
+
+> **NTFS Hardlink Reconciliation (A-001)**: Volumes containing NTFS hardlinked files (`D:\Games\Steam\steamapps\common\FIFA 23\FIFAModData`, `Y:\Repos\...\node_modules`) record `hardlink_overlap_bytes` (`walked_sum - drive_used_bytes`) under `SystemDriveBreakdown`, preserving exact folder sizes while keeping every scanned drive at `diff = 0 B`.

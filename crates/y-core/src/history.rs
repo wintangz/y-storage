@@ -196,6 +196,17 @@ pub fn recompute_report_growth_from_history(report: &mut ScanReport, history: &S
             let dl = item.drive_letter.to_ascii_uppercase();
             *cur_by_drive.entry(dl).or_insert(0) += item.bytes;
         }
+        app.per_drive_growth.clear();
+        for (&dl, &cur_b) in &cur_by_drive {
+            let drv_growth = match baselines.get(&dl).and_then(|o| *o) {
+                None => GrowthDelta::NoBaseline,
+                Some(base_map) => {
+                    compute_growth(true, base_map.get(&app.display_name).copied(), cur_b)
+                }
+            };
+            app.per_drive_growth.insert(dl, drv_growth);
+        }
+
         let has_any_drive_baseline = cur_by_drive
             .keys()
             .any(|d| baselines.get(d).is_some_and(Option::is_some));

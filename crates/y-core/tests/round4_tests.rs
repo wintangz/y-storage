@@ -547,10 +547,119 @@ fn per_drive_rescan_merges_cleanly_and_computes_deltas_only_against_same_drive_h
     let d_app_2 = merged_2.apps.iter().find(|a| a.display_name == "DApp").unwrap();
     assert_eq!(d_app_2.total_bytes, 25_000);
     assert_eq!(d_app_2.growth, GrowthDelta::Changed(5_000));
+    assert_eq!(
+        d_app_2.growth_for_drive('D'),
+        GrowthDelta::Changed(5_000),
+        "per_drive_growth must record D: delta independently"
+    );
 
     // Scope staleness check
     let mut cfg = AppConfig::default();
     assert!(!r1_c.is_scope_stale(&cfg));
     cfg.containers.add_root_name("PortableTools");
     assert!(merged_2.is_scope_stale(&cfg));
+}
+
+#[test]
+fn excluded_drive_omits_apps_and_ignores_out_of_scope_units_and_install_locations() {
+    let mut d_drv = drive_fixture('D', 100_000, 100_000, false, None);
+    d_drv.full_walk_enabled = false;
+    let drives = vec![
+        drive_fixture('C', 50_000, 50_000, true, Some((100, "2026-11-27 18:00:00"))),
+        d_drv,
+    ];
+    let installed = vec![
+        InstalledApp {
+            id: "reg:c-only".into(),
+            display_name: "COnly".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["Pub".into()],
+            direct_install_location: Some(r"C:\Program Files\COnly".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"C:\Program Files\COnly".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+        InstalledApp {
+            id: "reg:d-only".into(),
+            display_name: "DOnly".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["EA".into()],
+            direct_install_location: Some(r"D:\Games\FIFA 23".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"D:\Games\FIFA 23".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+        InstalledApp {
+            id: "reg:multi".into(),
+            display_name: "MultiApp".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["Pub".into()],
+            direct_install_location: Some(r"D:\Apps\MultiApp".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"D:\Apps\MultiApp".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+    ];
+    // Even if stray D: units were supplied, attribution must discard excluded-drive units.
+    let units = vec![
+        ScannedUnit {
+            path: r"C:\Program Files\COnly".into(),
+            drive_letter: 'C',
+            bytes: 12_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: true,
+        },
+        ScannedUnit {
+            path: r"C:\Users\Win\AppData\Local\MultiApp".into(),
+            drive_letter: 'C',
+            bytes: 5_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: r"D:\Games\FIFA 23".into(),
+            drive_letter: 'D',
+            bytes: 100_000_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: true,
+        },
+    ];
+    let report = attribute_scan_with_options(
+        100,
+        "2026-11-27 18:00:00".into(),
+        10,
+        drives,
+        empty_stats(3),
+        &installed,
+        &HashMap::new(),
+        &units,
+        None,
+        &AttributionOptions::default(),
+    );
+
+    assert!(
+        !report.apps.iter().any(|a| a.display_name == "DOnly"),
+        "app whose locations all sit on excluded D: must be omitted"
+    );
+    let multi = report
+        .apps
+        .iter()
+        .find(|a| a.display_name == "MultiApp")
+        .expect("MultiApp keeps its in-scope C: footprint");
+    assert_eq!(multi.total_bytes, 5_000);
+    assert_eq!(multi.bytes_on_drive('C'), 5_000);
+    assert_eq!(multi.bytes_on_drive('D'), 0);
+    assert_eq!(multi.install_location, None, "excluded D: InstallLocation must not linger");
 }

@@ -146,6 +146,25 @@ pub fn is_standalone_entry(app: &AttributedApp) -> bool {
         || app.id.starts_with("dot:")
 }
 
+/// Returns the active single-drive measurement target when either `facets.drive`
+/// OR the `HasSystemDriveFootprint` chip alone restricts the list to one drive.
+#[must_use]
+pub fn active_per_drive_mode(
+    chip: AppFilterChip,
+    facets: &FacetFilters,
+    system_drive_letter: char,
+) -> Option<char> {
+    let sys = system_drive_letter.to_ascii_uppercase();
+    let facet_drv = facets.drive.map(|d| d.to_ascii_uppercase());
+    let has_c_chip = chip == AppFilterChip::HasSystemDriveFootprint;
+    match (facet_drv, has_c_chip) {
+        (Some(d), false) => Some(d),
+        (None, true) => Some(sys),
+        (Some(d), true) if d == sys => Some(sys),
+        _ => None,
+    }
+}
+
 /// Pure predicate checking whether an app matches the single-select filter chip.
 #[must_use]
 pub fn app_matches_chip(
@@ -153,15 +172,25 @@ pub fn app_matches_chip(
     chip: AppFilterChip,
     system_drive_letter: char,
 ) -> bool {
+    app_matches_chip_for_mode(app, chip, system_drive_letter, None)
+}
+
+#[must_use]
+fn app_matches_chip_for_mode(
+    app: &AttributedApp,
+    chip: AppFilterChip,
+    system_drive_letter: char,
+    per_drive: Option<char>,
+) -> bool {
     match chip {
         AppFilterChip::All => true,
-        AppFilterChip::Grew => matches!(app.growth, GrowthDelta::Changed(d) if d > 0),
+        AppFilterChip::Grew => {
+            let g = per_drive.map_or(app.growth, |dl| app.growth_for_drive(dl));
+            matches!(g, GrowthDelta::Changed(d) if d > 0)
+        }
         AppFilterChip::NoTouch => app.no_touch.is_some(),
         AppFilterChip::Standalone => is_standalone_entry(app),
-        AppFilterChip::HasSystemDriveFootprint => app
-            .items
-            .iter()
-            .any(|it| it.drive_letter.eq_ignore_ascii_case(&system_drive_letter)),
+        AppFilterChip::HasSystemDriveFootprint => app.bytes_on_drive(system_drive_letter) > 0,
     }
 }
 
@@ -341,10 +370,11 @@ fn app_occupies_zone_facet(app: &AttributedApp, zf: FootprintZoneFilter) -> bool
 }
 
 #[must_use]
-pub fn app_matches_facets(
+fn app_matches_facets_for_mode(
     app: &AttributedApp,
     facets: &FacetFilters,
     shared_app_ids: &HashSet<String>,
+    per_drive: Option<char>,
 ) -> bool {
     if let Some(ref pub_key) = facets.publisher {
         let hit = if pub_key == NO_PUBLISHER_FACET_KEY {
@@ -364,22 +394,12 @@ pub fn app_matches_facets(
         }
     }
     if let Some(drv) = facets.drive {
-        let dl = drv.to_ascii_uppercase();
-        let on_drv = app
-            .items
-            .iter()
-            .any(|it| it.drive_letter.to_ascii_uppercase() == dl)
-            || app.install_location.as_deref().is_some_and(|il| {
-                il.as_bytes()
-                    .first()
-                    .is_some_and(|b| (*b as char).to_ascii_uppercase() == dl)
-                    && il.as_bytes().get(1) == Some(&b':')
-            });
-        if !on_drv {
+        if app.bytes_on_drive(drv) == 0 {
             return false;
         }
     }
-    if !facets.size_band.matches_bytes(app.total_bytes) {
+    let eff_bytes = per_drive.map_or(app.total_bytes, |dl| app.bytes_on_drive(dl));
+    if !facets.size_band.matches_bytes(eff_bytes) {
         return false;
     }
     match facets.dep_state {
@@ -403,22 +423,23 @@ pub fn app_matches_facets(
     if !app_occupies_zone_facet(app, facets.footprint_zone) {
         return false;
     }
+    let eff_growth = per_drive.map_or(app.growth, |dl| app.growth_for_drive(dl));
     match facets.growth {
         GrowthFacetFilter::All => {}
         GrowthFacetFilter::Grew => {
-            if !matches!(app.growth, GrowthDelta::Changed(d) if d > 0)
-                && !matches!(app.growth, GrowthDelta::New(_))
+            if !matches!(eff_growth, GrowthDelta::Changed(d) if d > 0)
+                && !matches!(eff_growth, GrowthDelta::New(_))
             {
                 return false;
             }
         }
         GrowthFacetFilter::Shrank => {
-            if !matches!(app.growth, GrowthDelta::Changed(d) if d < 0) {
+            if !matches!(eff_growth, GrowthDelta::Changed(d) if d < 0) {
                 return false;
             }
         }
         GrowthFacetFilter::Unchanged => {
-            if !matches!(app.growth, GrowthDelta::Changed(0)) {
+            if !matches!(eff_growth, GrowthDelta::Changed(0)) {
                 return false;
             }
         }
@@ -426,7 +447,8 @@ pub fn app_matches_facets(
     true
 }
 
-/// Combines the active filter chip, search text, and general facets using logical AND.
+/// Combines the active filter chip, search text, and general facets using logical AND,
+/// switching size, growth, and Size/Growth sorting to per-drive bytes when a single drive filter is active.
 #[must_use]
 pub fn filter_and_sort_apps_with_facets<'a>(
     apps: &'a [AttributedApp],
@@ -438,16 +460,17 @@ pub fn filter_and_sort_apps_with_facets<'a>(
     shared_app_ids: &HashSet<String>,
     system_drive_letter: char,
 ) -> Vec<&'a AttributedApp> {
+    let per_drive = active_per_drive_mode(chip, facets, system_drive_letter);
     let mut out: Vec<&'a AttributedApp> = apps
         .iter()
         .filter(|app| {
-            app_matches_chip(app, chip, system_drive_letter)
+            app_matches_chip_for_mode(app, chip, system_drive_letter, per_drive)
                 && app_matches_search(app, search_query)
-                && app_matches_facets(app, facets, shared_app_ids)
+                && app_matches_facets_for_mode(app, facets, shared_app_ids, per_drive)
         })
         .collect();
-    if (mode, dir) != (AppSortMode::Size, SortDirection::Desc) {
-        out.sort_by(|a, b| compare_apps(a, b, mode, dir));
+    if per_drive.is_some() || (mode, dir) != (AppSortMode::Size, SortDirection::Desc) {
+        out.sort_by(|a, b| compare_apps_for_mode(a, b, mode, dir, per_drive));
     }
     out
 }
@@ -472,15 +495,30 @@ pub fn compare_apps(
     mode: AppSortMode,
     dir: SortDirection,
 ) -> Ordering {
+    compare_apps_for_mode(a, b, mode, dir, None)
+}
+
+#[must_use]
+pub fn compare_apps_for_mode(
+    a: &AttributedApp,
+    b: &AttributedApp,
+    mode: AppSortMode,
+    dir: SortDirection,
+    per_drive: Option<char>,
+) -> Ordering {
+    let eff_size = |app: &AttributedApp| -> u64 {
+        per_drive.map_or(app.total_bytes, |dl| app.bytes_on_drive(dl))
+    };
+    let eff_growth = |app: &AttributedApp| -> GrowthDelta {
+        per_drive.map_or(app.growth, |dl| app.growth_for_drive(dl))
+    };
     match mode {
         AppSortMode::Size => match dir {
-            SortDirection::Desc => b
-                .total_bytes
-                .cmp(&a.total_bytes)
+            SortDirection::Desc => eff_size(b)
+                .cmp(&eff_size(a))
                 .then_with(|| a.display_name.cmp(&b.display_name)),
-            SortDirection::Asc => a
-                .total_bytes
-                .cmp(&b.total_bytes)
+            SortDirection::Asc => eff_size(a)
+                .cmp(&eff_size(b))
                 .then_with(|| a.display_name.cmp(&b.display_name)),
         },
         AppSortMode::Name => {
@@ -492,7 +530,7 @@ pub fn compare_apps(
             };
             primary
                 .then_with(|| a.display_name.cmp(&b.display_name))
-                .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
         }
         AppSortMode::Publisher => {
             let pa = a
@@ -528,7 +566,7 @@ pub fn compare_apps(
             primary
                 .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
                 .then_with(|| a.display_name.cmp(&b.display_name))
-                .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
         }
         AppSortMode::Category => {
             let ca = a.category.label().to_lowercase();
@@ -538,25 +576,27 @@ pub fn compare_apps(
                 SortDirection::Desc => cb.cmp(&ca),
             };
             primary
-                .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
                 .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
                 .then_with(|| a.display_name.cmp(&b.display_name))
         }
-        AppSortMode::Growth => match (growth_delta_bytes(a.growth), growth_delta_bytes(b.growth)) {
+        AppSortMode::Growth => match (
+            growth_delta_bytes(eff_growth(a)),
+            growth_delta_bytes(eff_growth(b)),
+        ) {
             (Some(da), Some(db)) => {
                 let primary = match dir {
                     SortDirection::Desc => db.cmp(&da),
                     SortDirection::Asc => da.cmp(&db),
                 };
                 primary
-                    .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+                    .then_with(|| eff_size(b).cmp(&eff_size(a)))
                     .then_with(|| a.display_name.cmp(&b.display_name))
             }
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
-            (None, None) => b
-                .total_bytes
-                .cmp(&a.total_bytes)
+            (None, None) => eff_size(b)
+                .cmp(&eff_size(a))
                 .then_with(|| a.display_name.cmp(&b.display_name)),
         },
     }
@@ -622,6 +662,7 @@ mod tests {
             total_bytes,
             previous_bytes: None,
             growth,
+            per_drive_growth: Default::default(),
             no_touch,
             bases,
             items,
@@ -1334,5 +1375,116 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(sub, 200_000_000);
         assert_eq!(rows[0].1.path, r"C:\Users\Win\AppData\Roaming\UserBenchmark");
+    }
+
+    #[test]
+    fn per_drive_size_mode_switches_size_and_sorting_for_drive_facet_and_has_c_chip() {
+        let mut two_drive_app = make_app(
+            "reg:giant-d",
+            "GiantOnD",
+            "Pub",
+            50_200_000_000,
+            GrowthDelta::Changed(1_000_000),
+            None,
+            vec![AttributionBasis::InstallLocation],
+            &['C'],
+        );
+        two_drive_app.items = vec![
+            BreakdownItem {
+                path: r"C:\Users\Win\AppData\Local\GiantOnD".into(),
+                bytes: 200_000_000,
+                zone: Some(ZoneKind::Red),
+                qualifier: None,
+                basis: Some(AttributionBasis::ExactName),
+                basis_detail: None,
+                no_touch: None,
+                drive_letter: 'C',
+            },
+            BreakdownItem {
+                path: r"D:\Games\GiantOnD".into(),
+                bytes: 50_000_000_000,
+                zone: Some(ZoneKind::Body),
+                qualifier: None,
+                basis: Some(AttributionBasis::InstallLocation),
+                basis_detail: None,
+                no_touch: None,
+                drive_letter: 'D',
+            },
+        ];
+
+        let big_c_app = make_app(
+            "reg:big-c",
+            "BigOnC",
+            "Pub",
+            4_000_000_000,
+            GrowthDelta::Changed(500_000),
+            None,
+            vec![AttributionBasis::InstallLocation],
+            &['C'],
+        );
+
+        let apps = vec![two_drive_app, big_c_app];
+        let shared = HashSet::new();
+
+        // Global mode: GiantOnD (50.2 GB) leads BigOnC (4.0 GB).
+        let global = filter_and_sort_apps_with_facets(
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            &FacetFilters::default(),
+            &shared,
+            'C',
+        );
+        assert_eq!(global.iter().map(|a| a.display_name.as_str()).collect::<Vec<_>>(), vec!["GiantOnD", "BigOnC"]);
+        assert_eq!(active_per_drive_mode(AppFilterChip::All, &FacetFilters::default(), 'C'), None);
+
+        // Drive = C: facet switches to per-drive bytes -> BigOnC (4.0 GB) leads GiantOnD (200 MB).
+        let c_facets = FacetFilters {
+            drive: Some('C'),
+            ..Default::default()
+        };
+        assert_eq!(active_per_drive_mode(AppFilterChip::All, &c_facets, 'C'), Some('C'));
+        let on_c = filter_and_sort_apps_with_facets(
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            &c_facets,
+            &shared,
+            'C',
+        );
+        assert_eq!(on_c.iter().map(|a| a.display_name.as_str()).collect::<Vec<_>>(), vec!["BigOnC", "GiantOnD"]);
+        assert_eq!(on_c[1].bytes_on_drive('C'), 200_000_000);
+        assert_eq!(on_c[1].total_bytes, 50_200_000_000);
+
+        // "Has C: footprint" chip alone ALSO activates C: per-drive mode (FIX 7c).
+        assert_eq!(
+            active_per_drive_mode(AppFilterChip::HasSystemDriveFootprint, &FacetFilters::default(), 'C'),
+            Some('C')
+        );
+        let has_c = filter_and_sort_apps_with_facets(
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::HasSystemDriveFootprint,
+            "",
+            &FacetFilters::default(),
+            &shared,
+            'C',
+        );
+        assert_eq!(has_c.iter().map(|a| a.display_name.as_str()).collect::<Vec<_>>(), vec!["BigOnC", "GiantOnD"]);
+
+        // Combining Has C: footprint + Drive = D: gives >1 distinct drive constraint -> reverts to global totals.
+        let d_facets = FacetFilters {
+            drive: Some('D'),
+            ..Default::default()
+        };
+        assert_eq!(
+            active_per_drive_mode(AppFilterChip::HasSystemDriveFootprint, &d_facets, 'C'),
+            None
+        );
     }
 }

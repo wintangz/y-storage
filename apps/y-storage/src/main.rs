@@ -71,7 +71,9 @@ fn main() {
     let mut screenshot_ledger_collapsed: Option<bool> = None;
     let mut screenshot_ledger_height: Option<f32> = None;
     let mut screenshot_facet_publisher: Option<String> = None;
+    let mut screenshot_facet_drive: Option<char> = None;
     let mut screenshot_facet_size = SizeBandFilter::All;
+    let mut screenshot_open_facet: Option<String> = None;
     let mut screenshot_unattrib_search = String::new();
     let mut screenshot_unattrib_drive: Option<char> = None;
     let mut screenshot_unattrib_size = SizeBandFilter::All;
@@ -251,6 +253,22 @@ fn main() {
                     i += 1;
                 }
             }
+            "--facet-drive" => {
+                if i + 1 < args.len() {
+                    screenshot_facet_drive = args[i + 1]
+                        .trim()
+                        .chars()
+                        .next()
+                        .map(|c| c.to_ascii_uppercase());
+                    i += 1;
+                }
+            }
+            "--open-facet" => {
+                if i + 1 < args.len() {
+                    screenshot_open_facet = Some(args[i + 1].to_ascii_lowercase());
+                    i += 1;
+                }
+            }
             "--facet-size" => {
                 if i + 1 < args.len() {
                     screenshot_facet_size = match args[i + 1].to_ascii_lowercase().as_str() {
@@ -295,7 +313,9 @@ fn main() {
             screenshot_ledger_collapsed,
             screenshot_ledger_height,
             screenshot_facet_publisher.as_deref(),
+            screenshot_facet_drive,
             screenshot_facet_size,
+            screenshot_open_facet.as_deref(),
             &screenshot_unattrib_search,
             screenshot_unattrib_drive,
             screenshot_unattrib_size,
@@ -433,6 +453,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
             total_bytes: *sz,
             previous_bytes: Some(*sz),
             growth: GrowthDelta::Changed(0),
+            per_drive_growth: Default::default(),
             no_touch: None,
             bases: vec![AttributionBasis::InstallLocation],
             items: vec![BreakdownItem {
@@ -461,6 +482,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
             total_bytes: 5_550_000_000,
             previous_bytes: None,
             growth: GrowthDelta::NoBaseline,
+            per_drive_growth: Default::default(),
             no_touch: None,
             bases: vec![AttributionBasis::ContainerRule],
             items: vec![BreakdownItem {
@@ -606,7 +628,9 @@ fn render_screenshot_frame(
     ledger_collapsed: Option<bool>,
     ledger_height_px: Option<f32>,
     facet_publisher: Option<&str>,
+    facet_drive: Option<char>,
     facet_size: SizeBandFilter,
+    open_facet: Option<&str>,
     unattrib_search: &str,
     unattrib_drive: Option<char>,
     unattrib_size: SizeBandFilter,
@@ -621,7 +645,18 @@ fn render_screenshot_frame(
     ui_state.filter_chip = filter_chip;
     ui_state.search_query = search_query.to_string();
     ui_state.facets.publisher = facet_publisher.map(str::to_string);
+    ui_state.facets.drive = facet_drive;
     ui_state.facets.size_band = facet_size;
+    ui_state.open_facet_popup = match open_facet {
+        Some("publisher") => Some("publisher"),
+        Some("category") => Some("category"),
+        Some("drive") => Some("drive"),
+        Some("size") => Some("size"),
+        Some("deps") => Some("deps"),
+        Some("zone") => Some("zone"),
+        Some("growth") => Some("growth"),
+        _ => None,
+    };
     ui_state.unattrib_search_query = unattrib_search.to_string();
     ui_state.unattrib_facets.drive = unattrib_drive;
     ui_state.unattrib_facets.size_band = unattrib_size;
@@ -665,6 +700,28 @@ fn render_screenshot_frame(
             ui_state.ledger_height_px = Some(340.0);
             if ui_state.unattrib_search_query.is_empty() {
                 ui_state.unattrib_search_query = "microsoft".to_string();
+            }
+        }
+        "expanded-edge" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            if ui_state.search_query.is_empty() {
+                ui_state.search_query = "Microsoft Edge".to_string();
+            }
+            if let Some(edge) = report
+                .apps
+                .iter()
+                .find(|a| a.display_name.eq_ignore_ascii_case("Microsoft Edge"))
+            {
+                ui_state.expanded_apps.insert(edge.id.clone());
+            }
+        }
+        "accent-showcase" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            ui_state.filter_chip = AppFilterChip::HasSystemDriveFootprint;
+            if ui_state.open_facet_popup.is_none() {
+                ui_state.open_facet_popup = Some("category");
             }
         }
         "expanded-fifa23" | "expanded" => {
@@ -961,7 +1018,9 @@ fn render_screenshot(
     ledger_collapsed: Option<bool>,
     ledger_height_px: Option<f32>,
     facet_publisher: Option<&str>,
+    facet_drive: Option<char>,
     facet_size: SizeBandFilter,
+    open_facet: Option<&str>,
     unattrib_search: &str,
     unattrib_drive: Option<char>,
     unattrib_size: SizeBandFilter,
@@ -1031,7 +1090,9 @@ fn render_screenshot(
             Some(false),
             None,
             None,
+            None,
             SizeBandFilter::All,
+            None,
             "",
             None,
             SizeBandFilter::All,
@@ -1051,7 +1112,9 @@ fn render_screenshot(
             Some(false),
             None,
             None,
+            None,
             SizeBandFilter::All,
+            None,
             "",
             None,
             SizeBandFilter::All,
@@ -1110,7 +1173,9 @@ fn render_screenshot(
         ledger_collapsed,
         ledger_height_px,
         facet_publisher,
+        facet_drive,
         facet_size,
+        open_facet,
         unattrib_search,
         unattrib_drive,
         unattrib_size,

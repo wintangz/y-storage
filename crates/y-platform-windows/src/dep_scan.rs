@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use y_core::dependencies::{
     parse_deps_json_is_dotnet, parse_runtimeconfig_json_major, parse_steam_appmanifest,
     resolve_catalog_targets_with_registry,
 };
-use y_core::discovery::{is_subpath_of, normalize_path_key, normalize_windows_path};
+use y_core::discovery::{is_subpath_of, normalize_path_key, normalize_windows_path, path_drive_letter};
 use y_core::model::{AttributedApp, ScanReport, ZoneKind};
 use y_core::pe::parse_pe_imported_dlls;
 
@@ -354,6 +354,12 @@ pub fn enrich_report_with_dependencies(report: &mut ScanReport) {
         report.warnings.push(warn);
     }
     let catalog = loaded.catalog;
+    let excluded_drives: HashSet<char> = report
+        .drives
+        .iter()
+        .filter(|d| !d.full_walk_enabled)
+        .map(|d| d.letter.to_ascii_uppercase())
+        .collect();
     let services = enumerate_windows_services();
     let target_statuses = resolve_catalog_targets_with_registry(
         &catalog,
@@ -361,6 +367,10 @@ pub fn enrich_report_with_dependencies(report: &mut ScanReport) {
         &report.installed_registry_names,
         &services,
         |p| {
+            if path_drive_letter(p).is_some_and(|dl| excluded_drives.contains(&dl.to_ascii_uppercase()))
+            {
+                return false;
+            }
             if let Some(prefix_base) = p.strip_suffix(".*") {
                 if let Some((parent, leaf_prefix)) = prefix_base.rsplit_once('\\') {
                     let lp = leaf_prefix.to_ascii_lowercase();

@@ -1,7 +1,7 @@
 # Feature Specification: `drive-scope-coverage-1`
 
 **Slug**: `drive-scope-coverage-1`  
-**Status**: Implementing
+**Status**: Implemented
 
 ## Requirements
 
@@ -16,6 +16,11 @@
    - **(c)** Steam libraries discovered on every scanned drive via `steamapps\libraryfolders.vdf` + `appmanifest_*.acf`.
    - **(d)** Conservative drive-root executable inference (`executable scan (inferred)`, reading PE `ProductName`), and explicit OS system folder classification (`$RECYCLE.BIN`, `System Volume Information`, `Recovery`, `Config.Msi`, etc.) routed to `Windows & system`.
    - **(e)** Honest remainder: non-software folders (e.g. `D:\Media`, `Y:\AI Models`, `Y:\Repos`) stay `Unattributed`.
+7. **FIX 7 — Per-Drive Size View & Scope Honesty (Add-On)**:
+   - **(a)** When a single drive constraint is active (`Drive: <D>:\` facet or `Has C: footprint` chip), the size column switches to `Size on <D>:`, displaying each app's own location bytes on `<D>` as the primary figure (with muted `of <global>` companion when global differs), per-drive proportion bar, per-drive `Size`/`Growth` sorting, per-drive growth delta, and `"N apps · X GB on <D>:"`. Unfiltered or multi-drive queries revert to `Total size`.
+   - **(b)** Excluded drives are never walked or sized (including registered `InstallLocation` folders), and apps whose entire footprint sits on excluded drives are omitted from the report. Settings and per-pod exclusion overlays state this in one plain sentence.
+8. **FIX 8 — Locate + Web Search on All Location Rows (Add-On)**: Add `SubtleOutline` `Locate` and `Web search` buttons (sharing FIX 1's natural-question query preview and disabled `"no longer on disk"` guard) across every expanded app drawer `Locations` row and ledger folder groups (`Your files`, `Shared & system caches`, `Unattributed`), omitting `Windows & system` with documented rationale.
+9. **FIX 9 — Accent Derived from the WT Logo (Add-On)**: Sample the `WT` logo stops (`#85D4FB` blue, `#F7ACD9` pink, `#D7A5FF` lavender) from `assets/logo-mark.png`, adopt `#85D4FB` as Dark `accent_line` and `#067EB9` (lightness-only legibility adjustment preserving `H=199.8°, S=93.7%`) in Light mode across accent-derived tokens while keeping pink scoped to rims/logo/press and semantic green/red unchanged, and document provenance in `DESIGN.md`.
 
 ## Logged Assumptions
 

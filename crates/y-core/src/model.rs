@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -438,6 +440,8 @@ pub struct AttributedApp {
     pub total_bytes: u64,
     pub previous_bytes: Option<u64>,
     pub growth: GrowthDelta,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_drive_growth: BTreeMap<char, GrowthDelta>,
     pub no_touch: Option<NoTouchCategory>,
     pub bases: Vec<AttributionBasis>,
     pub items: Vec<BreakdownItem>,
@@ -451,6 +455,38 @@ pub struct AttributedApp {
     pub category: AppCategory,
     #[serde(default)]
     pub category_basis: String,
+}
+
+impl AttributedApp {
+    /// Returns the sum of this app's OWN location bytes on `drive_letter` (never dependencies).
+    #[must_use]
+    pub fn bytes_on_drive(&self, drive_letter: char) -> u64 {
+        let target = drive_letter.to_ascii_uppercase();
+        self.items
+            .iter()
+            .filter(|it| it.drive_letter.to_ascii_uppercase() == target)
+            .map(|it| it.bytes)
+            .sum()
+    }
+
+    /// Returns the recorded growth delta for `drive_letter`, falling back to global `growth`
+    /// only when legacy snapshots omit `per_drive_growth` and every location is on `drive_letter`.
+    #[must_use]
+    pub fn growth_for_drive(&self, drive_letter: char) -> GrowthDelta {
+        let target = drive_letter.to_ascii_uppercase();
+        if let Some(&g) = self.per_drive_growth.get(&target) {
+            return g;
+        }
+        if !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|it| it.drive_letter.to_ascii_uppercase() == target)
+        {
+            return self.growth;
+        }
+        GrowthDelta::NoBaseline
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

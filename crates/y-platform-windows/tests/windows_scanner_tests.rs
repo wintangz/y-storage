@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use y_core::config::AppConfig;
+use y_core::config::{AppConfig, DriveScanTarget};
 use y_core::model::{DriveInfo, InstalledApp};
 use y_core::tree::decompose_scanned_tree;
-use y_platform_windows::scanner::scan_directory_tree_for_test;
+use y_platform_windows::scanner::{
+    execute_scoped_fixture_scan_for_test, scan_directory_tree_for_test,
+};
 
 fn test_tmp_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -97,4 +99,108 @@ fn scanner_config_default_enables_only_system_drive_with_windows_excluded() {
     let units = decompose_scanned_tree(&root, &[] as &[InstalledApp], &[], &[]);
     assert!(units.is_empty());
     let _ = HashMap::<String, String>::new();
+}
+
+#[test]
+fn excluded_drive_apps_are_omitted_and_install_folders_are_never_sized() {
+    let c_root = test_tmp_dir("scoped-drive-c");
+    let d_root = test_tmp_dir("scoped-drive-d");
+    let c_app_dir = c_root.join("Program Files").join("InScopeApp");
+    let d_app_dir = d_root.join("Games").join("ExcludedDriveApp");
+    std::fs::create_dir_all(&c_app_dir).unwrap();
+    std::fs::create_dir_all(&d_app_dir).unwrap();
+    std::fs::write(c_app_dir.join("app.bin"), vec![1u8; 4096]).unwrap();
+    std::fs::write(d_app_dir.join("huge.bin"), vec![2u8; 65536]).unwrap();
+
+    let drives = vec![
+        (
+            DriveInfo {
+                letter: 'C',
+                root: "C:\\".into(),
+                total_bytes: 1_000_000,
+                free_bytes: 900_000,
+                used_bytes: 100_000,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
+            },
+            c_root.to_string_lossy().to_string(),
+        ),
+        (
+            DriveInfo {
+                letter: 'D',
+                root: "D:\\".into(),
+                total_bytes: 2_000_000,
+                free_bytes: 1_500_000,
+                used_bytes: 500_000,
+                is_system_drive: false,
+                full_walk_enabled: false,
+                exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
+            },
+            d_root.to_string_lossy().to_string(),
+        ),
+    ];
+
+    let mut cfg = AppConfig::default();
+    cfg.targets = vec![
+        DriveScanTarget {
+            letter: 'C',
+            enabled: true,
+            exclusions: vec![],
+        },
+        DriveScanTarget {
+            letter: 'D',
+            enabled: false,
+            exclusions: vec![],
+        },
+    ];
+    let installed = vec![
+        InstalledApp {
+            id: "reg:c-in-scope".into(),
+            display_name: "InScopeApp".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["InScopePub".into()],
+            direct_install_location: Some(r"C:\Program Files\InScopeApp".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"C:\Program Files\InScopeApp".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+        InstalledApp {
+            id: "reg:d-excluded".into(),
+            display_name: "ExcludedDriveApp".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
+            aliases: vec![],
+            publishers: vec!["ExcludedPub".into()],
+            direct_install_location: Some(r"D:\Games\ExcludedDriveApp".into()),
+            inferred_install_location: None,
+            all_install_locations: vec![r"D:\Games\ExcludedDriveApp".into()],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon: None,
+        },
+    ];
+
+    let (report, walked) =
+        execute_scoped_fixture_scan_for_test(drives, installed, r"C:\Windows", &cfg);
+
+    assert_eq!(walked, vec!['C'], "excluded D: root must never be walked or sized");
+    assert_eq!(report.apps.len(), 1, "only C: app should remain in scoped report");
+    assert_eq!(report.apps[0].display_name, "InScopeApp");
+    assert_eq!(report.apps[0].total_bytes, 4096);
+    assert!(
+        !report.apps.iter().any(|a| a.display_name == "ExcludedDriveApp"),
+        "app whose InstallLocation sits on excluded D: must be omitted cleanly"
+    );
+
+    let _ = std::fs::remove_dir_all(&c_root);
+    let _ = std::fs::remove_dir_all(&d_root);
 }

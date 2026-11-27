@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use windows_sys::Win32::Graphics::Gdi::{
@@ -9,6 +9,7 @@ use windows_sys::Win32::UI::Shell::{ExtractIconExW, SHDefExtractIconW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 use y_core::discovery::{
     build_registry_catalog, normalize_app_token, normalize_path_key, normalize_windows_path,
+    path_drive_letter,
 };
 use y_core::model::{AttributedApp, CachedAppIcon, NoTouchCategory, ScanReport};
 
@@ -65,6 +66,13 @@ pub fn populate_report_icons(report: &mut ScanReport) {
         HashMap::new()
     };
 
+    let excluded_drives: HashSet<char> = report
+        .drives
+        .iter()
+        .filter(|d| !d.full_walk_enabled)
+        .map(|d| d.letter.to_ascii_uppercase())
+        .collect();
+
     let mut icon_cache: HashMap<(String, i32), Option<CachedAppIcon>> = HashMap::new();
     for app in &mut report.apps {
         if !(app.id.starts_with("reg:")
@@ -79,19 +87,29 @@ pub fn populate_report_icons(report: &mut ScanReport) {
         }
         if app.id.starts_with("reg:") && app.display_icon.is_none() {
             if let Some(ic) = reg_icon_map.get(&app.id) {
-                app.display_icon = Some(ic.clone());
+                if path_drive_letter(ic)
+                    .is_none_or(|dl| !excluded_drives.contains(&dl.to_ascii_uppercase()))
+                {
+                    app.display_icon = Some(ic.clone());
+                }
             }
         }
-        app.icon_rgba = extract_app_icon_cached(app, &mut icon_cache);
+        app.icon_rgba = extract_app_icon_cached(app, &excluded_drives, &mut icon_cache);
     }
 }
 
 fn extract_app_icon_cached(
     app: &AttributedApp,
+    excluded_drives: &HashSet<char>,
     cache: &mut HashMap<(String, i32), Option<CachedAppIcon>>,
 ) -> Option<CachedAppIcon> {
     let candidates = collect_icon_candidates(app);
     for (path, icon_index) in candidates {
+        if path_drive_letter(&path)
+            .is_some_and(|dl| excluded_drives.contains(&dl.to_ascii_uppercase()))
+        {
+            continue;
+        }
         let key = (normalize_path_key(&path), icon_index);
         if let Some(cached) = cache.get(&key) {
             if cached.is_some() {

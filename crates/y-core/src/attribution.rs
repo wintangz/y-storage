@@ -85,6 +85,12 @@ pub fn attribute_scan_with_options(
         })
         .collect();
 
+    let excluded_drives: HashSet<char> = drives
+        .iter()
+        .filter(|d| !d.full_walk_enabled)
+        .map(|d| d.letter.to_ascii_uppercase())
+        .collect();
+
     let mut store_buckets: HashMap<String, usize> = HashMap::new();
     let mut shared_caches: Vec<BreakdownItem> = Vec::new();
     let mut your_files: Vec<BreakdownItem> = Vec::new();
@@ -104,6 +110,9 @@ pub fn attribute_scan_with_options(
             continue;
         }
         let d_letter = unit.drive_letter.to_ascii_uppercase();
+        if excluded_drives.contains(&d_letter) {
+            continue;
+        }
 
         match unit.kind {
             ScannedUnitKind::RootSystemFile => {
@@ -608,7 +617,20 @@ pub fn attribute_scan_with_options(
             b.bases.dedup();
             let prev = previous_history.and_then(|h| h.get(&b.app.display_name).copied());
             let growth = compute_growth(previous_history.is_some(), prev, b.total_bytes);
-            let install_location = b.app.primary_install_location().map(|s| s.to_string());
+            let install_location = b
+                .app
+                .primary_install_location()
+                .filter(|p| {
+                    path_drive_letter(p)
+                        .is_none_or(|dl| !excluded_drives.contains(&dl.to_ascii_uppercase()))
+                })
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    b.items
+                        .iter()
+                        .find(|i| i.zone == Some(ZoneKind::Body))
+                        .map(|i| i.path.clone())
+                });
             AttributedApp {
                 id: b.app.id,
                 display_name: b.app.display_name,
@@ -617,6 +639,7 @@ pub fn attribute_scan_with_options(
                 total_bytes: b.total_bytes,
                 previous_bytes: prev,
                 growth,
+                per_drive_growth: BTreeMap::new(),
                 no_touch: b.app.no_touch,
                 bases: b.bases,
                 items: b.items,
@@ -866,6 +889,7 @@ pub fn merge_drive_rescan(
                 total_bytes,
                 previous_bytes: fresh_app.previous_bytes,
                 growth: fresh_app.growth,
+                per_drive_growth: fresh_app.per_drive_growth,
                 no_touch: fresh_app.no_touch,
                 bases,
                 items: fresh_items_on_target,

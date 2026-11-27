@@ -20,16 +20,16 @@ use y_core::model::{
 use y_platform_windows::scanner::ScanProgressSnapshot;
 
 use crate::list_query::{
-    UnattributedSortMode, category_facet_options, filter_and_sort_apps_with_facets,
-    filter_and_sort_unattributed_with_facets, has_growth_baseline, publisher_facet_options,
-    sanitize_facets_for_report,
+    UnattributedSortMode, active_per_drive_mode, category_facet_options,
+    filter_and_sort_apps_with_facets, filter_and_sort_unattributed_with_facets, has_growth_baseline,
+    publisher_facet_options, sanitize_facets_for_report,
 };
 
-// Pastel and semantic constants synced directly with z-controller (DESIGN.md §2.1).
-pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
-pub const LOGO_BLUE_READABLE: Color32 = Color32::from_rgb(47, 155, 232); // #2F9BE8
-pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 168, 216); // #F7A8D8
-pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(216, 166, 255); // #D8A6FF
+// Pastel and semantic constants sampled from assets/logo-mark.png (DESIGN.md §2.2).
+pub const LOGO_BLUE: Color32 = Color32::from_rgb(133, 212, 251); // #85D4FB (sampled WT mark blue stop)
+pub const LOGO_BLUE_READABLE: Color32 = Color32::from_rgb(6, 126, 185); // #067EB9 (H=199.8deg, L=37.5% light-mode legibility)
+pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 172, 217); // #F7ACD9 (sampled WT mark pink stop)
+pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(215, 165, 255); // #D7A5FF (sampled WT mark lavender stop)
 pub const STATUS_GREEN: Color32 = Color32::from_rgb(40, 214, 108); // #28D66C
 pub const STATUS_RED: Color32 = Color32::from_rgb(240, 68, 88); // #F04458
 
@@ -56,6 +56,7 @@ const BADGE_PILL_H: f32 = 18.0;
 const RADIUS_BADGE_PILL: f32 = BADGE_PILL_H * 0.5;
 
 const SIZE_COL_W: f32 = 96.0;
+const PER_DRIVE_SIZE_COL_W: f32 = 176.0;
 const DELTA_COL_W: f32 = 96.0;
 const APP_ICON_SIZE: f32 = 18.0;
 const PROP_BAR_W: f32 = 76.0;
@@ -157,15 +158,15 @@ impl ThemePalette {
                 header_input_bg: Color32::from_rgb(10, 10, 16), // #0A0A10
                 widget: Color32::from_rgb(24, 24, 38),         // #181826 (z-controller widget)
                 widget_hover: Color32::from_rgb(31, 31, 49),   // #1F1F31 (z-controller widget_hover)
-                widget_active: Color32::from_rgb(24, 34, 48),  // #182230 (z-controller widget_active)
-                accent_line: LOGO_BLUE,                        // #54B9F2 (z-controller accent_line)
-                lavender_text: LOGO_LAVENDER,                  // #D8A6FF
-                proven_text: Color32::from_rgb(124, 203, 255), // #7CCBFF (crisp blue ink inside Dark outline+tint pill)
+                widget_active: Color32::from_rgb(20, 40, 50),  // #142832 (pressed accent tint from WT mark blue)
+                accent_line: LOGO_BLUE,                        // #85D4FB (sampled WT mark blue stop)
+                lavender_text: LOGO_LAVENDER,                  // #D7A5FF
+                proven_text: Color32::from_rgb(157, 223, 252), // #9DDFFC (crisp WT-blue ink inside Dark outline+tint pill)
                 status_green: STATUS_GREEN,                    // #28D66C
                 status_red: STATUS_RED,                        // #F04458
                 delta_grew: STATUS_RED,                        // #F04458 (ADD 3 saturated status)
                 no_touch_outline: STATUS_RED,                  // #F04458 (ADD 3 saturated status)
-                pill_blue_fill: Color32::from_rgb(18, 28, 40), // #121C28 (z-controller pill_blue_fill)
+                pill_blue_fill: Color32::from_rgb(18, 34, 44), // #12222C (subtle WT-blue tint fill)
                 pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (ADD 3 saturated green tint)
                 pill_lav_fill: Color32::from_rgb(32, 24, 46),
                 pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (ADD 3 saturated red tint)
@@ -184,16 +185,16 @@ impl ThemePalette {
                 input_bg: Color32::from_rgb(238, 244, 250),    // #EEF4FA (z-controller extreme_bg on #FFFFFF cards)
                 header_input_bg: Color32::from_rgb(255, 255, 255), // #FFFFFF (crisp contrast on #EEF4FA header canvas)
                 widget: Color32::from_rgb(245, 248, 252),      // #F5F8FC (z-controller widget)
-                widget_hover: Color32::from_rgb(233, 242, 250), // #E9F2FA (z-controller widget_hover)
-                widget_active: Color32::from_rgb(220, 235, 248), // #DCEBF8 (z-controller widget_active)
-                accent_line: LOGO_BLUE_READABLE,               // #2F9BE8 (z-controller accent_line)
+                widget_hover: Color32::from_rgb(232, 244, 251), // #E8F4FB (WT-blue hover wash)
+                widget_active: Color32::from_rgb(216, 238, 249), // #D8EEF9 (WT-blue press wash)
+                accent_line: LOGO_BLUE_READABLE,               // #067EB9 (WT-mark hue L=37.5% light-mode contrast)
                 lavender_text: Color32::from_rgb(120, 62, 184), // #783EB8 (Light contrast exception)
-                proven_text: Color32::from_rgb(21, 101, 184),   // #1565B8 (FIX 4c Light outline+tint ink)
+                proven_text: Color32::from_rgb(5, 107, 158),   // #056B9E (crisp Light outline+tint ink)
                 status_green: Color32::from_rgb(15, 168, 79),   // #0FA84F (ADD 3 saturated Light green)
                 status_red: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light red)
                 delta_grew: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light delta)
                 no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444 (ADD 3 saturated Light NO-TOUCH)
-                pill_blue_fill: Color32::from_rgb(227, 242, 253), // #E3F2FD (FIX 4c soft Light blue tint)
+                pill_blue_fill: Color32::from_rgb(230, 246, 254), // #E6F6FE (soft WT-blue Light pill tint)
                 pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (ADD 3 saturated Light green tint)
                 pill_lav_fill: Color32::from_rgb(243, 236, 255),
                 pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (ADD 3 saturated Light red tint)
@@ -1911,14 +1912,18 @@ struct MainTableColumns {
 }
 
 impl MainTableColumns {
-    fn compute(origin_x: f32, row_w: f32) -> Self {
+    fn compute(origin_x: f32, row_w: f32, per_drive_mode: bool) -> Self {
         let gap = SPACE_12;
         let chev_w = 16.0;
         let chev_gap = SPACE_8;
-        let pub_w = 152.0;
-        let cat_w = 128.0;
+        let pub_w = 148.0;
+        let cat_w = 122.0;
         let delta_w = DELTA_COL_W;
-        let size_w = SIZE_COL_W;
+        let size_w = if per_drive_mode {
+            PER_DRIVE_SIZE_COL_W
+        } else {
+            SIZE_COL_W
+        };
         let fixed_w = chev_w + chev_gap + pub_w + cat_w + delta_w + size_w + gap * 4.0;
         let name_w = (row_w - fixed_w).max(120.0);
 
@@ -1943,6 +1948,7 @@ struct LocationsTableColumns {
     zone: ColSpan,
     path: ColSpan,
     basis: ColSpan,
+    actions: ColSpan,
     size: ColSpan,
 }
 
@@ -1950,19 +1956,22 @@ impl LocationsTableColumns {
     fn compute(origin_x: f32, sub_w: f32) -> Self {
         let gap = SPACE_12;
         let zone_w = 78.0;
-        let basis_w = 170.0;
+        let basis_w = 138.0;
+        let actions_w = 144.0;
         let size_w = SIZE_COL_W;
-        let fixed_w = zone_w + basis_w + size_w + gap * 3.0;
+        let fixed_w = zone_w + basis_w + actions_w + size_w + gap * 3.0 + SPACE_8;
         let path_w = (sub_w - fixed_w).max(120.0);
 
         let zone = ColSpan::new(origin_x, zone_w);
         let path = ColSpan::new(zone.max_x + gap, path_w);
         let basis = ColSpan::new(path.max_x + gap, basis_w);
-        let size = ColSpan::new(basis.max_x + gap, (origin_x + sub_w - (basis.max_x + gap)).max(size_w));
+        let actions = ColSpan::new(basis.max_x + gap, actions_w);
+        let size = ColSpan::new(actions.max_x + SPACE_8, (origin_x + sub_w - (actions.max_x + SPACE_8)).max(size_w));
         Self {
             zone,
             path,
             basis,
+            actions,
             size,
         }
     }
@@ -2296,7 +2305,17 @@ fn draw_facet_popup_overlay(
                                             .drive
                                             .is_some_and(|d| d.to_ascii_uppercase() == dl);
                                         let lbl = format!("{dl}:\\");
-                                        let meta = format_size_2dec(drv.used_bytes);
+                                        let (cnt, sum_b): (usize, u64) = rep
+                                            .apps
+                                            .iter()
+                                            .map(|a| a.bytes_on_drive(dl))
+                                            .filter(|&b| b > 0)
+                                            .fold((0, 0), |(c, s), b| (c + 1, s.saturating_add(b)));
+                                        let meta = if !drv.full_walk_enabled {
+                                            "Not scanned".to_string()
+                                        } else {
+                                            format!("{cnt} · {}", format_size_2dec(sum_b))
+                                        };
                                         if draw_facet_popup_row(ui, row_w, &lbl, Some(&meta), sel, pal) {
                                             ui_state.facets.drive = Some(dl);
                                             picked = true;
@@ -2975,9 +2994,9 @@ fn draw_drive_pods_grid(
                                     "{:.2}% used · {}",
                                     ratio * 100.0,
                                     if included {
-                                        "Included in scan scope"
+                                        "Included in scan scope. Excluded drives are not sized at all, and apps solely on excluded drives are omitted."
                                     } else {
-                                        "Not scanned (excluded from scope)"
+                                        "Not scanned — excluded drives are not sized at all (including registered InstallLocation folders), and apps solely on them are omitted."
                                     }
                                 ));
 
@@ -3185,6 +3204,14 @@ fn draw_pod_scope_overlay(
                                 close_clicked = true;
                             }
                         },
+                    );
+
+                    ui.label(
+                        RichText::new(
+                            "Excluded drives are not sized at all (including registered InstallLocation folders), and apps solely on excluded drives are omitted.",
+                        )
+                        .size(11.0)
+                        .color(pal.muted),
                     );
 
                     if target.exclusions.is_empty() {
@@ -3932,13 +3959,34 @@ pub fn draw_app_ui_with_drive_busy(
                                             list_view_dirty = true;
                                         }
                                     }
-                                    if report.is_some() {
+                                    if let Some(rep_ref) = report {
+                                        let per_drive_mode = active_per_drive_mode(
+                                            ui_state.filter_chip,
+                                            &ui_state.facets,
+                                            sys_drive_letter,
+                                        );
                                         let filtered_active = ui_state.filter_chip
                                             != AppFilterChip::All
                                             || !ui_state.search_query.trim().is_empty()
                                             || !ui_state.facets.is_default();
-                                        let count_txt =
-                                            format!("{shown_count} of {total_apps_count} apps");
+                                        let count_txt = if let Some(dl) = per_drive_mode {
+                                            let drv_sum: u64 = ui_state
+                                                .cached_filtered
+                                                .as_ref()
+                                                .map(|cf| {
+                                                    cf.visible_indices
+                                                        .iter()
+                                                        .map(|&idx| rep_ref.apps[idx].bytes_on_drive(dl))
+                                                        .sum()
+                                                })
+                                                .unwrap_or(0);
+                                            format!(
+                                                "{shown_count} apps · {} on {dl}:",
+                                                format_size_2dec(drv_sum)
+                                            )
+                                        } else {
+                                            format!("{shown_count} of {total_apps_count} apps")
+                                        };
                                         let count_rt = RichText::new(count_txt).size(11.5).color(
                                             if filtered_active { pal.text } else { pal.muted },
                                         );
@@ -4299,6 +4347,16 @@ fn draw_main_app_list(
 
     ui_state.first_row_size_rect = None;
     let has_prop_strong = ui_state.has_prop_strong;
+    let sys_drive_letter = rep
+        .drives
+        .iter()
+        .find(|d| d.is_system_drive)
+        .map_or('C', |d| d.letter.to_ascii_uppercase());
+    let per_drive_mode = active_per_drive_mode(
+        ui_state.filter_chip,
+        &ui_state.facets,
+        sys_drive_letter,
+    );
     let mut cached_report = ui_state.cached_report.take();
     let visible_indices: Vec<usize> = ui_state
         .cached_filtered
@@ -4308,9 +4366,19 @@ fn draw_main_app_list(
     let max_unfiltered_bytes = cached_report
         .as_ref()
         .map_or_else(|| rep.apps.iter().map(|a| a.total_bytes).max().unwrap_or(0), |c| c.max_unfiltered_bytes);
+    let max_bar_bytes = per_drive_mode.map_or(max_unfiltered_bytes, |dl| {
+        rep.apps
+            .iter()
+            .map(|a| a.bytes_on_drive(dl))
+            .max()
+            .unwrap_or(0)
+    });
     let total_attributed_bytes = cached_report
         .as_ref()
         .map_or_else(|| rep.apps.iter().map(|a| a.total_bytes).sum(), |c| c.total_attributed_bytes);
+    let total_mode_bytes = per_drive_mode.map_or(total_attributed_bytes, |dl| {
+        rep.total_apps_bytes_on_drive(dl)
+    });
     let shown = visible_indices.len();
 
     let avail_w = ui.available_width();
@@ -4333,7 +4401,7 @@ fn draw_main_app_list(
 
     let hdr_content_x0 = panel_left + inset + SPACE_12;
     let hdr_content_w = (panel_w - (inset * 2.0 + SPACE_12 * 2.0)).max(200.0);
-    let cols = MainTableColumns::compute(hdr_content_x0, hdr_content_w);
+    let cols = MainTableColumns::compute(hdr_content_x0, hdr_content_w, per_drive_mode.is_some());
 
     // Sticky column-header strip fixed outside ScrollArea; clicking sortable columns changes sort mode/direction.
     let (hdr_row_rect, _) =
@@ -4394,11 +4462,15 @@ fn draw_main_app_list(
     ) {
         sort_clicked = Some(AppSortMode::Growth);
     }
+    let size_col_hdr = match per_drive_mode {
+        Some(dl) => format!("Size on {dl}:"),
+        None => "Total size".to_string(),
+    };
     if draw_sortable_col_header(
         ui,
         cols.size.rect(hdr_y0, hdr_y1),
         "main_size",
-        "Total size",
+        &size_col_hdr,
         AppSortMode::Size,
         ui_state.sort_mode,
         ui_state.sort_direction,
@@ -4454,6 +4526,7 @@ fn draw_main_app_list(
     let open_reverse_dep_id = &mut ui_state.open_reverse_dep_id;
     let cached_rim = &mut ui_state.cached_rim;
     let truncate_cache = &mut ui_state.truncate_cache;
+    let path_exists_cache = &mut ui_state.unattrib_exists_cache;
     let first_row_size_rect = &mut ui_state.first_row_size_rect;
     let mut show_bottom_fade = false;
 
@@ -4710,11 +4783,15 @@ fn draw_main_app_list(
                                 );
                             }
 
-                            // 5. Growth delta (monospace Regular numerals for +/- deltas)
-                            let delta_info = cached_report
-                                .as_ref()
-                                .and_then(|cr| cr.apps[app_idx].delta_display.clone())
-                                .or_else(|| format_delta_display(app.growth, pal));
+                            // 5. Growth delta (per-drive when single drive constraint active; global otherwise)
+                            let delta_info = if let Some(dl) = per_drive_mode {
+                                format_delta_display(app.growth_for_drive(dl), pal)
+                            } else {
+                                cached_report
+                                    .as_ref()
+                                    .and_then(|cr| cr.apps[app_idx].delta_display.clone())
+                                    .or_else(|| format_delta_display(app.growth, pal))
+                            };
                             if let Some((ref d_text, d_col, _)) = delta_info {
                                 let mut d_ui = table_cell_ui(
                                     ui,
@@ -4734,7 +4811,9 @@ fn draw_main_app_list(
                                 );
                             }
 
-                            // 5. Total size (Consolas Regular numerals + thin <= 2px quiet proportion bar)
+                            // 6. Primary Size column (global total OR per-drive sum + muted "of global" companion in per-drive mode)
+                            let display_bytes =
+                                per_drive_mode.map_or(app.total_bytes, |dl| app.bytes_on_drive(dl));
                             let size_cell_rect = cols.size.rect(y0, y1);
                             if row_idx == 0 {
                                 *first_row_size_rect = Some(size_cell_rect);
@@ -4749,32 +4828,50 @@ fn draw_main_app_list(
                                     text_rect,
                                     Layout::right_to_left(Align::Center),
                                 );
+                                s_ui.spacing_mut().item_spacing.x = SPACE_8;
                                 let s_font = mono_font_for(&s_ui, 13.0, false);
-                                let total_label = cached_report
-                                    .as_ref()
-                                    .map(|cr| cr.apps[app_idx].total_str.as_str())
-                                    .unwrap_or("");
-                                if total_label.is_empty() {
+                                if per_drive_mode.is_none() {
+                                    let total_label = cached_report
+                                        .as_ref()
+                                        .map(|cr| cr.apps[app_idx].total_str.as_str())
+                                        .unwrap_or("");
+                                    let lbl_txt = if total_label.is_empty() {
+                                        format_size_2dec(display_bytes)
+                                    } else {
+                                        total_label.to_string()
+                                    };
                                     s_ui.add(
                                         egui::Label::new(
-                                            RichText::new(format_size_2dec(app.total_bytes))
-                                                .font(s_font)
-                                                .color(pal.text),
+                                            RichText::new(lbl_txt).font(s_font).color(pal.text),
                                         )
                                         .selectable(false),
                                     );
                                 } else {
                                     s_ui.add(
                                         egui::Label::new(
-                                            RichText::new(total_label)
+                                            RichText::new(format_size_2dec(display_bytes))
                                                 .font(s_font)
                                                 .color(pal.text),
                                         )
                                         .selectable(false),
                                     );
+                                    if app.total_bytes != display_bytes {
+                                        let comp_font = mono_font_for(&s_ui, 10.5, false);
+                                        s_ui.add(
+                                            egui::Label::new(
+                                                RichText::new(format!(
+                                                    "of {}",
+                                                    format_size_2dec(app.total_bytes)
+                                                ))
+                                                .font(comp_font)
+                                                .color(pal.muted),
+                                            )
+                                            .selectable(false),
+                                        );
+                                    }
                                 }
 
-                                // Thin 2px muted proportion indicator relative to largest unfiltered app.
+                                // Thin 2px muted proportion indicator relative to largest row in the active mode.
                                 let row_surface = if expanded { pal.panel_alt } else { pal.panel };
                                 let track_rect = Rect::from_min_max(
                                     Pos2::new((size_cell_rect.max.x - PROP_BAR_W).max(size_cell_rect.min.x), y1 - PROP_BAR_H - 1.0),
@@ -4784,12 +4881,12 @@ fn draw_main_app_list(
                                 ui.painter()
                                     .rect_filled(track_rect, Rounding::same(1.0), track_col);
 
-                                let ratio = if max_unfiltered_bytes > 0 {
-                                    (app.total_bytes as f64 / max_unfiltered_bytes as f64).clamp(0.0, 1.0)
+                                let ratio = if max_bar_bytes > 0 {
+                                    (display_bytes as f64 / max_bar_bytes as f64).clamp(0.0, 1.0)
                                 } else {
                                     0.0
                                 };
-                                let fill_w = if app.total_bytes == 0 {
+                                let fill_w = if display_bytes == 0 {
                                     0.0
                                 } else {
                                     (track_rect.width() * ratio as f32).clamp(1.0, track_rect.width())
@@ -4821,21 +4918,35 @@ fn draw_main_app_list(
                             let mut cell_tooltip: Option<String> = None;
                             if let Some(pos) = sum_resp.hover_pos() {
                                 if size_cell_rect.contains(pos) {
-                                    cell_tooltip = cached_report
-                                        .as_ref()
-                                        .map(|cr| cr.apps[app_idx].total_tip.clone())
-                                        .or_else(|| {
-                                            let share_pct = if total_attributed_bytes > 0 {
-                                                (app.total_bytes as f64 / total_attributed_bytes as f64) * 100.0
-                                            } else {
-                                                0.0
-                                            };
-                                            Some(format!(
-                                                "{} · {:.2}% share",
-                                                format_exact_bytes(app.total_bytes),
-                                                share_pct
-                                            ))
-                                        });
+                                    if let Some(dl) = per_drive_mode {
+                                        let share_pct = if total_mode_bytes > 0 {
+                                            (display_bytes as f64 / total_mode_bytes as f64) * 100.0
+                                        } else {
+                                            0.0
+                                        };
+                                        cell_tooltip = Some(format!(
+                                            "On {dl}:\\: {} ({:.2}% share) · Global total: {}",
+                                            format_exact_bytes(display_bytes),
+                                            share_pct,
+                                            format_exact_bytes(app.total_bytes)
+                                        ));
+                                    } else {
+                                        cell_tooltip = cached_report
+                                            .as_ref()
+                                            .map(|cr| cr.apps[app_idx].total_tip.clone())
+                                            .or_else(|| {
+                                                let share_pct = if total_attributed_bytes > 0 {
+                                                    (app.total_bytes as f64 / total_attributed_bytes as f64) * 100.0
+                                                } else {
+                                                    0.0
+                                                };
+                                                Some(format!(
+                                                    "{} · {:.2}% share",
+                                                    format_exact_bytes(app.total_bytes),
+                                                    share_pct
+                                                ))
+                                            });
+                                    }
                                 } else if cols.delta.rect(y0, y1).contains(pos) {
                                     cell_tooltip = delta_info.map(|(_, _, tip)| tip);
                                 } else if cols.category.rect(y0, y1).contains(pos) {
@@ -5113,12 +5224,27 @@ fn draw_main_app_list(
                                         );
                                         ui.add_space(1.0);
                                     }
+                                    let loc_hover_slot = ui.painter().add(egui::Shape::Noop);
                                     let (l_rect, _) = ui.allocate_exact_size(
                                         Vec2::new(panel_w, SUB_LINE1_H + 2.0),
                                         Sense::hover(),
                                     );
                                     let ry0 = l_rect.min.y;
                                     let ry1 = l_rect.max.y;
+                                    let sub_row_rect = Rect::from_min_max(
+                                        Pos2::new(sub_x0 - SPACE_4, ry0),
+                                        Pos2::new(cols.size.max_x + SPACE_4, ry1),
+                                    );
+                                    if ui.rect_contains_pointer(sub_row_rect) {
+                                        ui.painter().set(
+                                            loc_hover_slot,
+                                            egui::Shape::rect_filled(
+                                                sub_row_rect,
+                                                Rounding::ZERO,
+                                                pal.widget_hover,
+                                            ),
+                                        );
+                                    }
 
                                     if let Some(zone) = item.zone {
                                         let mut z_ui = table_cell_ui(
@@ -5219,6 +5345,63 @@ fn draw_main_app_list(
                                             b_rect.width(),
                                             truncate_cache,
                                         );
+                                    }
+
+                                    {
+                                        let mut a_ui = table_cell_ui(
+                                            ui,
+                                            loc_cols.actions.rect(ry0, ry1),
+                                            Layout::right_to_left(Align::Center),
+                                        );
+                                        a_ui.spacing_mut().item_spacing.x = SPACE_4;
+                                        let (search_query, search_url) =
+                                            crate::unattributed_assist::build_unattributed_search_url(
+                                                &item.path,
+                                            );
+                                        let web_resp = draw_z_button(
+                                            &mut a_ui,
+                                            "Web search",
+                                            Vec2::new(0.0, 18.0),
+                                            10.5,
+                                            RADIUS_PILL,
+                                            true,
+                                            false,
+                                            ButtonVariant::SubtleOutline,
+                                            pal,
+                                        );
+                                        if web_resp.clicked() {
+                                            emit(UiAction::OpenWebSearch(search_url));
+                                        }
+                                        let _ = web_resp.on_hover_text(format!(
+                                            "Web search (Google): {search_query}"
+                                        ));
+
+                                        let exists = *path_exists_cache
+                                            .entry(item.path.clone())
+                                            .or_insert_with(|| {
+                                                std::path::Path::new(&item.path).exists()
+                                            });
+                                        let loc_resp = draw_z_button(
+                                            &mut a_ui,
+                                            "Locate",
+                                            Vec2::new(0.0, 18.0),
+                                            10.5,
+                                            RADIUS_PILL,
+                                            exists,
+                                            false,
+                                            ButtonVariant::SubtleOutline,
+                                            pal,
+                                        );
+                                        if exists {
+                                            if loc_resp.clicked() {
+                                                emit(UiAction::LocateInExplorer(item.path.clone()));
+                                            }
+                                            let _ = loc_resp.on_hover_text(
+                                                crate::unattributed_assist::build_explorer_select_command_line(&item.path),
+                                            );
+                                        } else {
+                                            let _ = loc_resp.on_hover_text("no longer on disk");
+                                        }
                                     }
 
                                     {
@@ -6086,8 +6269,19 @@ fn draw_pinned_bottom_groups(
                     true,
                     pal,
                     |ui| {
-                        for item in &rep.your_files {
-                            let _ = draw_simple_item_row(ui, &item.path, item.bytes, None, pal);
+                        for (vis_idx, item) in rep.your_files.iter().enumerate() {
+                            draw_ledger_folder_item_row(
+                                ui,
+                                vis_idx,
+                                &item.path,
+                                item.bytes,
+                                None,
+                                pal,
+                                unattrib_exists_cache,
+                                &mut None,
+                                &mut None,
+                                emit,
+                            );
                         }
                     },
                 );
@@ -6102,13 +6296,18 @@ fn draw_pinned_bottom_groups(
                     true,
                     pal,
                     |ui| {
-                        for item in rep.shared_caches.iter().take(40) {
-                            let _ = draw_simple_item_row(
+                        for (vis_idx, item) in rep.shared_caches.iter().take(40).enumerate() {
+                            draw_ledger_folder_item_row(
                                 ui,
+                                vis_idx,
                                 &item.path,
                                 item.bytes,
                                 Some(("GREEN", zone_chip_style(ZoneKind::Green, pal))),
                                 pal,
+                                unattrib_exists_cache,
+                                &mut None,
+                                &mut None,
+                                emit,
                             );
                         }
                     },
@@ -6527,6 +6726,33 @@ fn draw_unattributed_item_row(
     mid_row_rect: &mut Option<Rect>,
     emit: &mut dyn FnMut(UiAction),
 ) {
+    draw_ledger_folder_item_row(
+        ui,
+        row_idx,
+        path,
+        bytes,
+        None,
+        pal,
+        exists_cache,
+        first_web_search_rect,
+        mid_row_rect,
+        emit,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ledger_folder_item_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    path: &str,
+    bytes: u64,
+    chip: Option<(&str, ChipStyle)>,
+    pal: &ThemePalette,
+    exists_cache: &mut HashMap<String, bool>,
+    first_web_search_rect: &mut Option<Rect>,
+    mid_row_rect: &mut Option<Rect>,
+    emit: &mut dyn FnMut(UiAction),
+) {
     const ROW_H: f32 = 22.0;
     const RIGHT_CLUSTER_W: f32 = SIZE_COL_W + SPACE_8 + 148.0;
     let avail_w = ui.available_width().max(RIGHT_CLUSTER_W + 60.0);
@@ -6569,7 +6795,11 @@ fn draw_unattributed_item_row(
             .expand2(Vec2::new(1.0, 1.0))
             .intersect(ui.clip_rect()),
     );
+    left_ui.spacing_mut().item_spacing.x = SPACE_8;
     left_ui.add_space(SPACE_16);
+    if let Some((lbl, style)) = chip {
+        paint_chip(&mut left_ui, lbl, style, pal.panel);
+    }
     draw_truncated_text(
         &mut left_ui,
         path,
@@ -6861,7 +7091,7 @@ fn draw_settings_view(
     ui.add_space(SPACE_4);
     ui.label(
         RichText::new(
-            "Default: only the system drive is enabled for a full walk with Windows excluded. Registry InstallLocation folders are always sized individually on all drives.",
+            "Default: only the system drive is enabled with Windows excluded. Excluded drives are never walked or sized (including registered InstallLocation folders), and apps whose folders all live on excluded drives are omitted from the report.",
         )
         .size(12.0)
         .color(pal.muted),
@@ -7392,6 +7622,7 @@ mod tests {
                 total_bytes: 50_000,
                 previous_bytes: Some(40_000),
                 growth: GrowthDelta::Changed(10_000),
+                per_drive_growth: Default::default(),
                 no_touch: None,
                 bases: vec![AttributionBasis::InstallLocation, AttributionBasis::ExactName],
                 items: vec![
@@ -7623,6 +7854,7 @@ mod tests {
                 total_bytes: 1_000_000 - (i as u64) * 1000,
                 previous_bytes: None,
                 growth: GrowthDelta::NoBaseline,
+                per_drive_growth: Default::default(),
                 no_touch: None,
                 bases: vec![AttributionBasis::ExactName],
                 items: vec![BreakdownItem {
@@ -7933,6 +8165,7 @@ mod tests {
                 total_bytes: 100_000,
                 previous_bytes: None,
                 growth: GrowthDelta::NoBaseline,
+                per_drive_growth: Default::default(),
                 no_touch: None,
                 bases: vec![AttributionBasis::InstallLocation],
                 items: vec![BreakdownItem {
@@ -8141,6 +8374,7 @@ mod tests {
                 total_bytes: 100_000,
                 previous_bytes: None,
                 growth: GrowthDelta::NoBaseline,
+                per_drive_growth: Default::default(),
                 no_touch: None,
                 bases: vec![AttributionBasis::ContainerRule],
                 items: vec![BreakdownItem {
@@ -8309,5 +8543,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn expanded_app_drawer_locations_render_locate_and_web_search_with_missing_folder_guard() {
+        let existing_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let missing_loc = r"C:\__y_storage_missing_app_location_test__";
+        let (mut report, cfg) = make_synthetic_report_for_drives(2);
+        report.apps = vec![AttributedApp {
+            id: "reg:loc-actions".into(),
+            display_name: "Location Actions Test".into(),
+            publishers: vec!["TestPub".into()],
+            install_location: Some(existing_dir.clone()),
+            total_bytes: 800_000,
+            previous_bytes: None,
+            growth: GrowthDelta::NoBaseline,
+            per_drive_growth: Default::default(),
+            no_touch: None,
+            bases: vec![AttributionBasis::InstallLocation, AttributionBasis::ExactName],
+            items: vec![
+                BreakdownItem {
+                    path: existing_dir.clone(),
+                    bytes: 600_000,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::InstallLocation),
+                    basis_detail: None,
+                    no_touch: None,
+                    drive_letter: 'C',
+                },
+                BreakdownItem {
+                    path: missing_loc.to_string(),
+                    bytes: 200_000,
+                    zone: Some(ZoneKind::Red),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::ExactName),
+                    basis_detail: None,
+                    no_touch: None,
+                    drive_letter: 'C',
+                },
+            ],
+            dependencies: vec![],
+            display_icon: None,
+            icon_rgba: None,
+            category: y_core::model::AppCategory::Utilities,
+            category_basis: "rule".into(),
+        }];
+
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut state = StorageUiState::default();
+        state.expanded_apps.insert("reg:loc-actions".into());
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut state,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    "C:\\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!out.shapes.is_empty());
+        assert_eq!(state.unattrib_exists_cache.get(&existing_dir), Some(&true));
+        assert_eq!(state.unattrib_exists_cache.get(missing_loc), Some(&false));
+    }
+
+    #[test]
+    fn per_drive_size_mode_relabels_header_and_renders_companion_totals() {
+        let (mut report, cfg) = make_synthetic_report_for_drives(2);
+        report.apps[0].items.push(BreakdownItem {
+            path: r"D:\Data\SampleTool".into(),
+            bytes: 5_000_000_000,
+            zone: Some(ZoneKind::Body),
+            qualifier: None,
+            basis: Some(AttributionBasis::InstallLocation),
+            basis_detail: None,
+            no_touch: None,
+            drive_letter: 'D',
+        });
+        report.apps[0].total_bytes = 5_000_100_000;
+
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut state = StorageUiState::default();
+        state.facets.drive = Some('C');
+
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut state,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    "C:\\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!out.shapes.is_empty());
     }
 }
