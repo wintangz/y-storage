@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use y_core::dependencies::{
-    AppBinaryEvidence, DependencyCatalog, analyze_report_dependencies, parse_deps_json_is_dotnet,
-    parse_steam_appmanifest, resolve_catalog_targets,
+    AppBinaryEvidence, DependencyCatalog, analyze_report_dependencies, extract_dotnet_major_from_tfm,
+    parse_deps_json_is_dotnet, parse_runtimeconfig_json_major, parse_steam_appmanifest,
+    resolve_catalog_targets_with_registry,
 };
 use y_core::discovery::{is_subpath_of, normalize_path_key, normalize_windows_path};
 use y_core::model::{AttributedApp, ScanReport, ZoneKind};
@@ -67,23 +68,36 @@ fn build_steam_manifest_index(apps: &[AttributedApp]) -> SteamManifestIndex {
 fn parse_appx_manifest(xml_text: &str) -> Vec<(String, String)> {
     let lower = xml_text.to_ascii_lowercase();
     let mut out = Vec::new();
-    let checks = [
-        ("microsoft.vclibs", "vcpp-runtime", "AppxManifest: Microsoft.VCLibs"),
-        (
-            "microsoft.directxruntime",
-            "directx-runtime",
-            "AppxManifest: Microsoft.DirectXRuntime",
-        ),
-        (
-            "microsoft.windowsappruntime",
-            "dotnet-runtime",
-            "AppxManifest: WindowsAppRuntime",
-        ),
-    ];
-    for (needle, tid, basis) in checks {
-        if lower.contains(needle) {
-            out.push((tid.to_string(), basis.to_string()));
-        }
+    if lower.contains("microsoft.vclibs.110") {
+        out.push(("vcpp-2012".to_string(), "AppxManifest: Microsoft.VCLibs.110".to_string()));
+    } else if lower.contains("microsoft.vclibs.120") {
+        out.push(("vcpp-2013".to_string(), "AppxManifest: Microsoft.VCLibs.120".to_string()));
+    } else if lower.contains("microsoft.vclibs") {
+        out.push(("vcpp-v14".to_string(), "AppxManifest: Microsoft.VCLibs.140".to_string()));
+    }
+    if lower.contains("microsoft.directxruntime") {
+        out.push((
+            "directx-runtime".to_string(),
+            "AppxManifest: Microsoft.DirectXRuntime".to_string(),
+        ));
+    }
+    if lower.contains("microsoft.windowsappruntime") {
+        out.push((
+            "dotnet-runtime".to_string(),
+            "AppxManifest: WindowsAppRuntime".to_string(),
+        ));
+    }
+    if lower.contains("microsoft.ui.xaml") {
+        out.push((
+            "winui-xaml".to_string(),
+            "AppxManifest: Microsoft.UI.Xaml".to_string(),
+        ));
+    }
+    if lower.contains("microsoft.net.native") {
+        out.push((
+            "dotnet-native".to_string(),
+            "AppxManifest: Microsoft.NET.Native".to_string(),
+        ));
     }
     out
 }
@@ -99,7 +113,7 @@ fn parse_installerdata_xml(xml_text: &str) -> Vec<(String, String)> {
     }
     if lower.contains("-req:vc") || lower.contains("visual c++") {
         out.push((
-            "vcpp-runtime".to_string(),
+            "vcpp-generic".to_string(),
             "manifest: __Installer/installerdata.xml (VC++ redist)".to_string(),
         ));
     }
@@ -113,6 +127,9 @@ fn parse_installerdata_xml(xml_text: &str) -> Vec<(String, String)> {
 }
 
 fn should_descend_binary_subdir(depth: usize, name_lower: &str) -> bool {
+    if depth >= 4 {
+        return false;
+    }
     if matches!(
         name_lower,
         "data"
@@ -122,35 +139,28 @@ fn should_descend_binary_subdir(depth: usize, name_lower: &str) -> bool {
             | "node_modules"
             | ".git"
             | "cache"
+            | "caches"
+            | "code cache"
+            | "gpucache"
+            | "shadercache"
+            | "dxcache"
+            | "glcache"
             | "toolchains"
             | "packages"
             | "logs"
             | "shader"
             | "shaders"
+            | "doc"
+            | "docs"
+            | "help"
+            | "legal"
+            | "streamingassets"
+            | "assets"
+            | "locale"
     ) {
         return false;
     }
-    if depth < 1 {
-        return true;
-    }
-    depth < 3
-        && matches!(
-            name_lower,
-            "launcher"
-                | "portal"
-                | "engine"
-                | "binaries"
-                | "bin"
-                | "win64"
-                | "win32"
-                | "x64"
-                | "x86"
-                | "extras"
-                | "eos"
-                | "eosbootstrapper"
-                | "service"
-                | "services"
-        )
+    true
 }
 
 fn collect_app_evidence(
@@ -159,6 +169,7 @@ fn collect_app_evidence(
 ) -> AppBinaryEvidence {
     let mut ev = AppBinaryEvidence::default();
     let mut body_roots: Vec<PathBuf> = Vec::new();
+    let mut fallback_roots: Vec<PathBuf> = Vec::new();
     let mut companion_tokens: BTreeSet<String> = BTreeSet::new();
 
     for item in &app.items {
@@ -167,17 +178,25 @@ fn collect_app_evidence(
                 .install_location
                 .as_deref()
                 .is_some_and(|il| is_subpath_of(&item.path, il));
-        if is_body_candidate && !item.path.ends_with("[files]") {
+        if !item.path.ends_with("[files]") {
             let p = PathBuf::from(&item.path);
-            if p.is_dir() {
+            let p_lower = item.path.to_ascii_lowercase();
+            let is_cache_only = item.zone == Some(ZoneKind::Green)
+                || p_lower.contains("\\cache")
+                || p_lower.contains("\\temp")
+                || p_lower.contains("\\package cache\\");
+            if is_body_candidate && p.is_dir() {
                 body_roots.push(p);
-            }
-        } else if !item.path.ends_with("[files]") {
-            if let Ok(rd) = fs::read_dir(&item.path) {
-                for ent in rd.flatten() {
-                    if let Ok(ft) = ent.file_type() {
-                        if ft.is_dir() {
-                            companion_tokens.insert(ent.file_name().to_string_lossy().to_ascii_lowercase());
+            } else if p.is_dir() {
+                if !is_cache_only || p_lower.contains("\\ms-playwright") {
+                    fallback_roots.push(p);
+                }
+                if let Ok(rd) = fs::read_dir(&item.path) {
+                    for ent in rd.flatten() {
+                        if let Ok(ft) = ent.file_type() {
+                            if ft.is_dir() {
+                                companion_tokens.insert(ent.file_name().to_string_lossy().to_ascii_lowercase());
+                            }
                         }
                     }
                 }
@@ -207,21 +226,31 @@ fn collect_app_evidence(
         }
     }
 
-    if body_roots.is_empty() {
+    let using_fallback = body_roots.is_empty();
+    let scan_roots = if using_fallback { fallback_roots } else { body_roots };
+    if scan_roots.is_empty() {
         return ev;
     }
 
-    let mut queue: VecDeque<(PathBuf, usize)> = body_roots.into_iter().map(|p| (p, 0)).collect();
-    let pe_limit: usize = if app.id.starts_with("store:") { 4 } else { 24 };
+    let mut queue: VecDeque<(PathBuf, usize)> = scan_roots.into_iter().map(|p| (p, 0)).collect();
+    let pe_limit: usize = if using_fallback {
+        16
+    } else if app.id.starts_with("store:") {
+        12
+    } else {
+        40
+    };
     let mut pe_parsed_count = 0usize;
     let mut dlls_set: BTreeSet<String> = BTreeSet::new();
     let mut names_set: BTreeSet<String> = BTreeSet::new();
+    let mut dotnet_majors: BTreeSet<u32> = BTreeSet::new();
 
     while let Some((dir, depth)) = queue.pop_front() {
         let Ok(rd) = fs::read_dir(&dir) else {
             continue;
         };
         let mut subdirs = Vec::new();
+        let mut pe_candidates: Vec<(bool, PathBuf, u64)> = Vec::new();
         for ent in rd.flatten() {
             let Ok(ft) = ent.file_type() else { continue };
             if ft.is_symlink() {
@@ -242,24 +271,30 @@ fn collect_app_evidence(
                 names_set.insert(name_lower.clone());
             }
 
-            if (name_lower.ends_with(".exe") || name_lower.ends_with(".dll"))
-                && pe_parsed_count < pe_limit
-            {
+            if name_lower.ends_with(".exe") || name_lower.ends_with(".dll") {
                 let file_len = ent.metadata().map(|m| m.len()).unwrap_or(0);
-                // Avoid Defender/AV stalls on multi-hundred-MB packed game executables when smaller PEs exist.
-                if file_len > 0 && file_len <= 64 * 1024 * 1024 {
-                    if let Ok(mut f) = File::open(&path) {
-                        for dll in parse_pe_imported_dlls(&mut f) {
-                            dlls_set.insert(dll);
-                        }
-                        pe_parsed_count += 1;
-                    }
+                // parse_pe_imported_dlls only seeks and reads tiny header/import slices (<12 KB).
+                if file_len > 0 && file_len <= 512 * 1024 * 1024 {
+                    pe_candidates.push((name_lower.ends_with(".exe"), path, file_len));
                 }
             } else if name_lower.ends_with(".deps.json") {
                 if let Ok(txt) = fs::read_to_string(&path) {
-                    if parse_deps_json_is_dotnet(&txt).is_some() {
+                    if let Some(rt) = parse_deps_json_is_dotnet(&txt) {
                         ev.has_deps_json = true;
                         ev.deps_json_files.push(name);
+                        if let Some(m) = extract_dotnet_major_from_tfm(&rt) {
+                            dotnet_majors.insert(m);
+                        }
+                    }
+                }
+            } else if name_lower.ends_with(".runtimeconfig.json") {
+                if let Ok(txt) = fs::read_to_string(&path) {
+                    if let Some(m) = parse_runtimeconfig_json_major(&txt) {
+                        ev.has_deps_json = true;
+                        if ev.deps_json_files.is_empty() {
+                            ev.deps_json_files.push(name);
+                        }
+                        dotnet_majors.insert(m);
                     }
                 }
             } else if name_lower == "appxmanifest.xml" {
@@ -272,6 +307,19 @@ fn collect_app_evidence(
                 }
             }
         }
+        // Prioritize .exe files before .dll files inside each directory so PE limit catches entry points first.
+        pe_candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+        for (_, path, _) in pe_candidates {
+            if pe_parsed_count >= pe_limit {
+                break;
+            }
+            if let Ok(mut f) = File::open(&path) {
+                for dll in parse_pe_imported_dlls(&mut f) {
+                    dlls_set.insert(dll);
+                }
+                pe_parsed_count += 1;
+            }
+        }
         for sd in subdirs {
             queue.push_back(sd);
         }
@@ -280,6 +328,7 @@ fn collect_app_evidence(
     ev.imported_dlls = dlls_set.into_iter().collect();
     ev.file_names_lower = names_set.into_iter().collect();
     ev.companion_dir_tokens = companion_tokens.into_iter().collect();
+    ev.dotnet_major_versions = dotnet_majors.into_iter().collect();
     ev
 }
 
@@ -306,8 +355,30 @@ pub fn enrich_report_with_dependencies(report: &mut ScanReport) {
     }
     let catalog = loaded.catalog;
     let services = enumerate_windows_services();
-    let target_statuses =
-        resolve_catalog_targets(&catalog, &report.apps, &services, |p| Path::new(p).exists());
+    let target_statuses = resolve_catalog_targets_with_registry(
+        &catalog,
+        &report.apps,
+        &report.installed_registry_names,
+        &services,
+        |p| {
+            if let Some(prefix_base) = p.strip_suffix(".*") {
+                if let Some((parent, leaf_prefix)) = prefix_base.rsplit_once('\\') {
+                    let lp = leaf_prefix.to_ascii_lowercase();
+                    if let Ok(rd) = fs::read_dir(parent) {
+                        return rd.flatten().any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .to_ascii_lowercase()
+                                .starts_with(&format!("{lp}."))
+                        });
+                    }
+                }
+                false
+            } else {
+                Path::new(p).exists()
+            }
+        },
+    );
     let steam_idx = Arc::new(build_steam_manifest_index(&report.apps));
 
     let app_indices: Mutex<VecDeque<usize>> =

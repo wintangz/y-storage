@@ -344,6 +344,28 @@ fn render_screenshot_frame(
                 }
             }
         }
+        "vcpp-split" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            if ui_state.search_query.is_empty() {
+                ui_state.search_query = "Visual C++".to_string();
+            }
+        }
+        "vcpp-drawer" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            if ui_state.search_query.is_empty() {
+                ui_state.search_query = "Visual C++".to_string();
+            }
+            if let Some(vcpp) = report.apps.iter().find(|a| {
+                let lower = a.display_name.to_ascii_lowercase();
+                lower.contains("visual c++") && lower.contains("v14")
+            }).or_else(|| {
+                report.apps.iter().find(|a| a.display_name.to_ascii_lowercase().contains("visual c++"))
+            }) {
+                ui_state.expanded_apps.insert(vcpp.id.clone());
+            }
+        }
         "ledger-resized" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;

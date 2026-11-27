@@ -40,6 +40,8 @@ fn versioned_product_under_publisher_rule_sums_versions_and_skips_non_versions()
     let apps = vec![InstalledApp {
         id: "reg:chrome".into(),
         display_name: "Google Chrome".into(),
+        display_version: String::new(),
+        uninstall_guids: vec![],
         aliases: vec![],
         publishers: vec!["Google LLC".into()],
         direct_install_location: Some("C:\\Program Files\\Google\\Chrome\\Application".into()),
@@ -165,6 +167,8 @@ fn xdata_rule_matches_installed_and_known_apps_without_force_matching_unknowns()
     let apps = vec![InstalledApp {
         id: "reg:signal".into(),
         display_name: "Signal".into(),
+        display_version: String::new(),
+        uninstall_guids: vec![],
         aliases: vec![],
         publishers: vec!["Signal Foundation".into()],
         direct_install_location: None,
@@ -394,6 +398,7 @@ fn standalone_playwright_tabnine_and_split_containers_preserve_reconciliation() 
         hive_view: String::new(),
         subkey_name: String::new(),
         display_name: String::new(),
+        display_version: String::new(),
         publisher: String::new(),
         install_location: String::new(),
         uninstall_string: String::new(),
@@ -451,6 +456,8 @@ fn catalog_embed_override_and_corrupt_fallback_work_as_specified() {
         &[InstalledApp {
             id: "reg:fifa".into(),
             display_name: "EA SPORTS™ FIFA 23".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
             aliases: vec![],
             publishers: vec!["EA Canada".into()],
             direct_install_location: Some("D:\\Games\\Steam\\steamapps\\common\\FIFA 23".into()),
@@ -513,4 +520,336 @@ fn catalog_embed_override_and_corrupt_fallback_work_as_specified() {
     let _ = std::fs::remove_dir_all(&dir_override);
     let _ = std::fs::remove_dir_all(&dir_corrupt);
     let _ = std::fs::remove_dir_all(&dir_bad_schema);
+}
+
+#[test]
+fn vc_package_cache_lands_on_its_own_versions_row() {
+    use y_core::discovery::build_registry_catalog;
+
+    let raw = vec![
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{33d1fd90-4274-48a1-9bc1-97e33d9c2d6f}".into(),
+            display_name: "Microsoft Visual C++ 2012 Redistributable (x86) - 11.0.61030".into(),
+            display_version: "11.0.61030.0".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: "\"C:\\ProgramData\\Package Cache\\{33d1fd90-4274-48a1-9bc1-97e33d9c2d6f}\\vcredist_x86.exe\" /u".into(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{042d26ef-3dbe-4c25-95d3-4c1b11b235a7}".into(),
+            display_name: "Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664".into(),
+            display_version: "12.0.40664.0".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: "\"C:\\ProgramData\\Package Cache\\{042d26ef-3dbe-4c25-95d3-4c1b11b235a7}\\vcredist_x64.exe\" /u".into(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{0e3bb569-69d6-4c34-bff9-c2f81db5e5f0}".into(),
+            display_name: "Microsoft Visual C++ v14 Redistributable (x64) - 14.51.36247".into(),
+            display_version: "14.51.36247.0".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: "\"C:\\ProgramData\\Package Cache\\{0e3bb569-69d6-4c34-bff9-c2f81db5e5f0}\\VC_redist.x64.exe\" /u".into(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{B175520C-86A2-35A7-8619-86DC379688B9}".into(),
+            display_name: "Microsoft Visual C++ 2012 x86 Additional Runtime - 11.0.61030".into(),
+            display_version: "11.0.61030".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: true,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{53CF6934-A98D-3D84-9146-FC4EDF3D5641}".into(),
+            display_name: "Microsoft Visual C++ 2013 x64 Minimum Runtime - 12.0.40664".into(),
+            display_version: "12.0.40664".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: true,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{6FA797CF-6B76-4B6D-87EE-768F92008720}".into(),
+            display_name: "Microsoft Visual C++ 2022 X64 Additional Runtime - 14.51.36247".into(),
+            display_version: "14.51.36247".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: true,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+    ];
+
+    let cat = build_registry_catalog(&raw, None);
+    assert_eq!(cat.apps.len(), 3, "Each VC++ Redistributable version/arch must stay its own canonical app row");
+
+    let drive = DriveInfo {
+        letter: 'C',
+        root: "C:\\".into(),
+        total_bytes: 100_000_000,
+        free_bytes: 50_000_000,
+        used_bytes: 50_000_000,
+        is_system_drive: true,
+        full_walk_enabled: true,
+        exclusions: vec!["C:\\Windows".into()],
+    };
+    let units = vec![
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{33d1fd90-4274-48a1-9bc1-97e33d9c2d6f}".into(),
+            drive_letter: 'C',
+            bytes: 456_496,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{B175520C-86A2-35A7-8619-86DC379688B9}v11.0.61030".into(),
+            drive_letter: 'C',
+            bytes: 5_305_368,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{042d26ef-3dbe-4c25-95d3-4c1b11b235a7}".into(),
+            drive_letter: 'C',
+            bytes: 466_814,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{53CF6934-A98D-3D84-9146-FC4EDF3D5641}v12.0.40664".into(),
+            drive_letter: 'C',
+            bytes: 1_177_788,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{0e3bb569-69d6-4c34-bff9-c2f81db5e5f0}".into(),
+            drive_letter: 'C',
+            bytes: 631_084,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{6FA797CF-6B76-4B6D-87EE-768F92008720}v14.51.36247".into(),
+            drive_letter: 'C',
+            bytes: 5_861_692,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+    ];
+
+    let report = attribute_scan(
+        10,
+        "2026-11-27 16:00:00".into(),
+        5,
+        vec![drive],
+        cat.stats,
+        &cat.apps,
+        &cat.guid_to_app_name,
+        &units,
+        None,
+    );
+
+    let r2012 = report.apps.iter().find(|a| a.display_name.contains("2012")).unwrap();
+    let r2013 = report.apps.iter().find(|a| a.display_name.contains("2013")).unwrap();
+    let rv14 = report.apps.iter().find(|a| a.display_name.contains("v14")).unwrap();
+    assert_eq!(r2012.total_bytes, 456_496 + 5_305_368);
+    assert_eq!(r2013.total_bytes, 466_814 + 1_177_788);
+    assert_eq!(rv14.total_bytes, 631_084 + 5_861_692);
+    assert!(r2012.items.iter().all(|it| it.path.contains("33d1fd90") || it.path.contains("11.0.61030")));
+    assert!(r2013.items.iter().all(|it| it.path.contains("042d26ef") || it.path.contains("12.0.40664")));
+    assert!(rv14.items.iter().all(|it| it.path.contains("0e3bb569") || it.path.contains("14.51.36247")));
+}
+
+#[test]
+fn split_family_row_sums_reconcile_with_former_merged_total() {
+    use y_core::discovery::build_registry_catalog;
+
+    let raw = vec![
+        // Windows Desktop Runtime family (formerly merged)
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{29A18B06-B190-4463-9FFC-BC0D70D80B7C}".into(),
+            display_name: "Microsoft Windows Desktop Runtime 10.0.14 (x64)".into(),
+            display_version: "10.0.14.50000".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{4d0027d4-962f-4f65-a01b-f8764a5f4220}".into(),
+            display_name: "Microsoft Windows Desktop Runtime - 8.0.33 (x64)".into(),
+            display_version: "8.0.33.36622".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{64BFC674-D664-480B-AFF2-D47C5531D6D2}".into(),
+            display_name: "Microsoft Windows Desktop Runtime - 10.0.14 (x64)".into(),
+            display_version: "80.56.61678".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: true,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKLM-32".into(),
+            subkey_name: "{711FC301-B296-4A6D-8A4F-EB1F70A2FCA3}".into(),
+            display_name: "Microsoft Windows Desktop Runtime - 8.0.33 (x64)".into(),
+            display_version: "64.132.61678".into(),
+            publisher: "Microsoft Corporation".into(),
+            install_location: String::new(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: true,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        // Single unaffected app with HKCU reflection duplicate
+        RawRegistryApp {
+            hive_view: "HKCU-64".into(),
+            subkey_name: "Discord".into(),
+            display_name: "Discord".into(),
+            display_version: "1.0.9269".into(),
+            publisher: "Discord Inc.".into(),
+            install_location: "C:\\Users\\Win\\AppData\\Local\\Discord".into(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+        RawRegistryApp {
+            hive_view: "HKCU-32".into(),
+            subkey_name: "Discord".into(),
+            display_name: "Discord".into(),
+            display_version: "1.0.9269".into(),
+            publisher: "Discord Inc.".into(),
+            install_location: "C:\\Users\\Win\\AppData\\Local\\Discord".into(),
+            uninstall_string: String::new(),
+            display_icon: String::new(),
+            system_component: false,
+            parent_key_name: String::new(),
+            release_type: String::new(),
+        },
+    ];
+
+    let cat = build_registry_catalog(&raw, None);
+    assert_eq!(cat.apps.len(), 3);
+
+    let drive = DriveInfo {
+        letter: 'C',
+        root: "C:\\".into(),
+        total_bytes: 200_000_000,
+        free_bytes: 100_000_000,
+        used_bytes: 100_000_000,
+        is_system_drive: true,
+        full_walk_enabled: true,
+        exclusions: vec!["C:\\Windows".into()],
+    };
+    let units = vec![
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{29A18B06-B190-4463-9FFC-BC0D70D80B7C}".into(),
+            drive_letter: 'C',
+            bytes: 992_466,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{64BFC674-D664-480B-AFF2-D47C5531D6D2}v80.56.61678".into(),
+            drive_letter: 'C',
+            bytes: 30_068_736,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{4d0027d4-962f-4f65-a01b-f8764a5f4220}".into(),
+            drive_letter: 'C',
+            bytes: 623_288,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\ProgramData\\Package Cache\\{711FC301-B296-4A6D-8A4F-EB1F70A2FCA3}v64.132.61678".into(),
+            drive_letter: 'C',
+            bytes: 30_310_400,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: false,
+        },
+        ScannedUnit {
+            path: "C:\\Users\\Win\\AppData\\Local\\Discord".into(),
+            drive_letter: 'C',
+            bytes: 10_000_000,
+            kind: ScannedUnitKind::Regular,
+            is_direct_install_root: true,
+        },
+    ];
+
+    let report = attribute_scan(
+        10,
+        "2026-11-27 16:00:00".into(),
+        5,
+        vec![drive],
+        cat.stats,
+        &cat.apps,
+        &cat.guid_to_app_name,
+        &units,
+        None,
+    );
+
+    let former_merged_desktop_total = 992_466 + 30_068_736 + 623_288 + 30_310_400;
+    let desktop_sum: u64 = report
+        .apps
+        .iter()
+        .filter(|a| a.display_name.contains("Windows Desktop Runtime"))
+        .map(|a| a.total_bytes)
+        .sum();
+    assert_eq!(desktop_sum, former_merged_desktop_total);
+    assert_eq!(report.apps.iter().find(|a| a.display_name == "Discord").unwrap().total_bytes, 10_000_000);
+    let sys_c = report.windows_system[0].total_bytes;
+    assert_eq!(
+        report.total_apps_bytes_on_drive('C') + sys_c + 100_000_000,
+        200_000_000
+    );
 }

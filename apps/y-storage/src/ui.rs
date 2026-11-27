@@ -214,6 +214,7 @@ struct CachedReportData {
     attributed_tip: String,
     rev_counts: HashMap<String, usize>,
     rev_by_app_token: HashMap<String, (String, usize)>,
+    rev_by_app_id: HashMap<String, (Option<String>, usize)>,
     sys_reconcile: Vec<(char, String, String, i128)>,
 }
 
@@ -2160,6 +2161,34 @@ fn ensure_report_and_filter_caches(
                 }
             }
         }
+        let catalog = y_core::dependencies::DependencyCatalog::load_from_disk_or_embedded();
+        let mut rev_by_app_id: HashMap<String, (Option<String>, usize)> = HashMap::new();
+        for app in &rep.apps {
+            let dn = app.display_name.to_ascii_lowercase();
+            let tok = normalize_app_token(&app.display_name);
+            let mut matched_target: Option<(&y_core::dependencies::CatalogTarget, usize)> = None;
+            for target in &catalog.targets {
+                let hits = target.registry_matches.iter().any(|m| {
+                    y_core::dependencies::contains_token_boundary(&dn, &m.to_ascii_lowercase())
+                });
+                if hits {
+                    let cnt = rev_counts.get(&target.id).copied().unwrap_or(0);
+                    if matched_target.is_none_or(|(prev_t, prev_c)| {
+                        cnt > prev_c
+                            || (cnt == prev_c && prev_t.id == "dotnet-runtime" && target.id != "dotnet-runtime")
+                    }) {
+                        matched_target = Some((target, cnt));
+                    }
+                }
+            }
+            if let Some((t, cnt)) = matched_target {
+                rev_by_app_id.insert(app.id.clone(), (Some(t.id.clone()), cnt));
+            } else if let Some((tid, cnt)) = rev_by_app_token.get(&tok) {
+                rev_by_app_id.insert(app.id.clone(), (Some(tid.clone()), *cnt));
+            } else if app.no_touch == Some(y_core::model::NoTouchCategory::SystemRuntime) {
+                rev_by_app_id.insert(app.id.clone(), (None, 0));
+            }
+        }
         let sys_reconcile = rep
             .windows_system
             .iter()
@@ -2212,6 +2241,7 @@ fn ensure_report_and_filter_caches(
             ),
             rev_counts,
             rev_by_app_token,
+            rev_by_app_id,
             sys_reconcile,
         });
     }
@@ -2250,6 +2280,19 @@ fn ensure_report_and_filter_caches(
     }
 }
 
+fn app_has_shared_runtime_banner(app: &y_core::model::AttributedApp) -> bool {
+    let dn = app.display_name.to_ascii_lowercase();
+    app.no_touch == Some(y_core::model::NoTouchCategory::SystemRuntime)
+        || dn.contains("visual c++")
+        || dn.contains("windows desktop runtime")
+        || dn.contains(".net runtime")
+        || dn.contains(".net sdk")
+        || dn.contains("webview2")
+        || dn.contains("openal")
+        || dn.contains("physx")
+        || dn.contains("python 3.")
+}
+
 fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
     let n_locs = app.items.len();
     let locs_h = (n_locs as f32) * (SUB_LINE1_H + 2.0) + (n_locs.saturating_sub(1) as f32) * 1.0;
@@ -2261,9 +2304,15 @@ fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
             + (n_deps as f32) * ((SUB_LINE1_H + 2.0) + (SUB_LINE2_H + 2.0))
             + (n_deps.saturating_sub(1) as f32) * 2.0
     };
+    let shared_banner_h = if app_has_shared_runtime_banner(app) {
+        22.0 + SPACE_4
+    } else {
+        0.0
+    };
     3.0 + COLLAPSED_ROW_OUTER_H
         + SPACE_4
         + 18.0
+        + shared_banner_h
         + SPACE_4
         + 18.0
         + SUB_HEADER_H
@@ -3453,11 +3502,18 @@ fn draw_main_app_list(
                                     },
                                     pal.panel_alt,
                                 );
-                                let rev_match = cached_report.as_ref().and_then(|cr| {
-                                    cr.rev_by_app_token
-                                        .get(&normalize_app_token(&app.display_name))
-                                        .cloned()
-                                });
+                                let rev_info = cached_report
+                                    .as_ref()
+                                    .and_then(|cr| cr.rev_by_app_id.get(&app.id).cloned())
+                                    .or_else(|| {
+                                        cached_report
+                                            .as_ref()
+                                            .and_then(|cr| cr.rev_by_app_token.get(&normalize_app_token(&app.display_name)).cloned())
+                                            .map(|(id, c)| (Some(id), c))
+                                    });
+                                let rev_match = rev_info
+                                    .as_ref()
+                                    .and_then(|(opt_id, c)| opt_id.as_ref().map(|id| (id.clone(), *c)));
                                 let mut used_btn_w = 0.0_f32;
                                 if let Some((ref rev_id, rev_cnt)) = rev_match {
                                     if rev_cnt > 0 {
@@ -3506,6 +3562,62 @@ fn draw_main_app_list(
                                     cat_basis_max_w,
                                     truncate_cache,
                                 );
+
+                                // First-class Shared Runtime reverse-usage line in drawer (FIX B).
+                                if let Some((opt_rev_id, rev_cnt)) = rev_info {
+                                    ui.add_space(SPACE_4);
+                                    let (rev_row_rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(panel_w, 22.0),
+                                        Sense::hover(),
+                                    );
+                                    let mut rev_ui = table_cell_ui(
+                                        ui,
+                                        Rect::from_min_max(
+                                            Pos2::new(sub_x0, rev_row_rect.min.y),
+                                            Pos2::new(cols.size.max_x, rev_row_rect.max.y),
+                                        ),
+                                        Layout::left_to_right(Align::Center),
+                                    );
+                                    rev_ui.spacing_mut().item_spacing.x = SPACE_8;
+                                    let summary_lbl = match rev_cnt {
+                                        0 => "Used by 0 installed apps on this scan (shared runtime)"
+                                            .to_string(),
+                                        1 => "Used by 1 app".to_string(),
+                                        n => format!("Used by {n} apps"),
+                                    };
+                                    rev_ui.label(
+                                        RichText::new(&summary_lbl)
+                                            .size(12.0)
+                                            .color(if rev_cnt > 0 { pal.text } else { pal.muted }),
+                                    );
+                                    if rev_cnt > 0 {
+                                        if let Some(rev_id) = opt_rev_id {
+                                            let is_open = open_reverse_dep_id.as_deref()
+                                                == Some(rev_id.as_str());
+                                            let inspect_btn = draw_z_button(
+                                                &mut rev_ui,
+                                                "Inspect consumers >",
+                                                Vec2::new(0.0, 20.0),
+                                                11.0,
+                                                RADIUS_PILL,
+                                                true,
+                                                is_open,
+                                                ButtonVariant::SecondaryOutline,
+                                                pal,
+                                            );
+                                            if inspect_btn
+                                                .on_hover_text("Open full list of apps using this shared runtime")
+                                                .clicked()
+                                            {
+                                                *open_reverse_dep_id = if is_open {
+                                                    None
+                                                } else {
+                                                    Some(rev_id)
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
 
                                 // Sub-table 1: Locations (Zone · Path · Basis · Size)
                                 ui.add_space(SPACE_4);
@@ -5446,6 +5558,7 @@ mod tests {
                     imported_by_binary: false,
                 }],
             }],
+            installed_registry_names: vec![],
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -5644,6 +5757,7 @@ mod tests {
             unattributed: vec![],
             unattributed_total_bytes: 0,
             reverse_dependencies: vec![],
+            installed_registry_names: vec![],
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -5755,6 +5869,7 @@ mod tests {
             ],
             unattributed_total_bytes: 10_000,
             reverse_dependencies: vec![],
+            installed_registry_names: vec![],
             catalog_source: "embedded".into(),
             warnings: vec![],
         };

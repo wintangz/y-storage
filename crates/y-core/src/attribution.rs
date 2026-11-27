@@ -402,6 +402,15 @@ pub fn attribute_scan(
         });
     }
 
+    // Capture all registered display names before filtering zero-byte rows so OS-managed MSI runtimes
+    // (such as VC++ 2008/2010 in WinSxS) still resolve `present = true` during dependency analysis.
+    let mut installed_registry_names: Vec<String> = Vec::with_capacity(installed_apps.len());
+    for app in installed_apps {
+        if !installed_registry_names.contains(&app.display_name) {
+            installed_registry_names.push(app.display_name.clone());
+        }
+    }
+
     // Build AttributedApps (keep all apps with > 0 bytes, sorted desc by total_bytes).
     let mut apps: Vec<AttributedApp> = buckets
         .into_iter()
@@ -498,6 +507,7 @@ pub fn attribute_scan(
         unattributed,
         unattributed_total_bytes,
         reverse_dependencies: Vec::new(),
+        installed_registry_names,
         catalog_source: String::new(),
         warnings: Vec::new(),
     }
@@ -669,6 +679,8 @@ fn ensure_synthetic_app(
         app: InstalledApp {
             id: key.to_string(),
             display_name: display_name.to_string(),
+            display_version: String::new(),
+            uninstall_guids: Vec::new(),
             aliases: Vec::new(),
             publishers: if publisher.is_empty() {
                 Vec::new()
@@ -690,6 +702,109 @@ fn ensure_synthetic_app(
     idx
 }
 
+fn extract_pkg_cache_version(leaf_lower: &str) -> Option<String> {
+    let idx = leaf_lower.rfind("}v")?;
+    let ver = leaf_lower[idx + 2..].trim();
+    if ver.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        Some(ver.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_arch_from_text(lower: &str) -> Option<&'static str> {
+    if lower.contains("x64") || lower.contains("amd64") || lower.contains("64-bit") {
+        Some("x64")
+    } else if lower.contains("arm64") {
+        Some("arm64")
+    } else if lower.contains("x86") || lower.contains("32-bit") {
+        Some("x86")
+    } else {
+        None
+    }
+}
+
+fn extract_ver_token_from_text(lower: &str) -> Option<String> {
+    for raw_tok in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.')) {
+        let tok = raw_tok.trim_start_matches('v').trim_matches('.');
+        if tok.contains('.') && tok.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            if tok.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return Some(tok.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_version_tuple(ver: &str) -> [u64; 4] {
+    let mut nums = [0u64; 4];
+    for (i, part) in ver.trim_start_matches('v').split('.').take(4).enumerate() {
+        nums[i] = part.parse::<u64>().unwrap_or(0);
+    }
+    nums
+}
+
+fn versions_match(ver_a: &str, ver_b: &str) -> bool {
+    let a = parse_version_tuple(ver_a);
+    let b = parse_version_tuple(ver_b);
+    if a == [0; 4] || b == [0; 4] {
+        return false;
+    }
+    // Match exact 3-part (major.minor.build) when 4th part is optional (e.g. 12.0.40664.0 vs 12.0.40664)
+    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && (a[3] == b[3] || a[3] == 0 || b[3] == 0)
+}
+
+fn app_effective_version(app: &InstalledApp) -> Option<String> {
+    let dn_lower = app.display_name.to_ascii_lowercase();
+    extract_ver_token_from_text(&dn_lower).or_else(|| {
+        let dv = app.display_version.trim();
+        (!dv.is_empty()).then(|| dv.to_ascii_lowercase())
+    })
+}
+
+fn find_best_versioned_bucket(
+    buckets: &[AppBucket],
+    filter_pred: impl Fn(&str) -> bool,
+    target_ver: Option<&str>,
+    target_arch: Option<&str>,
+) -> Option<usize> {
+    let mut best: Option<(usize, i32, [u64; 4])> = None;
+    for (i, b) in buckets.iter().enumerate() {
+        let dn = b.app.display_name.to_ascii_lowercase();
+        if !filter_pred(&dn) {
+            continue;
+        }
+        let b_ver = app_effective_version(&b.app);
+        let b_arch = extract_arch_from_text(&dn);
+        let ver_score = match (target_ver, b_ver.as_deref()) {
+            (Some(tv), Some(bv)) if versions_match(tv, bv) => 100,
+            (Some(tv), Some(bv)) => {
+                let ta = parse_version_tuple(tv);
+                let ba = parse_version_tuple(bv);
+                if ta[0] != 0 && ta[0] == ba[0] && ta[1] == ba[1] {
+                    30
+                } else if ta[0] != 0 && ta[0] == ba[0] {
+                    10
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        };
+        let arch_score = match (target_arch, b_arch) {
+            (Some(ta), Some(ba)) if ta == ba => 20,
+            (Some(_), Some(_)) => -5,
+            _ => 0,
+        };
+        let score = ver_score + arch_score;
+        let vt = b_ver.as_deref().map(parse_version_tuple).unwrap_or([0; 4]);
+        if best.is_none_or(|(_, bs, bvt)| score > bs || (score == bs && vt > bvt)) {
+            best = Some((i, score, vt));
+        }
+    }
+    best.map(|(i, _, _)| i)
+}
+
 fn find_by_token(
     buckets: &mut Vec<AppBucket>,
     store_buckets: &mut HashMap<String, usize>,
@@ -698,10 +813,27 @@ fn find_by_token(
     leaf: &str,
     leaf_lower: &str,
 ) -> Option<(usize, bool)> {
-    // 1. Package Cache {GUID} or known VS/SDK/EA/VC++ cache patterns.
+    // 1. Package Cache {GUID} + version/arch-aware routing (never cross-route between split versions).
     if path_lower.contains("\\programdata\\package cache\\") {
-        if let Some(g) = extract_guid(leaf_lower) {
-            if let Some(app_name) = guid_to_app_name.get(&g) {
+        let opt_guid = extract_guid(leaf_lower);
+        let opt_cache_ver = extract_pkg_cache_version(leaf_lower);
+
+        // 1a. Exact Uninstall bundle GUID match for split versioned families.
+        if let Some(ref g) = opt_guid {
+            if let Some(idx) = buckets.iter().position(|b| {
+                b.app.uninstall_guids.contains(g)
+                    && crate::discovery::versioned_family_identity_key(
+                        &b.app.display_name,
+                        &b.app.display_version,
+                    )
+                    .is_some()
+            }) {
+                return Some((idx, false));
+            }
+        }
+
+        if let Some(ref g) = opt_guid {
+            if let Some(app_name) = guid_to_app_name.get(g) {
                 let an_lower = app_name.to_ascii_lowercase();
                 if an_lower.contains("ea app") {
                     if let Some(idx) = find_app_matching(buckets, &["ea app"]) {
@@ -721,17 +853,104 @@ fn find_by_token(
                     || an_lower.contains("windows app certification")
                     || an_lower.contains("universal crt")
                     || an_lower.contains("windows team extension")
+                    || an_lower.contains("universal general midi")
+                    || an_lower.contains("winrt intellisense")
+                    || an_lower.contains("kits configuration")
+                    || an_lower.contains("application verifier")
+                    || an_lower.contains("msi development tools")
+                    || an_lower.contains("sdk arm64")
+                    || an_lower.contains("windows desktop extension")
+                    || an_lower.contains("windows iot extension")
+                    || an_lower.contains("windows mobile extension")
+                    || an_lower.contains("winappdeploy")
                 {
-                    if let Some(idx) = find_app_matching(buckets, &["windows software development kit"]) {
+                    let ver = opt_cache_ver
+                        .clone()
+                        .or_else(|| extract_ver_token_from_text(&an_lower));
+                    if let Some(idx) = find_best_versioned_bucket(
+                        buckets,
+                        |dn| dn.contains("windows software development kit"),
+                        ver.as_deref(),
+                        None,
+                    ) {
                         return Some((idx, false));
                     }
                 }
                 if an_lower.contains("visual c++") {
-                    if let Some(idx) = find_app_matching(buckets, &["microsoft visual c++"]) {
+                    let target_ver = opt_cache_ver
+                        .clone()
+                        .or_else(|| extract_ver_token_from_text(&an_lower));
+                    let target_arch = extract_arch_from_text(&an_lower);
+                    if let Some(idx) = find_best_versioned_bucket(
+                        buckets,
+                        |dn| dn.contains("visual c++") && dn.contains("redistributable"),
+                        target_ver.as_deref(),
+                        target_arch,
+                    ) {
+                        return Some((idx, false));
+                    }
+                }
+                if an_lower.contains("windows desktop runtime") {
+                    let target_ver = extract_ver_token_from_text(&an_lower)
+                        .or_else(|| opt_cache_ver.clone());
+                    let target_arch = extract_arch_from_text(&an_lower);
+                    if let Some(idx) = find_best_versioned_bucket(
+                        buckets,
+                        |dn| dn.contains("windows desktop runtime"),
+                        target_ver.as_deref(),
+                        target_arch,
+                    ) {
                         return Some((idx, false));
                     }
                 }
                 if an_lower.contains(".net") {
+                    let target_arch = extract_arch_from_text(&an_lower);
+                    let named_ver = extract_ver_token_from_text(&an_lower);
+                    // Prefer exact .NET Runtime - <ver> match when component belongs to an installed runtime (e.g. 8.0.21)
+                    if let Some(ref nv) = named_ver {
+                        if let Some(idx) = buckets.iter().position(|b| {
+                            let dn = b.app.display_name.to_ascii_lowercase();
+                            dn.contains(".net runtime")
+                                && !dn.contains("desktop")
+                                && app_effective_version(&b.app)
+                                    .as_deref()
+                                    .is_some_and(|bv| versions_match(nv, bv))
+                        }) {
+                            return Some((idx, false));
+                        }
+                    }
+                    // Route to matching major .NET SDK version (7.* vs 10.*, mapping MSI v56.* -> 7, v80.*/v81.* -> 10).
+                    let inferred_sdk_ver: Option<String> = named_ver
+                        .as_deref()
+                        .and_then(|v| {
+                            if v.starts_with("6.") || v.starts_with("7.") || an_lower.contains("net6") || an_lower.contains("net7") {
+                                Some("7.0.0".to_string())
+                            } else if v.starts_with("10.") || v.starts_with("26.") || an_lower.contains("net10") || an_lower.contains("net8") || an_lower.contains("net9") {
+                                Some("10.0.0".to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .or_else(|| {
+                            opt_cache_ver.as_deref().and_then(|cv| {
+                                let maj = parse_version_tuple(cv)[0];
+                                if matches!(maj, 28 | 56) {
+                                    Some("7.0.0".to_string())
+                                } else if matches!(maj, 40 | 80 | 81) {
+                                    Some("10.0.0".to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                    if let Some(idx) = find_best_versioned_bucket(
+                        buckets,
+                        |dn| dn.contains(".net sdk"),
+                        inferred_sdk_ver.as_deref(),
+                        target_arch,
+                    ) {
+                        return Some((idx, false));
+                    }
                     if let Some(idx) = find_app_matching(buckets, &["microsoft .net sdk", "microsoft .net"]) {
                         return Some((idx, false));
                     }

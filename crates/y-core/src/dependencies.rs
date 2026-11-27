@@ -180,6 +180,7 @@ pub struct AppBinaryEvidence {
     pub companion_dir_tokens: Vec<String>,
     pub has_deps_json: bool,
     pub deps_json_files: Vec<String>,
+    pub dotnet_major_versions: Vec<u32>,
     pub manifest_targets: Vec<(String, String)>, // (target_id, basis)
     pub steam_app_manifests: Vec<String>,       // e.g. appmanifest_1811260.acf
     pub steam_ea_script_present: bool,
@@ -192,7 +193,7 @@ pub struct ResolvedTargetStatus {
     pub own_size_bytes: Option<u64>,
 }
 
-fn contains_token_boundary(haystack: &str, needle: &str) -> bool {
+pub fn contains_token_boundary(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
@@ -220,9 +221,26 @@ pub fn resolve_catalog_targets<F>(
 where
     F: Fn(&str) -> bool,
 {
+    resolve_catalog_targets_with_registry(catalog, apps, &[], services, path_exists)
+}
+
+pub fn resolve_catalog_targets_with_registry<F>(
+    catalog: &DependencyCatalog,
+    apps: &[AttributedApp],
+    installed_registry_names: &[String],
+    services: &[WindowsServiceEntry],
+    path_exists: F,
+) -> HashMap<String, ResolvedTargetStatus>
+where
+    F: Fn(&str) -> bool,
+{
     let svc_names_lower: BTreeSet<String> = services
         .iter()
         .map(|s| s.service_name.to_ascii_lowercase())
+        .collect();
+    let reg_names_lower: Vec<String> = installed_registry_names
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
         .collect();
 
     let mut out = HashMap::new();
@@ -240,6 +258,12 @@ where
                 matched_size_sum = matched_size_sum.saturating_add(app.total_bytes);
             }
         }
+        let matched_in_registry = reg_names_lower.iter().any(|rn| {
+            target
+                .registry_matches
+                .iter()
+                .any(|m| contains_token_boundary(rn, &m.to_ascii_lowercase()))
+        });
 
         let mut hint_size: Option<u64> = None;
         if let Some(hint) = &target.size_folder_hint {
@@ -271,7 +295,7 @@ where
             target.id.clone(),
             ResolvedTargetStatus {
                 target: target.clone(),
-                present: matched_any_app || svc_present || path_present,
+                present: matched_any_app || matched_in_registry || svc_present || path_present,
                 own_size_bytes,
             },
         );
@@ -308,9 +332,26 @@ fn upsert_dep(map: &mut BTreeMap<String, PendingDep>, cand: PendingDep) {
     }
 }
 
-fn is_self_dependency(app_name: &str, target_name: &str) -> bool {
+fn is_self_dependency(app_name: &str, target: &CatalogTarget) -> bool {
+    let al = app_name.to_ascii_lowercase();
+    if target
+        .registry_matches
+        .iter()
+        .any(|m| contains_token_boundary(&al, &m.to_ascii_lowercase()))
+    {
+        return true;
+    }
+    if target.id.starts_with("dotnet-")
+        && !al.contains("visual studio")
+        && (al.contains(".net") || al.contains("desktop runtime"))
+    {
+        return true;
+    }
+    if target.id.starts_with("vcpp-") && al.contains("visual c++") && al.contains("redistributable") {
+        return true;
+    }
     let a = normalize_app_token(app_name);
-    let t = normalize_app_token(target_name);
+    let t = normalize_app_token(&target.name);
     !a.is_empty() && !t.is_empty() && (a == t || a.starts_with(&format!("{t} ")))
 }
 
@@ -357,6 +398,49 @@ pub fn parse_deps_json_is_dotnet(json_text: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+pub fn parse_runtimeconfig_json_major(json_text: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let ro = v.get("runtimeOptions")?;
+    if let Some(tfm) = ro.get("tfm").and_then(|x| x.as_str()) {
+        if let Some(maj) = extract_dotnet_major_from_tfm(tfm) {
+            return Some(maj);
+        }
+    }
+    if let Some(ver) = ro.get("framework").and_then(|f| f.get("version")).and_then(|x| x.as_str()) {
+        if let Some(maj) = ver.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
+            return Some(maj);
+        }
+    }
+    if let Some(arr) = ro.get("frameworks").and_then(|f| f.as_array()) {
+        for fw in arr {
+            if let Some(ver) = fw.get("version").and_then(|x| x.as_str()) {
+                if let Some(maj) = ver.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
+                    return Some(maj);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_dotnet_major_from_tfm(raw: &str) -> Option<u32> {
+    let lower = raw.to_ascii_lowercase();
+    if let Some(idx) = lower.find("version=v") {
+        let rest = &lower[idx + "version=v".len()..];
+        let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(m) = num_str.parse::<u32>() {
+            return Some(m);
+        }
+    }
+    if let Some(rest) = lower.strip_prefix("net") {
+        let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(m) = num_str.parse::<u32>() {
+            return Some(m);
+        }
+    }
+    None
 }
 
 pub fn parse_steam_appmanifest(acf_text: &str) -> Option<(String, String, bool)> {
@@ -451,7 +535,7 @@ pub fn analyze_report_dependencies(
             }
             for (tid, mut dlls) in matched_dlls_by_target {
                 if let Some(st) = target_statuses.get(&tid) {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
+                    if !is_self_dependency(&app.display_name, &st.target) {
                         dlls.sort();
                         dlls.dedup();
                         let preview = dlls.into_iter().take(4).collect::<Vec<_>>().join(", ");
@@ -469,29 +553,63 @@ pub fn analyze_report_dependencies(
             }
 
             if ev.has_deps_json {
-                if let Some(st) = target_statuses.get("dotnet-runtime") {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
-                        let f = ev
-                            .deps_json_files
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "*.deps.json".into());
-                        upsert_dep(
-                            &mut deps_map,
-                            build_target_dep(
-                                st,
-                                DependencyConfidence::Proven,
-                                format!(".deps.json: {f}"),
-                                true,
-                            ),
-                        );
+                let mut attached_versioned = false;
+                for &maj in &ev.dotnet_major_versions {
+                    let vtid = format!("dotnet-{maj}");
+                    if let Some(st) = target_statuses.get(&vtid) {
+                        if !is_self_dependency(&app.display_name, &st.target) {
+                            let f = ev
+                                .deps_json_files
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "*.deps.json".into());
+                            upsert_dep(
+                                &mut deps_map,
+                                build_target_dep(
+                                    st,
+                                    DependencyConfidence::Proven,
+                                    format!(".NET metadata: {f} (.NET {maj})"),
+                                    true,
+                                ),
+                            );
+                            attached_versioned = true;
+                        }
+                    }
+                }
+                if !attached_versioned {
+                    if let Some(st) = target_statuses.get("dotnet-runtime") {
+                        if !is_self_dependency(&app.display_name, &st.target) {
+                            let f = ev
+                                .deps_json_files
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "*.deps.json".into());
+                            upsert_dep(
+                                &mut deps_map,
+                                build_target_dep(
+                                    st,
+                                    DependencyConfidence::Proven,
+                                    format!(".deps.json: {f}"),
+                                    true,
+                                ),
+                            );
+                        }
                     }
                 }
             }
 
-            for (tid, basis) in &ev.manifest_targets {
-                if let Some(st) = target_statuses.get(tid) {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
+            for (raw_tid, basis) in &ev.manifest_targets {
+                let resolved_tid = if raw_tid == "vcpp-generic" {
+                    deps_map
+                        .keys()
+                        .find(|k| k.starts_with("vcpp-"))
+                        .cloned()
+                        .unwrap_or_else(|| "vcpp-v14".to_string())
+                } else {
+                    raw_tid.clone()
+                };
+                if let Some(st) = target_statuses.get(&resolved_tid) {
+                    if !is_self_dependency(&app.display_name, &st.target) {
                         upsert_dep(
                             &mut deps_map,
                             build_target_dep(st, DependencyConfidence::Proven, basis.clone(), false),
@@ -529,7 +647,7 @@ pub fn analyze_report_dependencies(
 
             if let Some(tid) = svc_to_target.get(&svc.service_name.to_ascii_lowercase()) {
                 if let Some(st) = target_statuses.get(tid) {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
+                    if !is_self_dependency(&app.display_name, &st.target) {
                         upsert_dep(
                             &mut deps_map,
                             build_target_dep(st, DependencyConfidence::Proven, basis, false),
@@ -574,7 +692,7 @@ pub fn analyze_report_dependencies(
             let app_is_launcher = app.display_name.to_ascii_lowercase().contains("launcher")
                 || target_statuses.iter().any(|(_, s)| {
                     s.target.kind == DependencyKind::PlatformLauncher
-                        && is_self_dependency(&app.display_name, &s.target.name)
+                        && is_self_dependency(&app.display_name, &s.target)
                 });
             let mut item_tokens_lower: Vec<String> = app
                 .items
@@ -586,7 +704,7 @@ pub fn analyze_report_dependencies(
             }
 
             for (tid, st) in target_statuses {
-                if is_self_dependency(&app.display_name, &st.target.name) {
+                if is_self_dependency(&app.display_name, &st.target) {
                     continue;
                 }
                 let registered_svcs: Vec<&WindowsServiceEntry> = st
@@ -656,7 +774,7 @@ pub fn analyze_report_dependencies(
                             .cloned()
                             .unwrap_or_else(|| format!("svc:{}", svc.service_name.to_ascii_lowercase()));
                         if let Some(st) = target_statuses.get(&svc_tid) {
-                            if !is_self_dependency(&app.display_name, &st.target.name) {
+                            if !is_self_dependency(&app.display_name, &st.target) {
                                 upsert_dep(
                                     &mut deps_map,
                                     build_target_dep(
@@ -697,7 +815,7 @@ pub fn analyze_report_dependencies(
         if let Some(ev) = app_ev {
             if !ev.steam_app_manifests.is_empty() {
                 if let Some(st) = target_statuses.get("steam") {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
+                    if !is_self_dependency(&app.display_name, &st.target) {
                         upsert_dep(
                             &mut deps_map,
                             build_target_dep(
@@ -711,7 +829,7 @@ pub fn analyze_report_dependencies(
                 }
                 if ev.steam_ea_script_present {
                     if let Some(st) = target_statuses.get("ea-app") {
-                        if !is_self_dependency(&app.display_name, &st.target.name) {
+                        if !is_self_dependency(&app.display_name, &st.target) {
                             upsert_dep(
                                 &mut deps_map,
                                 build_target_dep(
@@ -739,7 +857,7 @@ pub fn analyze_report_dependencies(
                     .collect();
                 if !matched.is_empty() {
                     if let Some(st) = target_statuses.get(&fp.target_id) {
-                        if !is_self_dependency(&app.display_name, &st.target.name) {
+                        if !is_self_dependency(&app.display_name, &st.target) {
                             upsert_dep(
                                 &mut deps_map,
                                 build_target_dep(
@@ -786,7 +904,7 @@ pub fn analyze_report_dependencies(
 
             if name_ok && pub_ok && path_ok {
                 if let Some(st) = target_statuses.get(&rule.target_id) {
-                    if !is_self_dependency(&app.display_name, &st.target.name) {
+                    if !is_self_dependency(&app.display_name, &st.target) {
                         upsert_dep(
                             &mut deps_map,
                             build_target_dep(

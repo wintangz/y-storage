@@ -158,6 +158,7 @@ fn enum_uninstall_view(
         if display_name.trim().is_empty() {
             continue;
         }
+        let display_version = query_string(child.0, "DisplayVersion").unwrap_or_default();
         let publisher = query_string(child.0, "Publisher").unwrap_or_default();
         let install_location = query_string(child.0, "InstallLocation").unwrap_or_default();
         let uninstall_string = query_string(child.0, "UninstallString")
@@ -172,6 +173,7 @@ fn enum_uninstall_view(
             hive_view: view_label.to_string(),
             subkey_name: child_name,
             display_name,
+            display_version,
             publisher,
             install_location,
             uninstall_string,

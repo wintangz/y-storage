@@ -1,12 +1,62 @@
 # Authored Dependency Catalog for y-storage (`dependencies`)
-# Small, deterministic, and high-precision seed catalog.
+# Sources: Microsoft Docs (Latest supported Visual C++ Redistributable downloads,
+# .NET Runtime/SDK TFM & runtimeconfig docs, DirectX End-User Runtime, WebView2),
+# Epic Online Services Docs, EA App/EA AntiCheat docs, Steamworks Docs, OpenAL/NVIDIA PhysX docs.
 
 [[targets]]
-id = "vcpp-runtime"
-name = "Microsoft Visual C++ Runtime"
+id = "vcpp-2008"
+name = "Microsoft Visual C++ 2008 Redistributable"
 kind = "SharedRuntime"
 shared = true
-registry_matches = ["microsoft visual c++"]
+registry_matches = ["visual c++ 2008"]
+service_names = []
+presence_paths = []
+
+[[targets]]
+id = "vcpp-2010"
+name = "Microsoft Visual C++ 2010 Redistributable"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["visual c++ 2010"]
+service_names = []
+presence_paths = [
+  "C:\\Windows\\System32\\msvcp100.dll",
+  "C:\\Windows\\System32\\msvcr100.dll",
+  "C:\\Windows\\SysWOW64\\msvcr100.dll",
+]
+
+[[targets]]
+id = "vcpp-2012"
+name = "Microsoft Visual C++ 2012 Redistributable"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["visual c++ 2012"]
+service_names = []
+presence_paths = [
+  "C:\\Windows\\System32\\msvcp110.dll",
+  "C:\\Windows\\System32\\msvcr110.dll",
+  "C:\\Windows\\SysWOW64\\msvcr110.dll",
+]
+
+[[targets]]
+id = "vcpp-2013"
+name = "Microsoft Visual C++ 2013 Redistributable"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["visual c++ 2013"]
+service_names = []
+presence_paths = [
+  "C:\\Windows\\System32\\msvcp120.dll",
+  "C:\\Windows\\System32\\msvcr120.dll",
+  "C:\\Windows\\SysWOW64\\msvcr120.dll",
+]
+
+[[targets]]
+id = "vcpp-v14"
+name = "Microsoft Visual C++ v14 (2015–2022) Redistributable"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["visual c++ v14", "visual c++ 2015", "visual c++ 2017", "visual c++ 2019", "visual c++ 2022"]
 service_names = []
 presence_paths = [
   "C:\\Windows\\System32\\vcruntime140.dll",
@@ -24,6 +74,61 @@ presence_paths = [
   "C:\\Windows\\System32\\d3d11.dll",
   "C:\\Windows\\System32\\dxgi.dll",
   "C:\\Windows\\System32\\D3DCOMPILER_47.dll",
+]
+
+[[targets]]
+id = "dotnet-6"
+name = "Microsoft .NET 6 Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = [".net runtime - 6.", "desktop runtime - 6.", "desktop runtime 6."]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\6.*",
+]
+
+[[targets]]
+id = "dotnet-7"
+name = "Microsoft .NET 7 Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = [".net runtime - 7.", "desktop runtime - 7.", ".net sdk 7."]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\7.*",
+]
+
+[[targets]]
+id = "dotnet-8"
+name = "Microsoft .NET 8 Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = [".net runtime - 8.", "desktop runtime - 8.", "desktop runtime 8."]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\8.*",
+]
+
+[[targets]]
+id = "dotnet-9"
+name = "Microsoft .NET 9 Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = [".net runtime - 9.", "desktop runtime - 9.", "desktop runtime 9."]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\9.*",
+]
+
+[[targets]]
+id = "dotnet-10"
+name = "Microsoft .NET 10 Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = [".net runtime - 10.", "desktop runtime 10.", ".net sdk 10."]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\10.*",
 ]
 
 [[targets]]
@@ -47,6 +152,60 @@ registry_matches = ["edge webview2"]
 service_names = []
 presence_paths = [
   "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application",
+]
+
+[[targets]]
+id = "openal"
+name = "OpenAL"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["openal"]
+service_names = []
+presence_paths = [
+  "C:\\Windows\\System32\\OpenAL32.dll",
+  "C:\\Windows\\SysWOW64\\OpenAL32.dll",
+]
+
+[[targets]]
+id = "physx-runtime"
+name = "NVIDIA PhysX System Software"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["nvidia physx"]
+service_names = []
+presence_paths = [
+  "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX",
+]
+
+[[targets]]
+id = "python-runtime"
+name = "Python Runtime"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["python 3."]
+service_names = []
+presence_paths = []
+
+[[targets]]
+id = "winui-xaml"
+name = "Microsoft.UI.Xaml (WinUI)"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["microsoft.ui.xaml"]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\WindowsApps",
+]
+
+[[targets]]
+id = "dotnet-native"
+name = "Microsoft .NET Native"
+kind = "SharedRuntime"
+shared = true
+registry_matches = ["microsoft.net.native"]
+service_names = []
+presence_paths = [
+  "C:\\Program Files\\WindowsApps",
 ]
 
 [[targets]]
@@ -182,24 +341,105 @@ registry_matches = ["denuvo"]
 service_names = []
 presence_paths = []
 
-# DLL import -> SharedRuntime mapping
+# DLL import -> SharedRuntime mapping (Microsoft official VC++ CRT / DX / .NET / WebView2 / PhysX / Python / OpenAL references)
 [[dll_imports]]
-target_id = "vcpp-runtime"
+target_id = "vcpp-2008"
+dlls = [
+  "msvcr90.dll",
+  "msvcp90.dll",
+  "mfc90.dll",
+  "mfc90u.dll",
+  "vcomp90.dll",
+]
+
+[[dll_imports]]
+target_id = "vcpp-2010"
+dlls = [
+  "msvcr100.dll",
+  "msvcp100.dll",
+  "mfc100.dll",
+  "mfc100u.dll",
+  "vcomp100.dll",
+]
+
+[[dll_imports]]
+target_id = "vcpp-2012"
+dlls = [
+  "msvcr110.dll",
+  "msvcp110.dll",
+  "mfc110.dll",
+  "mfc110u.dll",
+  "vcomp110.dll",
+  "concrt110.dll",
+  "vccorlib110.dll",
+]
+
+[[dll_imports]]
+target_id = "vcpp-2013"
+dlls = [
+  "msvcr120.dll",
+  "msvcp120.dll",
+  "mfc120.dll",
+  "mfc120u.dll",
+  "vcomp120.dll",
+  "concrt120.dll",
+  "vccorlib120.dll",
+]
+
+[[dll_imports]]
+target_id = "vcpp-v14"
 dlls = [
   "vcruntime140.dll",
   "vcruntime140_1.dll",
+  "vcruntime140_threads.dll",
   "msvcp140.dll",
   "msvcp140_1.dll",
   "msvcp140_2.dll",
+  "msvcp140_atomic_wait.dll",
+  "msvcp140_codecvt_ids.dll",
   "concrt140.dll",
   "vccorlib140.dll",
+  "mfc140.dll",
   "mfc140u.dll",
-  "msvcr120.dll",
-  "msvcp120.dll",
-  "msvcr110.dll",
-  "msvcp110.dll",
-  "msvcr100.dll",
-  "msvcp100.dll",
+  "vcomp140.dll",
+  "vcruntime140_app.dll",
+  "vcruntime140_1_app.dll",
+  "msvcp140_app.dll",
+  "concrt140_app.dll",
+  "vccorlib140_app.dll",
+]
+
+[[dll_imports]]
+target_id = "openal"
+dlls = [
+  "openal32.dll",
+  "soft_oal.dll",
+]
+
+[[dll_imports]]
+target_id = "physx-runtime"
+dlls = [
+  "physxloader.dll",
+  "physxloader64.dll",
+  "physx3_x64.dll",
+  "physx3_x86.dll",
+  "physx3common_x64.dll",
+  "physx3common_x86.dll",
+]
+
+[[dll_imports]]
+target_id = "python-runtime"
+dlls = [
+  "python3.dll",
+  "python310.dll",
+  "python311.dll",
+  "python312.dll",
+  "python313.dll",
+  "python314.dll",
+  "python315.dll",
+  "libpython3.11.dll",
+  "libpython3.12.dll",
+  "libpython3.13.dll",
 ]
 
 [[dll_imports]]

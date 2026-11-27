@@ -270,6 +270,125 @@ pub fn normalize_app_token(name: &str) -> String {
     words.join(" ").trim().to_string()
 }
 
+fn extract_arch_tag(lower: &str) -> &'static str {
+    if lower.contains("x64") || lower.contains("amd64") || lower.contains("64-bit") {
+        "x64"
+    } else if lower.contains("arm64") {
+        "arm64"
+    } else if lower.contains("x86") || lower.contains("32-bit") {
+        "x86"
+    } else {
+        "neutral"
+    }
+}
+
+fn extract_first_dotted_version(lower: &str) -> Option<String> {
+    for raw_tok in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.')) {
+        let tok = raw_tok.trim_start_matches('v').trim_matches('.');
+        if tok.contains('.') && tok.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            let valid = tok.chars().all(|c| c.is_ascii_digit() || c == '.');
+            if valid {
+                return Some(tok.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_vcpp_era(lower: &str) -> Option<&'static str> {
+    for year in ["2005", "2008", "2010", "2012", "2013", "2015", "2017", "2019", "2022"] {
+        if lower.contains(year) {
+            return Some(match year {
+                "2015" | "2017" | "2019" | "2022" => "v14",
+                other => other,
+            });
+        }
+    }
+    if lower.contains("v14") {
+        return Some("v14");
+    }
+    None
+}
+
+/// Returns a distinct canonical identity key for independently installable/uninstallable
+/// side-by-side versioned product families (VC++ Redistributables, .NET runtimes/SDKs,
+/// Windows SDKs, Python, Java). Returns `None` for non-versioned apps and components so
+/// location/token deduplication continues unchanged for normal apps.
+#[must_use]
+pub fn versioned_family_identity_key(display_name: &str, display_version: &str) -> Option<String> {
+    let lower = display_name.trim().to_ascii_lowercase();
+    let ver_clean = display_version.trim();
+
+    if lower.contains("visual c++") && lower.contains("redistributable") {
+        let era = extract_vcpp_era(&lower).unwrap_or("other");
+        let arch = match extract_arch_tag(&lower) {
+            "neutral" => "x86",
+            a => a,
+        };
+        let ver = extract_first_dotted_version(&lower)
+            .or_else(|| (!ver_clean.is_empty()).then(|| ver_clean.to_ascii_lowercase()))
+            .unwrap_or_else(|| era.to_string());
+        return Some(format!("vcpp-redist:{era}:{arch}:{ver}"));
+    }
+
+    if !lower.contains("framework")
+        && (lower.contains("windows desktop runtime")
+            || lower.contains(".net desktop runtime")
+            || lower.contains(".net runtime")
+            || lower.contains("asp.net core")
+            || lower.contains(".net sdk"))
+    {
+        let kind = if lower.contains("windows desktop runtime") || lower.contains(".net desktop runtime") {
+            "dotnet-desktop"
+        } else if lower.contains("asp.net core") {
+            "aspnetcore"
+        } else if lower.contains(".net sdk") {
+            "dotnet-sdk"
+        } else {
+            "dotnet-core"
+        };
+        let arch = extract_arch_tag(&lower);
+        let ver = extract_first_dotted_version(&lower)
+            .or_else(|| (!ver_clean.is_empty()).then(|| ver_clean.to_ascii_lowercase()))
+            .unwrap_or_else(|| "0".to_string());
+        return Some(format!("{kind}:{arch}:{ver}"));
+    }
+
+    if lower.starts_with("windows software development kit") {
+        let ver = extract_first_dotted_version(&lower)
+            .or_else(|| (!ver_clean.is_empty()).then(|| ver_clean.to_ascii_lowercase()))
+            .unwrap_or_else(|| "0".to_string());
+        return Some(format!("winsdk:{ver}"));
+    }
+
+    if lower.starts_with("python ") && !lower.contains("launcher") {
+        if let Some(ver) = extract_first_dotted_version(&lower) {
+            let arch = extract_arch_tag(&lower);
+            return Some(format!("python:{arch}:{ver}"));
+        }
+    }
+
+    if (lower.starts_with("java ") || lower.starts_with("java(tm) se"))
+        && !lower.contains("auto updater")
+    {
+        let arch = extract_arch_tag(&lower);
+        let ver = if !ver_clean.is_empty() {
+            ver_clean.to_ascii_lowercase()
+        } else {
+            lower
+                .split_whitespace()
+                .filter(|w| w.chars().any(|c| c.is_ascii_digit()))
+                .collect::<Vec<_>>()
+                .join("-")
+        };
+        if !ver.is_empty() {
+            return Some(format!("java:{arch}:{ver}"));
+        }
+    }
+
+    None
+}
+
 pub fn build_registry_catalog(
     raw_entries: &[RawRegistryApp],
     steam_path: Option<&str>,
@@ -303,6 +422,8 @@ pub fn build_registry_catalog(
     let mut apps: Vec<InstalledApp> = Vec::new();
     let mut index_by_location: HashMap<String, usize> = HashMap::new();
     let mut index_by_name_key: HashMap<String, usize> = HashMap::new();
+    let mut seen_hkcu_mirror: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
 
     for entry in raw_entries {
         let release_lower = entry.release_type.trim().to_ascii_lowercase();
@@ -316,6 +437,19 @@ pub fn build_registry_catalog(
         let display_name = entry.display_name.trim().to_string();
         if display_name.is_empty() {
             continue;
+        }
+        let display_version = entry.display_version.trim().to_string();
+
+        // HKCU Uninstall is shared across 64-bit & 32-bit registry views; collapse exact mirror reflections.
+        if entry.hive_view.starts_with("HKCU-") && !entry.hive_view.contains("WOW") {
+            let key = (
+                entry.subkey_name.trim().to_ascii_lowercase(),
+                display_name.to_ascii_lowercase(),
+                display_version.to_ascii_lowercase(),
+            );
+            if !seen_hkcu_mirror.insert(key) {
+                continue;
+            }
         }
 
         let direct_loc = {
@@ -344,7 +478,19 @@ pub fn build_registry_catalog(
 
         let effective_loc = direct_loc.as_ref().or(inferred_loc.as_ref());
         let loc_key = effective_loc.map(|p| normalize_path_key(p));
-        let name_key = normalize_app_token(&display_name);
+        let family_key = versioned_family_identity_key(&display_name, &display_version);
+        let name_key = family_key
+            .clone()
+            .unwrap_or_else(|| normalize_app_token(&display_name));
+
+        let mut entry_guids = Vec::new();
+        for src in [&entry.subkey_name, &entry.uninstall_string, &entry.display_icon] {
+            if let Some(g) = extract_guid(src) {
+                if !entry_guids.contains(&g) {
+                    entry_guids.push(g);
+                }
+            }
+        }
 
         let existing_idx = loc_key
             .as_ref()
@@ -370,6 +516,14 @@ pub fn build_registry_catalog(
             let existing = &mut apps[idx];
             if existing.display_name != display_name && !existing.aliases.contains(&display_name) {
                 existing.aliases.push(display_name.clone());
+            }
+            if existing.display_version.is_empty() && !display_version.is_empty() {
+                existing.display_version = display_version;
+            }
+            for g in entry_guids {
+                if !existing.uninstall_guids.contains(&g) {
+                    existing.uninstall_guids.push(g);
+                }
             }
             if !publisher_clean.is_empty() && !existing.publishers.contains(&publisher_clean) {
                 existing.publishers.push(publisher_clean);
@@ -409,7 +563,7 @@ pub fn build_registry_catalog(
         };
         let no_touch = classify_no_touch(&display_name, &entry.publisher);
         let id = if !name_key.is_empty() {
-            format!("reg:{}", name_key.replace(' ', "-"))
+            format!("reg:{}", name_key.replace([' ', ':'], "-"))
         } else {
             format!("reg:{}", apps.len())
         };
@@ -424,6 +578,8 @@ pub fn build_registry_catalog(
         apps.push(InstalledApp {
             id,
             display_name,
+            display_version,
+            uninstall_guids: entry_guids,
             aliases: Vec::new(),
             publishers,
             direct_install_location: direct_loc,

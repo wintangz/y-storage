@@ -215,6 +215,8 @@ pub struct RawRegistryApp {
     pub hive_view: String,
     pub subkey_name: String,
     pub display_name: String,
+    #[serde(default)]
+    pub display_version: String,
     pub publisher: String,
     pub install_location: String,
     pub uninstall_string: String,
@@ -337,6 +339,10 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 pub struct InstalledApp {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub display_version: String,
+    #[serde(default)]
+    pub uninstall_guids: Vec<String>,
     pub aliases: Vec<String>,
     pub publishers: Vec<String>,
     pub direct_install_location: Option<String>,
@@ -465,6 +471,8 @@ pub struct ScanReport {
     pub unattributed_total_bytes: u64,
     #[serde(default)]
     pub reverse_dependencies: Vec<ReverseDependencyEntry>,
+    #[serde(default)]
+    pub installed_registry_names: Vec<String>,
     #[serde(default)]
     pub catalog_source: String,
     #[serde(default)]

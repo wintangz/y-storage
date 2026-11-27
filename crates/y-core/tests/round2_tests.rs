@@ -108,6 +108,8 @@ fn attribution_coverage_2_routes_green_caches_dot_folders_and_flutter_preserving
     let apps = vec![InstalledApp {
         id: "reg:discord".into(),
         display_name: "Discord".into(),
+        display_version: String::new(),
+        uninstall_guids: vec![],
         aliases: vec![],
         publishers: vec!["Discord Inc.".into()],
         direct_install_location: Some("C:\\Users\\Win\\AppData\\Local\\Discord".into()),
@@ -220,6 +222,8 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         InstalledApp {
             id: "reg:fifa".into(),
             display_name: "EA SPORTS™ FIFA 23".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
             aliases: vec![],
             publishers: vec!["EA Canada".into()],
             direct_install_location: Some("D:\\Games\\Steam\\steamapps\\common\\FIFA 23".into()),
@@ -232,6 +236,8 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         InstalledApp {
             id: "reg:ea".into(),
             display_name: "EA app".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
             aliases: vec![],
             publishers: vec!["Electronic Arts".into()],
             direct_install_location: Some("C:\\Program Files\\Electronic Arts".into()),
@@ -244,6 +250,8 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         InstalledApp {
             id: "reg:note".into(),
             display_name: "PlainApp".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
             aliases: vec![],
             publishers: vec!["Solo".into()],
             direct_install_location: Some("C:\\Program Files\\PlainApp".into()),
@@ -256,6 +264,8 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         InstalledApp {
             id: "store:msteams".into(),
             display_name: "Store: MSTeams".into(),
+            display_version: String::new(),
+            uninstall_guids: vec![],
             aliases: vec![],
             publishers: vec!["Microsoft Store".into()],
             direct_install_location: None,
@@ -337,7 +347,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
     assert_eq!(fifa.total_bytes, 50_000);
     assert!(fifa.dependencies.iter().any(|d| d.target_id == "steam" && d.confidence == DependencyConfidence::Proven));
     assert!(fifa.dependencies.iter().any(|d| d.target_id == "ea-app" && d.own_size_bytes == Some(12_000)));
-    assert!(fifa.dependencies.iter().any(|d| d.target_id == "vcpp-runtime" && d.imported_by_binary));
+    assert!(fifa.dependencies.iter().any(|d| d.target_id == "vcpp-v14" && d.imported_by_binary));
     assert!(fifa.dependencies.iter().any(|d| d.target_id == "directx-runtime" && d.imported_by_binary));
 
     let plain = report.apps.iter().find(|a| a.id == "reg:note").unwrap();
@@ -346,7 +356,7 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
     let rev_vcpp = report
         .reverse_dependencies
         .iter()
-        .find(|r| r.target_id == "vcpp-runtime")
+        .find(|r| r.target_id == "vcpp-v14")
         .unwrap();
     assert_eq!(rev_vcpp.dependent_count, 1);
     assert_eq!(rev_vcpp.binary_importer_count, 1);
@@ -439,6 +449,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
         unattributed: vec![],
         unattributed_total_bytes: 0,
         reverse_dependencies: vec![],
+        installed_registry_names: vec![],
         catalog_source: "embedded".into(),
         warnings: vec![],
     };
