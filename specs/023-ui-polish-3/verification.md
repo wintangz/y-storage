@@ -1,6 +1,6 @@
 # Verification Report — `ui-polish-3` (`specs/023-ui-polish-3`)
 
-## Summary Result — **PASS (14 / 14 Fixes Verified)**
+## Summary Result — **PASS (15 / 15 Fixes Verified)**
 
 | Item | Description | Status | Verification Evidence |
 |---|---|---|---|
@@ -12,17 +12,18 @@
 | **FIX 6** | Suppress numeric growth deltas `< 1 MB` (`< 1,048,576 B`) visually while keeping exact byte deltas on hover | **PASS** | `before-growth-new-deltas-dark.png` vs `after-growth-new-deltas-dark.png`, `before-per-drive-c-dark.png` vs `after-per-drive-c-dark.png`, `ui::tests::growth_noise_floor_*` |
 | **FIX 7** | Move per-drive companion `"of <global>"` inside Size column after per-drive size (`"2.28 GB of 163.39 GB"`) | **PASS** | `before-per-drive-c-dark.png` vs `after-per-drive-c-dark.png` (`Genshin Impact` row) |
 | **FIX 8** | Zone Rulebook grouped under `"App container"` / `"Personal files"` subheads (`name + Remove` only); neutral muted pins | **PASS** | `before-settings-dark.png` vs `after-settings-full-dark.png` |
-| **FIX 9** | Stale masthead caption in muted amber `status_amber` (`#E5B567` / `#9A6207`) with `Last scan` timestamp moved to hover | **PASS** | `before-pods-dark.png` vs `after-pods-stale-dark.png` & `after-settings-full-dark.png` |
+| **FIX 9** | Stale masthead caption in muted amber `status_amber` (`#F5B83D` / `#A66C07` after FIX 15) with `Last scan` timestamp moved to hover | **PASS** | `before-pods-dark.png` vs `after-pods-stale-dark.png` & `after-settings-full-dark.png` |
 | **FIX 10** | `Your files` subtitle corrected to `"Shell folders & Personal-files zones · read-only"` | **PASS** | `after-ledger-your-files-dark.png` |
 | **FIX 11** | Regenerate `1/2/5/10`-drive sim screenshots with shipped `"Include"`, `"Exclusions"`, `"Scanned HH:MM"`, `"Rescan"` labels | **PASS** | `sim-1-drive-dark.png`, `sim-2-drives-dark.png`, `sim-5-drives-dark.png`, `sim-10-drives-dark.png` |
 | **FIX 12** | Word/segment-boundary drawer truncation (`draw_word_capped_text_cached`) + `font_id.family` hash + deduped `(service)` suffix | **PASS** | `before-edge-drawer-dark.png` vs `after-edge-drawer-dark.png`, `ui::tests::word_boundary_truncation_*` & dep truncation check |
 | **FIX 13** | Legitimate icons extracted from exe/service binaries & MSIX `<Logo>` PNGs without fabricating missing ones | **PASS** | Live 4-drive scan icon coverage rose `99 -> 223` (`+124` gained, `0` lost); `Xbox Service` stays neutral fallback |
 | **FIX 14** | `"new"` growth state rendered as `status_green` pill over `pill_green_fill` in both global and per-drive modes | **PASS** | `before-growth-new-deltas-dark.png` vs `after-growth-new-deltas-dark.png` & `after-per-drive-c-dark.png` |
+| **FIX 15** | Palette re-anchored to flat logo (`#7CCBF2` / `#F2A9D6` -> `#69CBFC`/`#FA80CB` Dark, `#0090D9`/`#FA29AA` Light, 6-stop rim/meter gradient, `#28D66C`/`#0A7A3C` green, `#F5B83D`/`#A66C07` warning, `#F04458`/`#E02444` error); named violet token removed everywhere | **PASS** | `fix15-{main,drawer}-{dark,light}.png`, `after-*`, `ui::tests::palette_reanchor_fix15_matches_owner_flat_logo_and_status_tokens` |
 
 ---
 
 ## 1. Test & Build Verification (0 Warnings)
-- **`cargo test --workspace`**: **74 passed, 0 failed, 0 warnings**
+- **`cargo test --workspace`**: **75 passed, 0 failed, 0 warnings**
   - `y-core` unit tests (`dependencies::tests`): **2 passed**
   - `y-core` `core_tests`: **6 passed**
   - `y-core` `round2_tests`: **6 passed**
@@ -30,11 +31,11 @@
   - `y-core` `round4_tests`: **5 passed**
   - `y-core` `round5_tests`: **11 passed**
   - `y-platform-windows` `windows_scanner_tests`: **3 passed**
-  - `y-storage` unit tests: **33 passed**
+  - `y-storage` unit tests: **34 passed**
 - **`cargo build --release --bin y-storage`**: compiled cleanly with **0 warnings**.
 - **Deployment & GUI Smoke**:
-  - Release & deployed `Y:\Apps\y-storage\y-storage.exe` SHA-256: `8039D5053EEF029D152667B595D1590A3218F0E43FAA7C34B2B0D69E875C429D`.
-  - `Y:\Apps\y-storage\y-storage.exe --smoke-gui-ms 500` exited `0` (`working_set_bytes: 33,923,072`, `private_bytes: 15,499,264`, `apps_count: 283`, `has_cached_report: true`).
+  - Release & deployed `Y:\Apps\y-storage\y-storage.exe` SHA-256: `426D4F717712794E42989876B5F8CB2EC38E4616F8753AEDC71F1E515F1ACAAD`.
+  - `Y:\Apps\y-storage\y-storage.exe --smoke-gui-ms 500` exited `0` (`working_set_bytes: 33,910,784`, `private_bytes: 15,925,248`, `apps_count: 283`, `has_cached_report: true`).
 
 ---
 
@@ -72,6 +73,7 @@ Before FIX 2, `draw_crisp_frame` in `draw_pinned_bottom_groups` sat **inside** `
 ---
 
 ## 5. Before / After & Simulation Screenshot Index (`specs/023-ui-polish-3/`)
+- **FIX 15 Dual-Mode Palette Audit**: `fix15-main-dark.png`, `fix15-main-light.png`, `fix15-drawer-dark.png`, `fix15-drawer-light.png`
 - Pods & Header Stale State: `before-pods-dark.png`, `before-pods-light.png` -> `after-pods-dark.png`, `after-pods-light.png`, `after-pods-stale-dark.png`
 - Pod Exclusions Overlay: `before-pod-exclusions-dark.png` -> `after-pod-exclusions-dark.png`
 - Ledger Bounded Viewport & `Your files` Subtitle: `before-ledger-max-dark.png` -> `after-ledger-unattrib-bottom-dark.png`, `after-ledger-your-files-dark.png`
@@ -80,3 +82,9 @@ Before FIX 2, `draw_crisp_frame` in `draw_pinned_bottom_groups` sat **inside** `
 - Per-Drive `C:` Companion Placement & Noise Floor: `before-per-drive-c-dark.png` -> `after-per-drive-c-dark.png`
 - `"new"` Green Status Pill & `< 1 MB` Delta Floor: `before-growth-new-deltas-dark.png` -> `after-growth-new-deltas-dark.png`
 - Regenerated Drive-Count Sims: `sim-1-drive-dark.png`, `sim-2-drives-dark.png`, `sim-5-drives-dark.png`, `sim-10-drives-dark.png`
+
+## 6. FIX 15 Removed-Token Reassignment Ledger
+- Active press borders (`apply_theme_visuals`, `resolve_button_colors`, `draw_theme_toggle_button`, `draw_filter_radio_chip`) -> `pal.accent_2` (`#FA80CB` Dark / `#FA29AA` Light).
+- Location `qualifier_chip_style` & qualifier text width measurement (`draw_expanded_drawer`) -> `pal.pill_pink_fill` + `pal.accent_2` stroke + `pal.pill_pink_text` (`#382C3C` / `#FA80CB` / `#FBBBE3` Dark; `#FCECF6` / `#FA29AA` / `#FA29AA` Light).
+- Dependency kind chips (`draw_reverse_dependency_overlay`, `draw_dependencies_view`) -> Quiet Neutral (`Color32::TRANSPARENT` fill, `pal.border` stroke, `pal.muted` text).
+- Active container gradient rims (`build_cached_rim_geometry`, `paint_active_card_gradient_border`) & drive meters (`wt_gradient_color_at`) -> unified 6-stop `WT_RIM_GRADIENT_STOPS` helper (`#54B9F2 → #7CD0FA → #A5E6FF → #D8A6FF → #F7A8D8 → #FFC7E3`).

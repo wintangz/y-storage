@@ -13,3 +13,4 @@
 - [x] Update `DESIGN.md` (`§2.2`, `§6`, `§6.2`, `§8`, `§9`, `§11`)
 - [x] Verify `cargo test --workspace` (`74/74` pass, 0 warnings), release build (0 warnings), live invariance scans (`diff = 0 B`), and visually inspect all before/after/sim PNGs
 - [x] Deploy `Y:\Apps\y-storage\y-storage.exe`, verify SHA-256 & GUI smoke test, write verification report, commit, and push `origin/main`
+- [x] Re-anchor palette to `logo-mark-flat` (`#69CBFC`/`#FA80CB` Dark, `#0090D9`/`#FA29AA` Light, 6-stop rim/meter gradient, status family updates, delete named violet family, render & inspect `fix15-*` Dark/Light PNGs, update `DESIGN.md`, test, rebuild, redeploy, commit & push) (`FIX 15`)

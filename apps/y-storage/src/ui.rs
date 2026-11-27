@@ -25,13 +25,39 @@ use crate::list_query::{
     publisher_facet_options, sanitize_facets_for_report,
 };
 
-// Pastel and semantic constants sampled from assets/logo-mark.png (DESIGN.md §2.2).
-pub const LOGO_BLUE: Color32 = Color32::from_rgb(133, 212, 251); // #85D4FB (sampled WT mark blue stop)
-pub const LOGO_BLUE_READABLE: Color32 = Color32::from_rgb(6, 126, 185); // #067EB9 (H=199.8deg, L=37.5% light-mode legibility)
-pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 172, 217); // #F7ACD9 (sampled WT mark pink stop)
-pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(215, 165, 255); // #D7A5FF (sampled WT mark lavender stop)
+// Accent family anchored to the two-colour flat mark (`logo-mark-flat`: #7CCBF2 / #F2A9D6, DESIGN.md §2.2).
+#[allow(dead_code)]
+pub const FLAT_LOGO_BLUE_SRC: Color32 = Color32::from_rgb(124, 203, 242); // #7CCBF2
+#[allow(dead_code)]
+pub const FLAT_LOGO_PINK_SRC: Color32 = Color32::from_rgb(242, 169, 214); // #F2A9D6
+pub const ACCENT_1_DARK: Color32 = Color32::from_rgb(105, 203, 252); // #69CBFC
+pub const ACCENT_2_DARK: Color32 = Color32::from_rgb(250, 128, 203); // #FA80CB
+pub const ACCENT_INK_1_LIGHT: Color32 = Color32::from_rgb(0, 144, 217); // #0090D9 (owner max-vivid Light step)
+pub const ACCENT_INK_2_LIGHT: Color32 = Color32::from_rgb(250, 41, 170); // #FA29AA (owner max-vivid Light step)
+/// Six-stop gradient from the converted logo mark, used strictly for active container rims and drive meters.
+pub const WT_RIM_GRADIENT_STOPS: [Color32; 6] = [
+    Color32::from_rgb(84, 185, 242),  // #54B9F2
+    Color32::from_rgb(124, 208, 250), // #7CD0FA
+    Color32::from_rgb(165, 230, 255), // #A5E6FF
+    Color32::from_rgb(216, 166, 255), // #D8A6FF (unnamed sweep midpoint only)
+    Color32::from_rgb(247, 168, 216), // #F7A8D8
+    Color32::from_rgb(255, 199, 227), // #FFC7E3
+];
 pub const STATUS_GREEN: Color32 = Color32::from_rgb(40, 214, 108); // #28D66C
 pub const STATUS_RED: Color32 = Color32::from_rgb(240, 68, 88); // #F04458
+
+#[inline]
+#[must_use]
+fn sample_wt_logo_gradient(t: f32) -> Color32 {
+    let scaled = t.clamp(0.0, 1.0) * (WT_RIM_GRADIENT_STOPS.len() - 1) as f32;
+    let idx = (scaled.floor() as usize).min(WT_RIM_GRADIENT_STOPS.len() - 2);
+    let frac = scaled - idx as f32;
+    lerp_color(
+        WT_RIM_GRADIENT_STOPS[idx],
+        WT_RIM_GRADIENT_STOPS[idx + 1],
+        frac,
+    )
+}
 
 #[inline]
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -128,8 +154,9 @@ pub struct ThemePalette {
     pub widget_hover: Color32,
     pub widget_active: Color32,
     pub accent_line: Color32,
-    pub lavender_text: Color32,
+    pub accent_2: Color32,
     pub proven_text: Color32,
+    pub pill_pink_text: Color32,
     pub status_green: Color32,
     pub status_red: Color32,
     pub status_amber: Color32,
@@ -137,7 +164,9 @@ pub struct ThemePalette {
     pub no_touch_outline: Color32,
     pub pill_blue_fill: Color32,
     pub pill_green_fill: Color32,
-    pub pill_lav_fill: Color32,
+    pub pill_pink_fill: Color32,
+    #[allow(dead_code)]
+    pub pill_amber_fill: Color32,
     pub pill_red_fill: Color32,
     pub scrollbar_thumb: Color32,
     pub scrollbar_thumb_hover: Color32,
@@ -161,18 +190,20 @@ impl ThemePalette {
                 widget: Color32::from_rgb(24, 24, 38),         // #181826 (z-controller widget)
                 widget_hover: Color32::from_rgb(31, 31, 49),   // #1F1F31 (z-controller widget_hover)
                 widget_active: Color32::from_rgb(20, 40, 50),  // #142832 (pressed accent tint from WT mark blue)
-                accent_line: LOGO_BLUE,                        // #85D4FB (sampled WT mark blue stop)
-                lavender_text: LOGO_LAVENDER,                  // #D7A5FF
-                proven_text: Color32::from_rgb(157, 223, 252), // #9DDFFC (crisp WT-blue ink inside Dark outline+tint pill)
+                accent_line: ACCENT_1_DARK,                    // #69CBFC (boosted flat-logo blue)
+                accent_2: ACCENT_2_DARK,                       // #FA80CB (boosted flat-logo pink)
+                proven_text: Color32::from_rgb(175, 227, 253), // #AFE3FD (Dark blue pill text)
+                pill_pink_text: Color32::from_rgb(251, 187, 227), // #FBBBE3 (Dark pink pill text)
                 status_green: STATUS_GREEN,                    // #28D66C
                 status_red: STATUS_RED,                        // #F04458
-                status_amber: Color32::from_rgb(229, 181, 103), // #E5B567 (FIX 9 warning token)
-                delta_grew: STATUS_RED,                        // #F04458 (ADD 3 saturated status)
-                no_touch_outline: STATUS_RED,                  // #F04458 (ADD 3 saturated status)
-                pill_blue_fill: Color32::from_rgb(18, 34, 44), // #12222C (subtle WT-blue tint fill)
-                pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (ADD 3 saturated green tint)
-                pill_lav_fill: Color32::from_rgb(32, 24, 46),
-                pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (ADD 3 saturated red tint)
+                status_amber: Color32::from_rgb(245, 184, 61), // #F5B83D (FIX 15 warning text/stroke)
+                delta_grew: STATUS_RED,                        // #F04458 (saturated status)
+                no_touch_outline: STATUS_RED,                  // #F04458 (saturated status)
+                pill_blue_fill: Color32::from_rgb(37, 49, 65), // #253141 (Dark blue pill fill)
+                pill_green_fill: Color32::from_rgb(16, 46, 32), // #102E20 (Dark green pill fill)
+                pill_pink_fill: Color32::from_rgb(56, 44, 60), // #382C3C (Dark pink pill fill)
+                pill_amber_fill: Color32::from_rgb(56, 46, 37), // #382E25 (Dark warning pill fill)
+                pill_red_fill: Color32::from_rgb(44, 18, 30),  // #2C121E (Dark red pill fill)
                 scrollbar_thumb: Color32::from_rgb(82, 86, 122), // #52567A (FIX 4b minimum visible Dark contrast)
                 scrollbar_thumb_hover: Color32::from_rgb(122, 134, 184), // #7A86B8
             },
@@ -190,18 +221,20 @@ impl ThemePalette {
                 widget: Color32::from_rgb(245, 248, 252),      // #F5F8FC (z-controller widget)
                 widget_hover: Color32::from_rgb(232, 244, 251), // #E8F4FB (WT-blue hover wash)
                 widget_active: Color32::from_rgb(216, 238, 249), // #D8EEF9 (WT-blue press wash)
-                accent_line: LOGO_BLUE_READABLE,               // #067EB9 (WT-mark hue L=37.5% light-mode contrast)
-                lavender_text: Color32::from_rgb(120, 62, 184), // #783EB8 (Light contrast exception)
-                proven_text: Color32::from_rgb(5, 107, 158),   // #056B9E (crisp Light outline+tint ink)
-                status_green: Color32::from_rgb(15, 168, 79),   // #0FA84F (ADD 3 saturated Light green)
-                status_red: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light red)
-                status_amber: Color32::from_rgb(154, 98, 7),    // #9A6207 (FIX 9 Light warning token)
-                delta_grew: Color32::from_rgb(224, 36, 68),     // #E02444 (ADD 3 saturated Light delta)
-                no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444 (ADD 3 saturated Light NO-TOUCH)
-                pill_blue_fill: Color32::from_rgb(230, 246, 254), // #E6F6FE (soft WT-blue Light pill tint)
-                pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (ADD 3 saturated Light green tint)
-                pill_lav_fill: Color32::from_rgb(243, 236, 255),
-                pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (ADD 3 saturated Light red tint)
+                accent_line: ACCENT_INK_1_LIGHT,               // #0090D9 (owner max-vivid Light blue)
+                accent_2: ACCENT_INK_2_LIGHT,                  // #FA29AA (owner max-vivid Light pink)
+                proven_text: ACCENT_INK_1_LIGHT,               // #0090D9 (Light blue pill text)
+                pill_pink_text: ACCENT_INK_2_LIGHT,            // #FA29AA (Light pink pill text)
+                status_green: Color32::from_rgb(10, 122, 60),  // #0A7A3C (Light green text/stroke)
+                status_red: Color32::from_rgb(224, 36, 68),    // #E02444 (Light red text/stroke)
+                status_amber: Color32::from_rgb(166, 108, 7),  // #A66C07 (Light warning text/stroke)
+                delta_grew: Color32::from_rgb(224, 36, 68),    // #E02444
+                no_touch_outline: Color32::from_rgb(224, 36, 68), // #E02444
+                pill_blue_fill: Color32::from_rgb(226, 244, 252), // #E2F4FC (Light blue pill fill)
+                pill_green_fill: Color32::from_rgb(228, 249, 236), // #E4F9EC (Light green pill fill)
+                pill_pink_fill: Color32::from_rgb(252, 236, 246), // #FCECF6 (Light pink pill fill)
+                pill_amber_fill: Color32::from_rgb(253, 240, 218), // #FDF0DA (Light warning pill fill)
+                pill_red_fill: Color32::from_rgb(253, 232, 237), // #FDE8ED (Light red pill fill)
                 scrollbar_thumb: Color32::from_rgb(152, 176, 202), // #98B0CA (FIX 4b Light contrast)
                 scrollbar_thumb_hover: Color32::from_rgb(100, 140, 184), // #648CB8
             },
@@ -657,7 +690,7 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
 
     visuals.widgets.active.bg_fill = pal.widget_active;
     visuals.widgets.active.weak_bg_fill = pal.widget_active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, LOGO_PINK);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, pal.accent_2);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, pal.text);
     visuals.widgets.active.rounding = Rounding::same(6.0);
 
@@ -794,11 +827,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32) -> CachedRimMesh {
         mesh.indices.reserve(n * (BANDS - 1) * 6);
         for (p, norm) in &ring {
             let t = ((p.x / lw) * 0.65 + (p.y / lh) * 0.35).clamp(0.0, 1.0);
-            let c = if t <= 0.5 {
-                lerp_color(LOGO_BLUE, LOGO_LAVENDER, t * 2.0)
-            } else {
-                lerp_color(LOGO_LAVENDER, LOGO_PINK, (t - 0.5) * 2.0)
-            };
+            let c = sample_wt_logo_gradient(t);
             for (&off, &a) in offsets.iter().zip(alphas.iter()) {
                 let color = if a == 0 {
                     Color32::TRANSPARENT
@@ -904,7 +933,7 @@ fn paint_crisp_ring_mesh(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Ported verbatim from z-controller (`ui.rs:398-458`): diagonal gradient rim (LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK) bounded strictly inside `rect`.
+/// Diagonal 6-stop logo-file gradient rim (`WT_RIM_GRADIENT_STOPS`) bounded strictly inside `rect`.
 #[allow(dead_code)]
 fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, rounding: f32) {
     if rect.width() <= 4.0 || rect.height() <= 4.0 {
@@ -930,11 +959,7 @@ fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, roundi
 
     for (p, norm) in &ring {
         let t = (((p.x - rect.left()) / w) * 0.65 + ((p.y - rect.top()) / h) * 0.35).clamp(0.0, 1.0);
-        let c = if t <= 0.5 {
-            lerp_color(LOGO_BLUE, LOGO_LAVENDER, t * 2.0)
-        } else {
-            lerp_color(LOGO_LAVENDER, LOGO_PINK, (t - 0.5) * 2.0)
-        };
+        let c = sample_wt_logo_gradient(t);
         for (&off, &a) in offsets.iter().zip(alphas.iter()) {
             let color = if a == 0 {
                 Color32::TRANSPARENT
@@ -1118,15 +1143,10 @@ fn draw_optical_label_in_rect(
 
 #[inline]
 fn wt_gradient_color_at(t: f32) -> Color32 {
-    let clamped = t.clamp(0.0, 1.0);
-    if clamped <= 0.5 {
-        lerp_color(LOGO_BLUE, LOGO_LAVENDER, clamped * 2.0)
-    } else {
-        lerp_color(LOGO_LAVENDER, LOGO_PINK, (clamped - 0.5) * 2.0)
-    }
+    sample_wt_logo_gradient(t)
 }
 
-/// Paints the 3-stop WT horizontal gradient (`LOGO_BLUE -> LOGO_LAVENDER -> LOGO_PINK`) across `full_track`, clipped to `fill_rect` with crisp rounded caps.
+/// Paints the 6-stop WT horizontal logo gradient across `full_track`, clipped to `fill_rect` with crisp rounded caps.
 fn paint_horizontal_wt_gradient_bar(
     painter: &egui::Painter,
     full_track: Rect,
@@ -1269,7 +1289,7 @@ fn resolve_button_colors(
             ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
             ButtonVariant::PrimaryOutline
             | ButtonVariant::PodPrimaryOutline
-            | ButtonVariant::SecondaryOutline => LOGO_PINK,
+            | ButtonVariant::SecondaryOutline => pal.accent_2,
         };
         return (pal.widget_active, press_border, pal.text);
     }
@@ -1583,9 +1603,9 @@ fn zone_chip_style(zone: ZoneKind, pal: &ThemePalette) -> ChipStyle {
 
 fn qualifier_chip_style(pal: &ThemePalette) -> ChipStyle {
     ChipStyle {
-        fill: pal.pill_lav_fill,
-        stroke: LOGO_LAVENDER,
-        text: pal.lavender_text,
+        fill: pal.pill_pink_fill,
+        stroke: pal.accent_2,
+        text: pal.pill_pink_text,
     }
 }
 
@@ -1899,7 +1919,7 @@ fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalet
     let hovered = resp.hovered();
     let pressed = resp.is_pointer_button_down_on();
     let (fill, border, fg) = if pressed {
-        (pal.widget_active, LOGO_PINK, pal.text)
+        (pal.widget_active, pal.accent_2, pal.text)
     } else if hovered {
         (pal.widget_hover, pal.accent_line, pal.accent_line)
     } else {
@@ -2469,7 +2489,7 @@ fn draw_filter_radio_chip(
     let desired_w = (galley.size().x + SPACE_16).round();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(desired_w, 22.0), Sense::click());
     let (fill, border_col, draw_fg) = if resp.is_pointer_button_down_on() {
-        (pal.widget_active, LOGO_PINK, pal.text)
+        (pal.widget_active, pal.accent_2, pal.text)
     } else if resp.hovered() {
         (
             pal.widget_hover,
@@ -5432,7 +5452,7 @@ fn draw_main_app_list(
                                                 f.layout_no_wrap(
                                                     q_lbl.to_owned(),
                                                     FontId::new(10.5, FontFamily::Proportional),
-                                                    pal.lavender_text,
+                                                    pal.pill_pink_text,
                                                 )
                                                 .size()
                                                 .x
@@ -6101,9 +6121,9 @@ fn draw_reverse_dependency_overlay(
                                 ui,
                                 rev.kind.label(),
                                 ChipStyle {
-                                    fill: pal.pill_lav_fill,
+                                    fill: Color32::TRANSPARENT,
                                     stroke: pal.border,
-                                    text: pal.lavender_text,
+                                    text: pal.muted,
                                 },
                                 pal.panel,
                             );
@@ -7220,9 +7240,9 @@ fn draw_reverse_group_header(
                 ui,
                 dep.kind.label(),
                 ChipStyle {
-                    fill: pal.pill_lav_fill,
+                    fill: Color32::TRANSPARENT,
                     stroke: pal.border,
-                    text: pal.lavender_text,
+                    text: pal.muted,
                 },
                 pal.panel,
             );
@@ -9148,5 +9168,64 @@ mod tests {
                 assert!(!out.shapes.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn palette_reanchor_fix15_matches_owner_flat_logo_and_status_tokens() {
+        let dark = ThemePalette::for_mode(ThemeMode::Dark);
+        let light = ThemePalette::for_mode(ThemeMode::Light);
+
+        // Flat logo re-anchoring (#7CCBF2 / #F2A9D6)
+        assert_eq!(FLAT_LOGO_BLUE_SRC, Color32::from_rgb(0x7C, 0xCB, 0xF2));
+        assert_eq!(FLAT_LOGO_PINK_SRC, Color32::from_rgb(0xF2, 0xA9, 0xD6));
+
+        // Dark accents & pill pairs
+        assert_eq!(dark.accent_line, Color32::from_rgb(0x69, 0xCB, 0xFC));
+        assert_eq!(dark.accent_2, Color32::from_rgb(0xFA, 0x80, 0xCB));
+        assert_eq!(dark.pill_blue_fill, Color32::from_rgb(0x25, 0x31, 0x41));
+        assert_eq!(dark.proven_text, Color32::from_rgb(0xAF, 0xE3, 0xFD));
+        assert_eq!(dark.pill_pink_fill, Color32::from_rgb(0x38, 0x2C, 0x3C));
+        assert_eq!(dark.pill_pink_text, Color32::from_rgb(0xFB, 0xBB, 0xE3));
+
+        // Light accents (owner max-vivid steps) & pill pairs
+        assert_eq!(light.accent_line, Color32::from_rgb(0x00, 0x90, 0xD9));
+        assert_eq!(light.accent_2, Color32::from_rgb(0xFA, 0x29, 0xAA));
+        assert_eq!(light.pill_blue_fill, Color32::from_rgb(0xE2, 0xF4, 0xFC));
+        assert_eq!(light.proven_text, Color32::from_rgb(0x00, 0x90, 0xD9));
+        assert_eq!(light.pill_pink_fill, Color32::from_rgb(0xFC, 0xEC, 0xF6));
+        assert_eq!(light.pill_pink_text, Color32::from_rgb(0xFA, 0x29, 0xAA));
+
+        // Status family
+        assert_eq!(dark.status_green, Color32::from_rgb(0x28, 0xD6, 0x6C));
+        assert_eq!(dark.pill_green_fill, Color32::from_rgb(0x10, 0x2E, 0x20));
+        assert_eq!(light.status_green, Color32::from_rgb(0x0A, 0x7A, 0x3C));
+        assert_eq!(light.pill_green_fill, Color32::from_rgb(0xE4, 0xF9, 0xEC));
+
+        assert_eq!(dark.status_amber, Color32::from_rgb(0xF5, 0xB8, 0x3D));
+        assert_eq!(dark.pill_amber_fill, Color32::from_rgb(0x38, 0x2E, 0x25));
+        assert_eq!(light.status_amber, Color32::from_rgb(0xA6, 0x6C, 0x07));
+        assert_eq!(light.pill_amber_fill, Color32::from_rgb(0xFD, 0xF0, 0xDA));
+
+        assert_eq!(dark.status_red, Color32::from_rgb(0xF0, 0x44, 0x58));
+        assert_eq!(dark.pill_red_fill, Color32::from_rgb(0x2C, 0x12, 0x1E));
+        assert_eq!(light.status_red, Color32::from_rgb(0xE0, 0x24, 0x44));
+        assert_eq!(light.pill_red_fill, Color32::from_rgb(0xFD, 0xE8, 0xED));
+
+        // 6-stop rim/meter gradient endpoints + midpoint
+        assert_eq!(WT_RIM_GRADIENT_STOPS.len(), 6);
+        assert_eq!(sample_wt_logo_gradient(0.0), Color32::from_rgb(0x54, 0xB9, 0xF2));
+        assert_eq!(sample_wt_logo_gradient(0.2), Color32::from_rgb(0x7C, 0xD0, 0xFA));
+        assert_eq!(sample_wt_logo_gradient(0.4), Color32::from_rgb(0xA5, 0xE6, 0xFF));
+        assert_eq!(sample_wt_logo_gradient(0.6), Color32::from_rgb(0xD8, 0xA6, 0xFF));
+        assert_eq!(sample_wt_logo_gradient(0.8), Color32::from_rgb(0xF7, 0xA8, 0xD8));
+        assert_eq!(sample_wt_logo_gradient(1.0), Color32::from_rgb(0xFF, 0xC7, 0xE3));
+
+        // Qualifier pill uses accent_2 pink family; unchanged neutrals preserved
+        let q = qualifier_chip_style(&dark);
+        assert_eq!(q.fill, dark.pill_pink_fill);
+        assert_eq!(q.stroke, dark.accent_2);
+        assert_eq!(q.text, dark.pill_pink_text);
+        assert_eq!(dark.bg, Color32::from_rgb(10, 10, 16));
+        assert_eq!(light.bg, Color32::from_rgb(238, 244, 250));
     }
 }
