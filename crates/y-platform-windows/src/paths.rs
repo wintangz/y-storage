@@ -101,6 +101,8 @@ pub fn enumerate_fixed_drives() -> Vec<DriveInfo> {
             is_system_drive: is_sys,
             full_walk_enabled: is_sys,
             exclusions,
+            last_scanned_unix: None,
+            last_scanned_display: None,
         });
     }
     drives

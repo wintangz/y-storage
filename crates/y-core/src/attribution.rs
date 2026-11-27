@@ -1,17 +1,31 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::config::ContainerRulebook;
 use crate::discovery::{
     AppTokenMatchKind, contains_whole_token_sequence, extract_guid, is_subpath_of,
     match_app_predicate, normalize_app_token, normalize_path_key, path_drive_letter,
     versioned_family_identity_key,
 };
-use crate::history::{HistoryEntryRef, compute_growth};
+use crate::history::{HistoryEntryRef, ScanHistory, compute_growth, recompute_report_growth_from_history};
 use crate::model::{
-    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, InstalledApp, LocationQualifier,
-    NoTouchCategory, RegistryDiscoveryStats, ScanReport, ScannedUnit, ScannedUnitKind,
-    SystemDriveBreakdown, UnattributedItem, ZoneKind,
+    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, GrowthDelta, InstalledApp,
+    LocationQualifier, NoTouchCategory, RegistryDiscoveryStats, ScanReport, ScannedUnit,
+    ScannedUnitKind, SystemDriveBreakdown, UnattributedItem, ZoneKind,
 };
 use crate::zones::classify_zone;
+
+#[derive(Debug, Clone)]
+pub struct RootExeCandidate {
+    pub exe_path: String,
+    pub product_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AttributionOptions<'a> {
+    pub containers: Option<&'a ContainerRulebook>,
+    pub steam_library_roots: &'a [String],
+    pub root_exe_candidates: Option<&'a HashMap<String, RootExeCandidate>>,
+}
 
 struct AppBucket {
     app: InstalledApp,
@@ -32,6 +46,34 @@ pub fn attribute_scan(
     scanned_units: &[ScannedUnit],
     previous_history: Option<&HistoryEntryRef>,
 ) -> ScanReport {
+    attribute_scan_with_options(
+        timestamp_unix,
+        timestamp_display,
+        duration_ms,
+        drives,
+        registry_stats,
+        installed_apps,
+        guid_to_app_name,
+        scanned_units,
+        previous_history,
+        &AttributionOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn attribute_scan_with_options(
+    timestamp_unix: u64,
+    timestamp_display: String,
+    duration_ms: u64,
+    drives: Vec<DriveInfo>,
+    registry_stats: RegistryDiscoveryStats,
+    installed_apps: &[InstalledApp],
+    guid_to_app_name: &HashMap<String, String>,
+    scanned_units: &[ScannedUnit],
+    previous_history: Option<&HistoryEntryRef>,
+    options: &AttributionOptions<'_>,
+) -> ScanReport {
     let mut buckets: Vec<AppBucket> = installed_apps
         .iter()
         .cloned()
@@ -48,7 +90,14 @@ pub fn attribute_scan(
     let mut your_files: Vec<BreakdownItem> = Vec::new();
     let mut unattributed: Vec<UnattributedItem> = Vec::new();
     let mut root_sys_by_drive: HashMap<char, Vec<BreakdownItem>> = HashMap::new();
+    let mut os_folders_by_drive: HashMap<char, Vec<BreakdownItem>> = HashMap::new();
     let mut scanned_non_system_by_drive: HashMap<char, u64> = HashMap::new();
+    let steam_lib_keys: Vec<String> = options
+        .steam_library_roots
+        .iter()
+        .map(|p| normalize_path_key(p))
+        .filter(|s| !s.is_empty())
+        .collect();
 
     for unit in scanned_units {
         if unit.bytes == 0 && unit.kind != ScannedUnitKind::RootSystemFile {
@@ -67,6 +116,7 @@ pub fn attribute_scan(
                         zone: None,
                         qualifier: None,
                         basis: None,
+                        basis_detail: None,
                         no_touch: Some(NoTouchCategory::SystemRuntime),
                         drive_letter: d_letter,
                     });
@@ -80,6 +130,7 @@ pub fn attribute_scan(
                     zone: None,
                     qualifier: None,
                     basis: None,
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: d_letter,
                 });
@@ -105,6 +156,7 @@ pub fn attribute_scan(
                         zone: Some(zone),
                         qualifier: qual,
                         basis: Some(AttributionBasis::Token),
+                        basis_detail: None,
                         no_touch: Some(NoTouchCategory::Registry),
                         drive_letter: d_letter,
                     },
@@ -113,6 +165,24 @@ pub fn attribute_scan(
                 continue;
             }
             ScannedUnitKind::Regular => {
+                let path_lower_pre = normalize_path_key(&unit.path);
+                let leaf_pre = leaf_name(&unit.path).to_ascii_lowercase();
+                if let Some(os_label) = classify_drive_root_os_folder(&path_lower_pre, &leaf_pre) {
+                    os_folders_by_drive
+                        .entry(d_letter)
+                        .or_default()
+                        .push(BreakdownItem {
+                            path: unit.path.clone(),
+                            bytes: unit.bytes,
+                            zone: None,
+                            qualifier: None,
+                            basis: None,
+                            basis_detail: Some(os_label.to_string()),
+                            no_touch: Some(NoTouchCategory::SystemRuntime),
+                            drive_letter: d_letter,
+                        });
+                    continue;
+                }
                 *scanned_non_system_by_drive.entry(d_letter).or_default() += unit.bytes;
             }
         }
@@ -135,13 +205,37 @@ pub fn attribute_scan(
                 zone: Some(ZoneKind::Green),
                 qualifier: qual,
                 basis: None,
+                basis_detail: None,
                 no_touch: None,
                 drive_letter: d_letter,
             });
             continue;
         }
 
-        // Exclude drive root loose metadata like $Recycle.Bin, Config.Msi, System Volume Information, .GamingRoot from force-matching.
+        // Steam library root/steamapps loose files (`steamapps\[files]`, `Steam\[files]`) belong to Steam.
+        if is_steam_library_loose_files(&path_lower, &steam_lib_keys) {
+            if let Some(idx) = find_app_matching(&buckets, &["steam"]) {
+                let (zone, qual) = classify_zone(&unit.path, true);
+                let nt = buckets[idx].app.no_touch;
+                push_item_to_bucket(
+                    &mut buckets[idx],
+                    BreakdownItem {
+                        path: unit.path.clone(),
+                        bytes: unit.bytes,
+                        zone: Some(zone),
+                        qualifier: qual,
+                        basis: Some(AttributionBasis::SteamManifest),
+                        basis_detail: None,
+                        no_touch: nt,
+                        drive_letter: d_letter,
+                    },
+                    AttributionBasis::SteamManifest,
+                );
+                continue;
+            }
+        }
+
+        // Exclude OS metadata like $Recycle.Bin, Config.Msi, System Volume Information, [root files] from force-matching.
         if is_unattributable_os_noise(&path_lower, &leaf_lower) {
             let (zone, _) = classify_zone(&unit.path, false);
             unattributed.push(UnattributedItem {
@@ -157,6 +251,11 @@ pub fn attribute_scan(
         if let Some((idx, is_install_loc)) = find_by_install_location(&buckets, &path_lower) {
             let (zone, qual) = classify_zone(&unit.path, is_install_loc || unit.is_direct_install_root);
             let nt = buckets[idx].app.no_touch;
+            let basis = if buckets[idx].app.id.starts_with("steam:") {
+                AttributionBasis::SteamManifest
+            } else {
+                AttributionBasis::InstallLocation
+            };
             push_item_to_bucket(
                 &mut buckets[idx],
                 BreakdownItem {
@@ -164,11 +263,12 @@ pub fn attribute_scan(
                     bytes: unit.bytes,
                     zone: Some(zone),
                     qualifier: qual,
-                    basis: Some(AttributionBasis::InstallLocation),
+                    basis: Some(basis),
+                    basis_detail: None,
                     no_touch: nt,
                     drive_letter: d_letter,
                 },
-                AttributionBasis::InstallLocation,
+                basis,
             );
             continue;
         }
@@ -185,6 +285,7 @@ pub fn attribute_scan(
                     zone: Some(zone),
                     qualifier: qual,
                     basis: Some(AttributionBasis::ExactName),
+                    basis_detail: None,
                     no_touch: nt,
                     drive_letter: d_letter,
                 },
@@ -213,6 +314,7 @@ pub fn attribute_scan(
                     zone: Some(zone),
                     qualifier: qual,
                     basis: Some(AttributionBasis::Token),
+                    basis_detail: None,
                     no_touch: nt,
                     drive_letter: d_letter,
                 },
@@ -233,6 +335,7 @@ pub fn attribute_scan(
                     zone: Some(zone),
                     qualifier: qual,
                     basis: Some(AttributionBasis::Publisher),
+                    basis_detail: None,
                     no_touch: nt,
                     drive_letter: d_letter,
                 },
@@ -259,6 +362,7 @@ pub fn attribute_scan(
                         zone: Some(zone),
                         qualifier: qual,
                         basis: Some(AttributionBasis::PackageFallback),
+                        basis_detail: None,
                         no_touch: nt,
                         drive_letter: d_letter,
                     },
@@ -276,6 +380,7 @@ pub fn attribute_scan(
                 zone: Some(ZoneKind::Green),
                 qualifier: Some(LocationQualifier::MachineShared),
                 basis: None,
+                basis_detail: None,
                 no_touch: None,
                 drive_letter: d_letter,
             });
@@ -301,6 +406,7 @@ pub fn attribute_scan(
                     zone: Some(ZoneKind::Red),
                     qualifier: None,
                     basis: Some(AttributionBasis::StandaloneFolder),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: d_letter,
                 },
@@ -334,6 +440,7 @@ pub fn attribute_scan(
                     zone: Some(ZoneKind::Body),
                     qualifier: qual,
                     basis: Some(AttributionBasis::StandaloneFolder),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: d_letter,
                 },
@@ -360,6 +467,7 @@ pub fn attribute_scan(
                     zone: Some(ZoneKind::Green),
                     qualifier: None,
                     basis: Some(AttributionBasis::StandaloneFolder),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: d_letter,
                 },
@@ -386,6 +494,7 @@ pub fn attribute_scan(
                     zone: Some(ZoneKind::Body),
                     qualifier: None,
                     basis: Some(AttributionBasis::StandaloneFolder),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: d_letter,
                 },
@@ -394,7 +503,83 @@ pub fn attribute_scan(
             continue;
         }
 
-        // 6. Openly shown Unattributed.
+        // 5d. Container Rulebook (FIX 6a): only claims otherwise-unattributed immediate children
+        // of matched container directories (registry/Steam/stronger bases above always win).
+        if let Some(container_name) = options
+            .containers
+            .and_then(|c| match_container_child(c, &unit.path, &path_lower, &leaf_lower))
+        {
+            let clean_name = clean_container_folder_name(&leaf);
+            let app_key = format!("container:{path_lower}");
+            let idx = ensure_folder_only_app(
+                &mut buckets,
+                &mut store_buckets,
+                &app_key,
+                &clean_name,
+                &unit.path,
+                None,
+            );
+            let (zone, qual) = classify_zone(&unit.path, true);
+            let detail = format!("layout rule: {container_name}");
+            push_item_to_bucket(
+                &mut buckets[idx],
+                BreakdownItem {
+                    path: unit.path.clone(),
+                    bytes: unit.bytes,
+                    zone: Some(zone),
+                    qualifier: qual,
+                    basis: Some(AttributionBasis::ContainerRule),
+                    basis_detail: Some(detail),
+                    no_touch: None,
+                    drive_letter: d_letter,
+                },
+                AttributionBasis::ContainerRule,
+            );
+            continue;
+        }
+
+        // 5e. Conservative drive-root executable inference (FIX 6d).
+        if is_drive_root_child(&path_lower) {
+            if let Some(cand) = options
+                .root_exe_candidates
+                .and_then(|m| m.get(&path_lower))
+            {
+                let display = cand
+                    .product_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| clean_container_folder_name(&leaf));
+                let app_key = format!("exe:{path_lower}");
+                let idx = ensure_folder_only_app(
+                    &mut buckets,
+                    &mut store_buckets,
+                    &app_key,
+                    &display,
+                    &unit.path,
+                    Some(cand.exe_path.clone()),
+                );
+                let (zone, qual) = classify_zone(&unit.path, true);
+                push_item_to_bucket(
+                    &mut buckets[idx],
+                    BreakdownItem {
+                        path: unit.path.clone(),
+                        bytes: unit.bytes,
+                        zone: Some(zone),
+                        qualifier: qual,
+                        basis: Some(AttributionBasis::ExecutableScan),
+                        basis_detail: Some("executable scan (inferred)".to_string()),
+                        no_touch: None,
+                        drive_letter: d_letter,
+                    },
+                    AttributionBasis::ExecutableScan,
+                );
+                continue;
+            }
+        }
+
+        // 6. Honest remainder: stays Unattributed.
         let (zone, _) = classify_zone(&unit.path, false);
         unattributed.push(UnattributedItem {
             path: unit.path.clone(),
@@ -413,8 +598,8 @@ pub fn attribute_scan(
         }
     }
 
-    // Build AttributedApps (keep all apps with > 0 bytes, sorted desc by total_bytes).
-    let mut apps: Vec<AttributedApp> = buckets
+    // Build AttributedApps (keep all apps with > 0 bytes, disambiguating rare duplicate display names).
+    let mut raw_apps: Vec<AttributedApp> = buckets
         .into_iter()
         .filter(|b| b.total_bytes > 0)
         .map(|mut b| {
@@ -444,6 +629,27 @@ pub fn attribute_scan(
         })
         .collect();
 
+    // If two folder-only apps happen to share the exact same cleaned display name across folders
+    // (e.g. D:\Games\Minecraft vs Z:\Games\Minecraft), add a concise drive/leaf suffix so every row is unique.
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for app in &raw_apps {
+        *name_counts.entry(app.display_name.to_ascii_lowercase()).or_default() += 1;
+    }
+    for app in &mut raw_apps {
+        if (app.id.starts_with("container:") || app.id.starts_with("exe:"))
+            && name_counts
+                .get(&app.display_name.to_ascii_lowercase())
+                .copied()
+                .unwrap_or(0)
+                > 1
+        {
+            if let Some(drv) = app.items.first().map(|i| i.drive_letter) {
+                app.display_name = format!("{} ({drv}:)", app.display_name);
+            }
+        }
+    }
+
+    let mut apps = raw_apps;
     apps.sort_by(|a, b| {
         b.total_bytes
             .cmp(&a.total_bytes)
@@ -459,29 +665,42 @@ pub fn attribute_scan(
     unattributed.sort_by(|a, b| b.bytes.cmp(&a.bytes));
     let unattributed_total_bytes = unattributed.iter().map(|i| i.bytes).sum();
 
-    // Compute per-drive Windows & system remainder and reconciliation totals.
+    // Compute per-drive Windows & system breakdown and reconciliation totals.
     let mut windows_system = Vec::new();
     let mut windows_system_total_bytes = 0u64;
     for drv in &drives {
         let d = drv.letter.to_ascii_uppercase();
         let mut root_files = root_sys_by_drive.remove(&d).unwrap_or_default();
         root_files.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        let mut os_folders = os_folders_by_drive.remove(&d).unwrap_or_default();
+        os_folders.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let root_sum: u64 = root_files.iter().map(|i| i.bytes).sum();
+        let os_sum: u64 = os_folders.iter().map(|i| i.bytes).sum();
         let scanned_non_sys = *scanned_non_system_by_drive.get(&d).unwrap_or(&0);
-        let remainder_bytes = if drv.full_walk_enabled {
-            drv.used_bytes
-                .saturating_sub(scanned_non_sys.saturating_add(root_sum))
+        let walked_sum = scanned_non_sys
+            .saturating_add(root_sum)
+            .saturating_add(os_sum);
+        let (remainder_bytes, hardlink_overlap_bytes) = if drv.full_walk_enabled {
+            if walked_sum <= drv.used_bytes {
+                (drv.used_bytes - walked_sum, 0)
+            } else {
+                (0, walked_sum - drv.used_bytes)
+            }
         } else {
-            0
+            (0, 0)
         };
-        let sys_total = root_sum.saturating_add(remainder_bytes);
+        let sys_total = root_sum
+            .saturating_add(os_sum)
+            .saturating_add(remainder_bytes);
         windows_system_total_bytes = windows_system_total_bytes.saturating_add(sys_total);
 
         if drv.full_walk_enabled || sys_total > 0 {
             windows_system.push(SystemDriveBreakdown {
                 drive_letter: d,
                 root_files,
+                os_folders,
                 remainder_bytes,
+                hardlink_overlap_bytes,
                 total_bytes: sys_total,
                 scanned_non_system_bytes: scanned_non_sys,
                 drive_used_bytes: drv.used_bytes,
@@ -512,7 +731,439 @@ pub fn attribute_scan(
         installed_registry_names,
         catalog_source: String::new(),
         warnings: Vec::new(),
+        applied_containers: options.containers.cloned(),
     }
+}
+
+/// Merges a single-drive scan (`refreshed_drive`) into `base_report` without touching other drives'
+/// items, timestamps, or unchanged growth baselines, then recomputes totals, reconciliation, and
+/// affected per-drive growth deltas against `history`.
+#[must_use]
+pub fn merge_drive_rescan(
+    base_report: &ScanReport,
+    refreshed_drive: char,
+    single_drive_report: ScanReport,
+    history: &ScanHistory,
+) -> ScanReport {
+    let target = refreshed_drive.to_ascii_uppercase();
+
+    // 1. Drives: preserve untouched drives (including their `last_scanned_*`), replace `target`.
+    let mut merged_drives: Vec<DriveInfo> = Vec::new();
+    for base_drv in &base_report.drives {
+        let dl = base_drv.letter.to_ascii_uppercase();
+        if dl == target {
+            if let Some(fresh) = single_drive_report
+                .drives
+                .iter()
+                .find(|d| d.letter.to_ascii_uppercase() == target)
+            {
+                merged_drives.push(fresh.clone());
+            } else {
+                merged_drives.push(base_drv.clone());
+            }
+        } else {
+            merged_drives.push(base_drv.clone());
+        }
+    }
+    for fresh in &single_drive_report.drives {
+        let dl = fresh.letter.to_ascii_uppercase();
+        if !merged_drives
+            .iter()
+            .any(|d| d.letter.to_ascii_uppercase() == dl)
+        {
+            merged_drives.push(fresh.clone());
+        }
+    }
+    merged_drives.sort_by_key(|d| d.letter.to_ascii_uppercase());
+
+    // 2. Apps: preserve untouched drives' items and untouched apps verbatim; merge fresh items on `target`.
+    let mut touched_app_ids: HashSet<String> = HashSet::new();
+    let mut merged_apps: Vec<AttributedApp> = Vec::new();
+
+    for old_app in &base_report.apps {
+        let had_on_target = old_app
+            .items
+            .iter()
+            .any(|i| i.drive_letter.to_ascii_uppercase() == target);
+        let remaining_items: Vec<BreakdownItem> = old_app
+            .items
+            .iter()
+            .filter(|i| i.drive_letter.to_ascii_uppercase() != target)
+            .cloned()
+            .collect();
+        if remaining_items.is_empty() && !had_on_target {
+            continue;
+        }
+        if !remaining_items.is_empty() {
+            let mut updated = old_app.clone();
+            updated.items = remaining_items;
+            updated.total_bytes = updated.items.iter().map(|i| i.bytes).sum();
+            if had_on_target {
+                touched_app_ids.insert(updated.id.clone());
+                let mut bases: Vec<AttributionBasis> =
+                    updated.items.iter().filter_map(|i| i.basis).collect();
+                bases.sort();
+                bases.dedup();
+                updated.bases = bases;
+            }
+            merged_apps.push(updated);
+        }
+    }
+
+    for fresh_app in single_drive_report.apps {
+        let fresh_items_on_target: Vec<BreakdownItem> = fresh_app
+            .items
+            .into_iter()
+            .filter(|i| i.drive_letter.to_ascii_uppercase() == target)
+            .collect();
+        if fresh_items_on_target.is_empty() {
+            continue;
+        }
+        let existing_pos = merged_apps
+            .iter()
+            .position(|a| a.id == fresh_app.id)
+            .or_else(|| {
+                let fn_tok = normalize_app_token(&fresh_app.display_name);
+                (!fn_tok.is_empty()).then(|| {
+                    merged_apps.iter().position(|a| {
+                        a.display_name.eq_ignore_ascii_case(&fresh_app.display_name)
+                    })
+                }).flatten()
+            });
+
+        if let Some(pos) = existing_pos {
+            let ex = &mut merged_apps[pos];
+            touched_app_ids.insert(ex.id.clone());
+            ex.items.extend(fresh_items_on_target);
+            ex.items.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+            ex.total_bytes = ex.items.iter().map(|i| i.bytes).sum();
+            let mut bases: Vec<AttributionBasis> =
+                ex.items.iter().filter_map(|i| i.basis).collect();
+            bases.sort();
+            bases.dedup();
+            ex.bases = bases;
+            if ex.icon_rgba.is_none() {
+                ex.icon_rgba = fresh_app.icon_rgba;
+            }
+            if ex.install_location.is_none() {
+                ex.install_location = fresh_app.install_location;
+            }
+            if ex.dependencies.is_empty() && !fresh_app.dependencies.is_empty() {
+                ex.dependencies = fresh_app.dependencies;
+            }
+        } else {
+            let total_bytes: u64 = fresh_items_on_target.iter().map(|i| i.bytes).sum();
+            let mut bases: Vec<AttributionBasis> =
+                fresh_items_on_target.iter().filter_map(|i| i.basis).collect();
+            bases.sort();
+            bases.dedup();
+            touched_app_ids.insert(fresh_app.id.clone());
+            merged_apps.push(AttributedApp {
+                id: fresh_app.id,
+                display_name: fresh_app.display_name,
+                publishers: fresh_app.publishers,
+                install_location: fresh_app.install_location,
+                total_bytes,
+                previous_bytes: fresh_app.previous_bytes,
+                growth: fresh_app.growth,
+                no_touch: fresh_app.no_touch,
+                bases,
+                items: fresh_items_on_target,
+                dependencies: fresh_app.dependencies,
+                display_icon: fresh_app.display_icon,
+                icon_rgba: fresh_app.icon_rgba,
+                category: fresh_app.category,
+                category_basis: fresh_app.category_basis,
+            });
+        }
+    }
+
+    merged_apps.sort_by(|a, b| {
+        b.total_bytes
+            .cmp(&a.total_bytes)
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+
+    // 3. Shared caches, Your files, Unattributed, Windows & system: replace only `target`.
+    let mut merged_caches: Vec<BreakdownItem> = base_report
+        .shared_caches
+        .iter()
+        .filter(|i| i.drive_letter.to_ascii_uppercase() != target)
+        .cloned()
+        .collect();
+    merged_caches.extend(
+        single_drive_report
+            .shared_caches
+            .into_iter()
+            .filter(|i| i.drive_letter.to_ascii_uppercase() == target),
+    );
+    merged_caches.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    let shared_caches_total_bytes = merged_caches.iter().map(|i| i.bytes).sum();
+
+    let mut merged_your_files: Vec<BreakdownItem> = base_report
+        .your_files
+        .iter()
+        .filter(|i| i.drive_letter.to_ascii_uppercase() != target)
+        .cloned()
+        .collect();
+    merged_your_files.extend(
+        single_drive_report
+            .your_files
+            .into_iter()
+            .filter(|i| i.drive_letter.to_ascii_uppercase() == target),
+    );
+    merged_your_files.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    let your_files_total_bytes = merged_your_files.iter().map(|i| i.bytes).sum();
+
+    let mut merged_unattrib: Vec<UnattributedItem> = base_report
+        .unattributed
+        .iter()
+        .filter(|i| i.drive_letter.to_ascii_uppercase() != target)
+        .cloned()
+        .collect();
+    merged_unattrib.extend(
+        single_drive_report
+            .unattributed
+            .into_iter()
+            .filter(|i| i.drive_letter.to_ascii_uppercase() == target),
+    );
+    merged_unattrib.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    let unattributed_total_bytes = merged_unattrib.iter().map(|i| i.bytes).sum();
+
+    let mut merged_sys: Vec<SystemDriveBreakdown> = base_report
+        .windows_system
+        .iter()
+        .filter(|s| s.drive_letter.to_ascii_uppercase() != target)
+        .cloned()
+        .collect();
+    merged_sys.extend(
+        single_drive_report
+            .windows_system
+            .into_iter()
+            .filter(|s| s.drive_letter.to_ascii_uppercase() == target),
+    );
+    merged_sys.sort_by_key(|s| s.drive_letter.to_ascii_uppercase());
+    let windows_system_total_bytes = merged_sys.iter().map(|s| s.total_bytes).sum();
+
+    let mut merged = ScanReport {
+        scan_timestamp_unix: single_drive_report.scan_timestamp_unix,
+        scan_timestamp_display: single_drive_report.scan_timestamp_display,
+        duration_ms: single_drive_report.duration_ms,
+        drives: merged_drives,
+        registry_stats: single_drive_report.registry_stats,
+        apps: merged_apps,
+        shared_caches: merged_caches,
+        shared_caches_total_bytes,
+        your_files: merged_your_files,
+        your_files_total_bytes,
+        windows_system: merged_sys,
+        windows_system_total_bytes,
+        unattributed: merged_unattrib,
+        unattributed_total_bytes,
+        reverse_dependencies: base_report.reverse_dependencies.clone(),
+        installed_registry_names: if single_drive_report.installed_registry_names.is_empty() {
+            base_report.installed_registry_names.clone()
+        } else {
+            single_drive_report.installed_registry_names
+        },
+        catalog_source: if single_drive_report.catalog_source.is_empty() {
+            base_report.catalog_source.clone()
+        } else {
+            single_drive_report.catalog_source
+        },
+        warnings: single_drive_report.warnings,
+        applied_containers: single_drive_report
+            .applied_containers
+            .or_else(|| base_report.applied_containers.clone()),
+    };
+
+    // Preserve growth baselines for untouched apps, and recompute per-drive growth strictly for
+    // apps touched on `target` against prior snapshots that actually scanned each drive.
+    let saved_untouched: HashMap<String, (Option<u64>, GrowthDelta)> = merged
+        .apps
+        .iter()
+        .filter(|a| !touched_app_ids.contains(&a.id))
+        .map(|a| (a.id.clone(), (a.previous_bytes, a.growth)))
+        .collect();
+    recompute_report_growth_from_history(&mut merged, history);
+    for app in &mut merged.apps {
+        if let Some(&(prev_b, prev_g)) = saved_untouched.get(&app.id) {
+            app.previous_bytes = prev_b;
+            app.growth = prev_g;
+        }
+    }
+
+    merged
+}
+
+fn ensure_folder_only_app(
+    buckets: &mut Vec<AppBucket>,
+    store_buckets: &mut HashMap<String, usize>,
+    key: &str,
+    display_name: &str,
+    install_location: &str,
+    display_icon: Option<String>,
+) -> usize {
+    if let Some(&idx) = store_buckets.get(key) {
+        return idx;
+    }
+    let idx = buckets.len();
+    let loc = install_location.to_string();
+    buckets.push(AppBucket {
+        app: InstalledApp {
+            id: key.to_string(),
+            display_name: display_name.to_string(),
+            display_version: String::new(),
+            uninstall_guids: Vec::new(),
+            aliases: Vec::new(),
+            publishers: Vec::new(),
+            direct_install_location: Some(loc.clone()),
+            inferred_install_location: None,
+            all_install_locations: vec![loc],
+            no_touch: None,
+            is_store_fallback: false,
+            display_icon,
+        },
+        bases: Vec::new(),
+        items: Vec::new(),
+        total_bytes: 0,
+    });
+    store_buckets.insert(key.to_string(), idx);
+    idx
+}
+
+/// Cleans a container child or folder name into a readable app title while preserving distinct versions.
+#[must_use]
+pub fn clean_container_folder_name(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    for suffix in ["_LinkNeverDie.Com", ".LinkNeverDie.Com", "_LinkNeverDie", "-LinkNeverDie"] {
+        if let Some(prefix) = s.strip_suffix(suffix) {
+            s = prefix.to_string();
+        }
+    }
+    s = s.replace('_', " ");
+    // Convert dots acting as word separators (adjacent to ASCII letters, except `Node.js` / `v1.3`) into spaces.
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if ch == '.' {
+            let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+            let next = chars.get(i + 1).copied();
+            let is_version_dot = prev.is_some_and(|c| c.is_ascii_digit())
+                && next.is_some_and(|c| c.is_ascii_digit());
+            let prev_is_v = prev.is_some_and(|c| c == 'v' || c == 'V')
+                && next.is_some_and(|c| c.is_ascii_digit());
+            if is_version_dot || prev_is_v {
+                out.push('.');
+            } else if prev.is_some() && next.is_some() {
+                out.push(' ');
+            } else {
+                out.push('.');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    let clean = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() {
+        raw.trim().to_string()
+    } else {
+        clean
+    }
+}
+
+fn is_drive_root_child(path_lower: &str) -> bool {
+    let trimmed = path_lower.trim_end_matches('\\');
+    let parts: Vec<&str> = trimmed.split('\\').collect();
+    parts.len() == 2 && parts[0].len() == 2 && parts[0].ends_with(':')
+}
+
+fn is_steam_library_loose_files(path_lower: &str, steam_lib_keys: &[String]) -> bool {
+    let Some(parent) = path_lower.strip_suffix("\\[files]") else {
+        return false;
+    };
+    if steam_lib_keys
+        .iter()
+        .any(|lk| parent == lk || parent == format!("{lk}\\steamapps"))
+    {
+        return true;
+    }
+    false
+}
+
+fn match_container_child(
+    containers: &ContainerRulebook,
+    unit_path: &str,
+    path_lower: &str,
+    leaf_lower: &str,
+) -> Option<String> {
+    if leaf_lower == "[files]" || leaf_lower == "[root files]" || leaf_lower == "steam" || leaf_lower == "steamlibrary" {
+        return None;
+    }
+    let trimmed = unit_path.trim_end_matches('\\');
+    let (parent, _) = trimmed.rsplit_once('\\')?;
+    let container_name = containers.matches_container_dir(parent)?;
+    // On the system drive under `Program Files`, never promote Windows inbox OS skeleton folders as apps.
+    if container_name.eq_ignore_ascii_case("Program Files")
+        && path_lower.contains(":\\program files\\")
+        && matches!(
+            leaf_lower,
+            "common files"
+                | "windowsapps"
+                | "windows defender"
+                | "windows mail"
+                | "windows media player"
+                | "windows nt"
+                | "windows photo viewer"
+                | "windows sidebar"
+                | "windowspowershell"
+                | "internet explorer"
+                | "iis"
+                | "iis express"
+                | "modifiablewindowsapps"
+                | "uninstall information"
+                | "reference assemblies"
+                | "microsoft"
+                | "msbuild"
+                | "ruxim"
+                | "application verifier"
+                | "xboxservice"
+                | "activation-renewal"
+        )
+    {
+        return None;
+    }
+    Some(container_name)
+}
+
+#[must_use]
+pub fn classify_drive_root_os_folder(path_lower: &str, leaf_lower: &str) -> Option<&'static str> {
+    if !is_drive_root_child(path_lower) {
+        return None;
+    }
+    if leaf_lower.starts_with("$recycle.bin") {
+        return Some("Recycle Bin (OS system folder)");
+    }
+    if leaf_lower == "system volume information" {
+        return Some("System Volume Information (Shadow Copy / restore points)");
+    }
+    if leaf_lower == "recovery" || leaf_lower == "$winreagent" {
+        return Some("Windows Recovery Environment (OS system folder)");
+    }
+    if leaf_lower == "config.msi" {
+        return Some("Windows Installer rollback cache");
+    }
+    if leaf_lower == "$windows.~bt" || leaf_lower == "$windows.~ws" || leaf_lower == "$sysreset" {
+        return Some("Windows Setup / Reset temporary system folder");
+    }
+    if leaf_lower == "perflogs" || leaf_lower == "msocache" || leaf_lower == ".gamingroot" || leaf_lower == "documents and settings" {
+        return Some("Windows OS system folder / metadata");
+    }
+    if leaf_lower.starts_with("found.") && leaf_lower[6..].chars().all(|c| c.is_ascii_digit()) {
+        return Some("CHKDSK recovery fragments");
+    }
+    None
 }
 
 fn push_item_to_bucket(bucket: &mut AppBucket, item: BreakdownItem, basis: AttributionBasis) {

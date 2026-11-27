@@ -65,6 +65,8 @@ fn scanner_config_default_enables_only_system_drive_with_windows_excluded() {
             is_system_drive: true,
             full_walk_enabled: true,
             exclusions: vec!["C:\\Windows".into()],
+            last_scanned_unix: None,
+            last_scanned_display: None,
         },
         DriveInfo {
             letter: 'D',
@@ -75,6 +77,8 @@ fn scanner_config_default_enables_only_system_drive_with_windows_excluded() {
             is_system_drive: false,
             full_walk_enabled: false,
             exclusions: vec![],
+            last_scanned_unix: None,
+            last_scanned_display: None,
         },
     ];
     let cfg = AppConfig::for_detected_drives(&drives, "C:\\Windows");

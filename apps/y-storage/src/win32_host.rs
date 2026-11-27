@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex};
@@ -37,13 +38,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{AppConfig, ThemeMode, WindowPlacementConfig};
-use y_core::history::ScanHistory;
+use y_core::history::{ScanHistory, ScanScopeKind};
 use y_core::model::ScanReport;
 use y_platform_windows::paths::{enumerate_fixed_drives, get_windows_directory};
-use y_platform_windows::scanner::{ScanProgressSnapshot, execute_scan_with_progress};
+use y_platform_windows::scanner::{
+    ScanProgressSnapshot, execute_scan_with_history, execute_single_drive_rescan,
+};
 
 use crate::sw_painter::SoftwarePainter;
-use crate::ui::{StorageUiState, UiAction, configure_fonts_and_theme, draw_app_ui};
+use crate::ui::{
+    StorageUiState, UiAction, configure_fonts_and_theme, draw_app_ui_with_drive_busy,
+};
 
 const WM_APP_SCAN_UPDATE: u32 = 0x8000 + 10;
 const WM_APP_FOLLOWUP_PAINT: u32 = 0x8000 + 11;
@@ -98,6 +103,7 @@ pub struct AppController {
     pub last_scan_path: std::path::PathBuf,
     pub report: Option<Arc<ScanReport>>,
     pub scanning: bool,
+    pub rescanning_drives: BTreeSet<char>,
     pub progress: Option<ScanProgressSnapshot>,
     pub system_windows_dir: String,
     pub hwnd: usize,
@@ -118,6 +124,13 @@ impl AppController {
         let mut report = load_last_scan(&last_scan_path);
         if let Some(ref mut rep) = report {
             let mut updated = false;
+            for d in &mut rep.drives {
+                if d.full_walk_enabled && d.last_scanned_unix.is_none() {
+                    d.last_scanned_unix = Some(rep.scan_timestamp_unix);
+                    d.last_scanned_display = Some(rep.scan_timestamp_display.clone());
+                    updated = true;
+                }
+            }
             if !rep.apps.is_empty() && rep.apps.iter().all(|a| a.icon_rgba.is_none()) {
                 y_platform_windows::icons::populate_report_icons(rep);
                 updated = true;
@@ -144,6 +157,7 @@ impl AppController {
             last_scan_path,
             report: report.map(Arc::new),
             scanning: false,
+            rescanning_drives: BTreeSet::new(),
             progress: None,
             system_windows_dir: sys_win,
             hwnd: 0,
@@ -407,7 +421,7 @@ fn apply_titlebar_theme(hwnd: HWND, mode: ThemeMode) {
 }
 
 fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
-    let (config, prev_hist, hwnd_usize) = {
+    let (config, history, hwnd_usize) = {
         let mut guard = controller.lock().unwrap();
         if guard.scanning {
             return;
@@ -420,11 +434,7 @@ fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
             files_counted: 0,
             bytes_counted: 0,
         });
-        (
-            guard.config.clone(),
-            guard.history.latest_per_app().cloned(),
-            guard.hwnd,
-        )
+        (guard.config.clone(), guard.history.clone(), guard.hwnd)
     };
 
     if hwnd_usize != 0 {
@@ -433,9 +443,9 @@ fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
 
     std::thread::spawn(move || {
         let ctrl_prog = Arc::clone(&controller);
-        let report = execute_scan_with_progress(
+        let report = execute_scan_with_history(
             &config,
-            prev_hist.as_ref(),
+            &history,
             Some(&move |snap| {
                 if let Ok(mut g) = ctrl_prog.try_lock() {
                     g.progress = Some(snap);
@@ -446,8 +456,16 @@ fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
             }),
         );
 
+        let refreshed_drives: Vec<char> = report
+            .drives
+            .iter()
+            .filter(|d| d.full_walk_enabled)
+            .map(|d| d.letter.to_ascii_uppercase())
+            .collect();
         let mut guard = controller.lock().unwrap();
-        guard.history.record_report(&report);
+        guard
+            .history
+            .record_report_with_scope(&report, ScanScopeKind::Full, &refreshed_drives);
         let _ = guard.history.save_atomic(&guard.history_path);
         guard.cache.update_from_report(&report);
         let _ = guard.cache.save_atomic(&guard.cache_path);
@@ -456,6 +474,87 @@ fn trigger_background_scan(controller: Arc<Mutex<AppController>>) {
         guard.report = Some(Arc::new(report));
         guard.scanning = false;
         guard.progress = None;
+        let hwnd_done = guard.hwnd;
+        drop(guard);
+
+        if hwnd_done != 0 {
+            unsafe { PostMessageW(hwnd_done as HWND, WM_APP_SCAN_UPDATE, 0, 0) };
+        }
+    });
+}
+
+fn trigger_single_drive_rescan(controller: Arc<Mutex<AppController>>, drive_letter: char) {
+    let dl = drive_letter.to_ascii_uppercase();
+    let (base_opt, config, history, hwnd_usize) = {
+        let mut guard = controller.lock().unwrap();
+        if guard.scanning || guard.rescanning_drives.contains(&dl) {
+            return;
+        }
+        if !guard.config.is_drive_enabled(dl) {
+            return;
+        }
+        guard.rescanning_drives.insert(dl);
+        guard.progress = Some(ScanProgressSnapshot {
+            phase: format!("Rescanning {dl}:\\"),
+            current_path: String::new(),
+            dirs_walked: 0,
+            files_counted: 0,
+            bytes_counted: 0,
+        });
+        (
+            guard.report.as_ref().map(|r| (**r).clone()),
+            guard.config.clone(),
+            guard.history.clone(),
+            guard.hwnd,
+        )
+    };
+
+    if hwnd_usize != 0 {
+        unsafe { PostMessageW(hwnd_usize as HWND, WM_APP_SCAN_UPDATE, 0, 0) };
+    }
+
+    std::thread::spawn(move || {
+        let ctrl_prog = Arc::clone(&controller);
+        let progress_cb = move |snap| {
+            if let Ok(mut g) = ctrl_prog.try_lock() {
+                g.progress = Some(snap);
+                if g.hwnd != 0 {
+                    unsafe { PostMessageW(g.hwnd as HWND, WM_APP_SCAN_UPDATE, 0, 0) };
+                }
+            }
+        };
+        let (report, scope_kind, refreshed) = match base_opt {
+            Some(ref base) => (
+                execute_single_drive_rescan(base, dl, &config, &history, Some(&progress_cb)),
+                ScanScopeKind::Partial,
+                vec![dl],
+            ),
+            None => {
+                let rep = execute_scan_with_history(&config, &history, Some(&progress_cb));
+                let list: Vec<char> = rep
+                    .drives
+                    .iter()
+                    .filter(|d| d.full_walk_enabled)
+                    .map(|d| d.letter.to_ascii_uppercase())
+                    .collect();
+                (rep, ScanScopeKind::Full, list)
+            }
+        };
+
+        let mut guard = controller.lock().unwrap();
+        guard
+            .history
+            .record_report_with_scope(&report, scope_kind, &refreshed);
+        let _ = guard.history.save_atomic(&guard.history_path);
+        guard.cache.update_from_report(&report);
+        let _ = guard.cache.save_atomic(&guard.cache_path);
+        let _ = save_last_scan_atomic(&guard.last_scan_path, &report);
+        let _ = guard.config.save_atomic(&guard.config_path);
+        guard.report = Some(Arc::new(report));
+        guard.rescanning_drives.remove(&dl);
+        if guard.rescanning_drives.is_empty() && !guard.scanning {
+            guard.progress = None;
+        }
         let hwnd_done = guard.hwnd;
         drop(guard);
 
@@ -792,12 +891,13 @@ unsafe extern "system" fn wnd_proc(
                     .native_pixels_per_point = Some(ppp);
 
                 let t_lock_start = Instant::now();
-                let (config_snap, report_snap, scanning, progress_snap, sys_win) = {
+                let (config_snap, report_snap, scanning, busy_drives, progress_snap, sys_win) = {
                     let g = st.controller.lock().unwrap();
                     (
                         g.config.clone(),
                         g.report.clone(),
                         g.scanning,
+                        g.rescanning_drives.clone(),
                         g.progress.clone(),
                         g.system_windows_dir.clone(),
                     )
@@ -813,12 +913,13 @@ unsafe extern "system" fn wnd_proc(
                 let mut actions: Vec<UiAction> = Vec::new();
                 let ui_state = &mut st.ui_state;
                 let full_out = st.egui_ctx.run(raw, |ctx| {
-                    draw_app_ui(
+                    draw_app_ui_with_drive_busy(
                         ctx,
                         ui_state,
                         &config_snap,
                         report_snap.as_deref(),
                         scanning,
+                        &busy_drives,
                         progress_snap.as_ref(),
                         &sys_win,
                         &mut |act| actions.push(act),
@@ -894,6 +995,9 @@ unsafe extern "system" fn wnd_proc(
                     match act {
                         UiAction::StartRescan => {
                             trigger_background_scan(Arc::clone(&st.controller));
+                        }
+                        UiAction::StartDriveRescan(drive_letter) => {
+                            trigger_single_drive_rescan(Arc::clone(&st.controller), drive_letter);
                         }
                         UiAction::ToggleTheme(next_mode) => {
                             let mut g = st.controller.lock().unwrap();

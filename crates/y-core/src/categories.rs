@@ -137,11 +137,27 @@ where
     }) || app
         .items
         .iter()
-        .any(|it| it.path.to_ascii_lowercase().contains("\\steamapps\\common\\"));
+        .any(|it| it.path.to_ascii_lowercase().contains("\\steamapps\\common\\"))
+        || app.id.starts_with("steam:app:");
     if in_steamapps {
         return (
             AppCategory::Games,
-            "signal: installed inside Steam game library (steamapps\\common)".into(),
+            if app.id.starts_with("steam:app:") {
+                "signal: Steam library appmanifest".into()
+            } else {
+                "signal: installed inside Steam game library (steamapps\\common)".into()
+            },
+        );
+    }
+
+    if app.items.iter().any(|it| {
+        it.basis_detail
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("layout rule: Games") || d.eq_ignore_ascii_case("layout rule: Game"))
+    }) {
+        return (
+            AppCategory::Games,
+            "signal: located inside Games container".into(),
         );
     }
 

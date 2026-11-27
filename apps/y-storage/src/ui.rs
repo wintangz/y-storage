@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
@@ -8,19 +8,20 @@ use egui::{
     Order, Pos2, Rect, RichText, Rounding, Sense, Stroke, TextStyle, UiBuilder, Vec2,
 };
 use y_core::config::{
-    AppConfig, AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
-    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, SizeBandFilter, SortDirection, ThemeMode,
+    AppConfig, AppFilterChip, AppSortMode, ContainerRulebook, DEFAULT_CONTAINER_NAMES,
+    DepStateFilter, FacetFilters, FootprintZoneFilter, GrowthFacetFilter, NO_PUBLISHER_FACET_KEY,
+    SizeBandFilter, SortDirection, ThemeMode, UnattributedFacetFilters, UnattributedLocationZone,
 };
 use y_core::discovery::{normalize_app_token, normalize_path_key};
 use y_core::model::{
-    DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
+    AttributionBasis, DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
     NO_KNOWN_DEPENDENCIES_LABEL, ReverseDependencyEntry, ScanReport, ZoneKind,
 };
 use y_platform_windows::scanner::ScanProgressSnapshot;
 
 use crate::list_query::{
     UnattributedSortMode, category_facet_options, filter_and_sort_apps_with_facets,
-    filter_and_sort_unattributed, has_growth_baseline, publisher_facet_options,
+    filter_and_sort_unattributed_with_facets, has_growth_baseline, publisher_facet_options,
     sanitize_facets_for_report,
 };
 
@@ -84,6 +85,7 @@ pub enum ActiveView {
 #[derive(Debug, Clone)]
 pub enum UiAction {
     StartRescan,
+    StartDriveRescan(char),
     ToggleTheme(ThemeMode),
     SaveConfig(AppConfig),
     UpdateListView {
@@ -256,7 +258,13 @@ pub struct StorageUiState {
     pub facets: FacetFilters,
     pub open_facet_popup: Option<&'static str>,
     pub unattrib_search_query: String,
+    pub unattrib_facets: UnattributedFacetFilters,
+    pub open_unattrib_facet_popup: Option<&'static str>,
     pub unattrib_sort: UnattributedSortMode,
+    pub open_pod_scope_drive: Option<char>,
+    pub new_container_name_input: String,
+    pub new_container_path_input: String,
+    pub settings_focus_containers: bool,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
     pub expanded_deps: HashSet<String>,
@@ -298,7 +306,13 @@ impl Default for StorageUiState {
             facets: FacetFilters::default(),
             open_facet_popup: None,
             unattrib_search_query: String::new(),
+            unattrib_facets: UnattributedFacetFilters::default(),
+            open_unattrib_facet_popup: None,
             unattrib_sort: UnattributedSortMode::SizeDesc,
+            open_pod_scope_drive: None,
+            new_container_name_input: String::new(),
+            new_container_path_input: String::new(),
+            settings_focus_containers: false,
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
             expanded_deps: HashSet::new(),
@@ -2503,27 +2517,39 @@ fn ensure_report_and_filter_caches(
                 let cache_d = rep.total_shared_caches_on_drive(sys.drive_letter);
                 let yf_d = rep.total_your_files_on_drive(sys.drive_letter);
                 let un_d = rep.total_unattributed_on_drive(sys.drive_letter);
-                let sum_all = apps_d + cache_d + yf_d + un_d + sys.total_bytes + sys.drive_free_bytes;
-                let diff = sum_all as i128 - sys.drive_total_bytes as i128;
+                let sum_all = (apps_d + cache_d + yf_d + un_d + sys.total_bytes + sys.drive_free_bytes) as i128
+                    - sys.hardlink_overlap_bytes as i128;
+                let diff = sum_all - sys.drive_total_bytes as i128;
+                let hl_part = if sys.hardlink_overlap_bytes > 0 {
+                    format!(" - Hardlinks {}", format_size_2dec(sys.hardlink_overlap_bytes))
+                } else {
+                    String::new()
+                };
                 let summary = format!(
-                    "{}:\\ reconciliation · Apps {} + Caches {} + Your files {} + Unattributed {} + Win/sys {} + Free {} = {}",
+                    "{}:\\ reconciliation · Apps {} + Caches {} + Your files {} + Unattributed {} + Win/sys {}{} + Free {} = {}",
                     sys.drive_letter,
                     format_size_2dec(apps_d),
                     format_size_2dec(cache_d),
                     format_size_2dec(yf_d),
                     format_size_2dec(un_d),
                     format_size_2dec(sys.total_bytes),
+                    hl_part,
                     format_size_2dec(sys.drive_free_bytes),
                     format_size_2dec(sys.drive_total_bytes),
                 );
                 let exact = format!(
-                    "{}:\\ exact: {} + {} + {} + {} + {} + {} = {} (diff {} B)",
+                    "{}:\\ exact: {} + {} + {} + {} + {}{} + {} = {} (diff {} B)",
                     sys.drive_letter,
                     format_exact_bytes(apps_d),
                     format_exact_bytes(cache_d),
                     format_exact_bytes(yf_d),
                     format_exact_bytes(un_d),
                     format_exact_bytes(sys.total_bytes),
+                    if sys.hardlink_overlap_bytes > 0 {
+                        format!(" - {} hardlinks", format_exact_bytes(sys.hardlink_overlap_bytes))
+                    } else {
+                        String::new()
+                    },
                     format_exact_bytes(sys.drive_free_bytes),
                     format_exact_bytes(sys.drive_total_bytes),
                     diff,
@@ -2638,12 +2664,859 @@ fn estimate_expanded_row_height(app: &y_core::model::AttributedApp) -> f32 {
         + (SPACE_8 + 3.0)
 }
 
+fn format_pod_short_time(last_scanned_display: Option<&str>, compact: bool) -> String {
+    let Some(ts) = last_scanned_display.map(str::trim).filter(|s| !s.is_empty()) else {
+        return if compact { "Never".into() } else { "Never scanned".into() };
+    };
+    let hhmm = ts
+        .split_whitespace()
+        .nth(1)
+        .and_then(|t| t.get(..5))
+        .unwrap_or(ts);
+    if compact {
+        hhmm.to_string()
+    } else {
+        format!("Scanned {hhmm}")
+    }
+}
+
+fn draw_compact_pod_checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    label: &str,
+    muted_look: bool,
+    pal: &ThemePalette,
+) -> bool {
+    let mut toggled = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_4;
+        let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+        let ppp = ui.ctx().pixels_per_point();
+        let fill = if *checked {
+            pal.pill_blue_fill
+        } else if resp.hovered() {
+            pal.widget_hover
+        } else {
+            pal.input_bg
+        };
+        let border_col = if *checked || resp.hovered() {
+            pal.accent_line
+        } else {
+            pal.border
+        };
+        let snapped =
+            paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
+        if *checked {
+            let c = snapped.center();
+            let st = Stroke::new(1.6_f32, pal.accent_line);
+            ui.painter()
+                .line_segment([Pos2::new(c.x - 3.5, c.y + 0.5), Pos2::new(c.x - 0.8, c.y + 3.0)], st);
+            ui.painter()
+                .line_segment([Pos2::new(c.x - 0.8, c.y + 3.0), Pos2::new(c.x + 3.8, c.y - 2.6)], st);
+        }
+        let lbl_col = if resp.hovered() {
+            pal.accent_line
+        } else if muted_look {
+            pal.muted
+        } else {
+            pal.text
+        };
+        let lbl_resp = ui.add(
+            egui::Label::new(RichText::new(label).size(10.5).color(lbl_col)).sense(Sense::click()),
+        );
+        if resp.clicked() || lbl_resp.clicked() {
+            *checked = !*checked;
+            toggled = true;
+        }
+    });
+    toggled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_drive_pods_grid(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    rep: &ScanReport,
+    scanning: bool,
+    rescanning_drives: &BTreeSet<char>,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) -> Option<(char, Rect)> {
+    if rep.drives.is_empty() {
+        return None;
+    }
+    const MIN_POD_W: f32 = 184.0;
+    let n = rep.drives.len();
+    let avail_w = ui.available_width().max(MIN_POD_W);
+    let max_cols = ((avail_w + SPACE_8) / (MIN_POD_W + SPACE_8))
+        .floor()
+        .max(1.0) as usize;
+    let num_rows = n.div_ceil(max_cols);
+    let base_per_row = n / num_rows;
+    let extra = n % num_rows;
+
+    let ppp = ui.ctx().pixels_per_point();
+    let mut overlay_anchor: Option<(char, Rect)> = None;
+    let mut drv_offset = 0usize;
+
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = SPACE_8;
+        for row_idx in 0..num_rows {
+            let cols_in_row = base_per_row + usize::from(row_idx < extra);
+            let tile_w = ((avail_w - SPACE_8 * ((cols_in_row - 1) as f32)) / (cols_in_row as f32))
+                .max(140.0);
+            let compact = tile_w < 228.0;
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_8;
+                for local_col in 0..cols_in_row {
+                    let drv_idx = drv_offset + local_col;
+                    let drv = &rep.drives[drv_idx];
+                    let dl = drv.letter.to_ascii_uppercase();
+                    let mut included = config.is_drive_enabled(dl);
+                    let busy_this_drive =
+                        scanning || (included && rescanning_drives.contains(&dl));
+                    let exclusions = config.exclusions_for_drive(dl);
+                    let excl_count = exclusions.len();
+                    let ratio = if drv.total_bytes > 0 {
+                        (drv.used_bytes as f64 / drv.total_bytes as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
+                    let pod_fill = if included {
+                        pal.panel
+                    } else {
+                        lerp_color(pal.bg, pal.panel, 0.55)
+                    };
+                    let pod_border = if ui_state.open_pod_scope_drive == Some(dl) {
+                        pal.accent_line
+                    } else if included {
+                        pal.border
+                    } else {
+                        lerp_color(pal.bg, pal.border, 0.65)
+                    };
+                    let primary_col = if included { pal.text } else { pal.muted };
+                    let cap_font_sz = if compact { 10.5 } else { 11.0 };
+
+                    let pod_frame = draw_crisp_frame(
+                        ui,
+                        pod_fill,
+                        pod_border,
+                        RADIUS_PANEL,
+                        Margin::symmetric(SPACE_12, SPACE_8),
+                        |ui| {
+                            let inner_w = (tile_w - SPACE_12 * 2.0 - 2.0).max(112.0);
+                            ui.set_width(inner_w);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+
+                                // Row 1: Drive identity ("C:\") on left, "<used> of <total>" on right
+                                let (row1_rect, row1_resp) =
+                                    ui.allocate_exact_size(Vec2::new(inner_w, 18.0), Sense::hover());
+                                let (drv_font, _) = prop_strong_font(ui_state.has_prop_strong, 13.0);
+                                let drv_galley = ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        format!("{dl}:\\"),
+                                        drv_font,
+                                        primary_col,
+                                    )
+                                });
+                                let drv_pos =
+                                    optical_galley_pos(ui, row1_rect, &drv_galley, None, false);
+                                ui.painter().galley(drv_pos, drv_galley, primary_col);
+
+                                let mono_pod = mono_font_for(ui, cap_font_sz, false);
+                                let mut cap_job = egui::text::LayoutJob::default();
+                                cap_job.append(
+                                    &format_size_2dec(drv.used_bytes),
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: mono_pod.clone(),
+                                        color: primary_col,
+                                        ..Default::default()
+                                    },
+                                );
+                                cap_job.append(
+                                    " of ",
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: mono_pod.clone(),
+                                        color: pal.muted,
+                                        ..Default::default()
+                                    },
+                                );
+                                cap_job.append(
+                                    &format_size_2dec(drv.total_bytes),
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: mono_pod.clone(),
+                                        color: primary_col,
+                                        ..Default::default()
+                                    },
+                                );
+                                let cap_galley = ui.fonts(|f| f.layout_job(cap_job));
+                                let cap_pos = optical_galley_pos(
+                                    ui,
+                                    row1_rect,
+                                    &cap_galley,
+                                    Some(row1_rect.max.x),
+                                    false,
+                                );
+                                ui.painter().galley(cap_pos, cap_galley, primary_col);
+                                let _ = row1_resp.on_hover_text(format!(
+                                    "Used: {} / Total: {}",
+                                    format_exact_bytes(drv.used_bytes),
+                                    format_exact_bytes(drv.total_bytes)
+                                ));
+
+                                ui.add_space(SPACE_4);
+
+                                // Row 2: Scan status / time on left + "<free> free" on right
+                                let (row2_rect, row2_resp) =
+                                    ui.allocate_exact_size(Vec2::new(inner_w, 16.0), Sense::hover());
+                                let (status_txt, status_col) = if !included {
+                                    ("Not scanned".to_string(), pal.muted)
+                                } else if busy_this_drive {
+                                    ("Scanning…".to_string(), pal.delta_grew)
+                                } else {
+                                    (
+                                        format_pod_short_time(
+                                            drv.last_scanned_display.as_deref(),
+                                            compact,
+                                        ),
+                                        pal.muted,
+                                    )
+                                };
+                                let st_galley = ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        status_txt,
+                                        FontId::new(10.5, FontFamily::Proportional),
+                                        status_col,
+                                    )
+                                });
+                                let st_pos =
+                                    optical_galley_pos(ui, row2_rect, &st_galley, None, false);
+                                ui.painter().galley(st_pos, st_galley, status_col);
+
+                                let free_lbl = format!("{} free", format_size_2dec(drv.free_bytes));
+                                let free_galley =
+                                    ui.fonts(|f| f.layout_no_wrap(free_lbl, mono_pod, pal.muted));
+                                let free_pos = optical_galley_pos(
+                                    ui,
+                                    row2_rect,
+                                    &free_galley,
+                                    Some(row2_rect.max.x),
+                                    false,
+                                );
+                                ui.painter().galley(free_pos, free_galley, pal.muted);
+                                let ts_tip = drv
+                                    .last_scanned_display
+                                    .as_deref()
+                                    .unwrap_or("Not yet scanned");
+                                let _ = row2_resp.on_hover_text(format!(
+                                    "Free: {} ({:.1}% free)\nLast scanned: {ts_tip}",
+                                    format_exact_bytes(drv.free_bytes),
+                                    (1.0 - ratio) * 100.0
+                                ));
+
+                                ui.add_space(SPACE_4);
+
+                                // Row 3: Slim 2px flush proportional bar (greyed when excluded, WT gradient when included)
+                                let bar_w = inner_w.floor().max(80.0);
+                                let (bar_rect, bar_resp) = ui.allocate_exact_size(
+                                    Vec2::new(bar_w, PROP_BAR_H),
+                                    Sense::hover(),
+                                );
+                                let snapped_track = snap_rect_to_pixels(bar_rect, ppp);
+                                let track_col = lerp_color(pod_fill, pal.border, 0.65);
+                                ui.painter()
+                                    .rect_filled(snapped_track, Rounding::same(1.0), track_col);
+                                let track_px = (snapped_track.width() * ppp).round();
+                                let fill_px = if drv.total_bytes == 0 || drv.used_bytes == 0 {
+                                    0.0
+                                } else {
+                                    ((track_px as f64) * ratio)
+                                        .round()
+                                        .clamp(2.0, track_px as f64) as f32
+                                };
+                                if drv.total_bytes == 0 && snapped_track.width() > 2.0 {
+                                    ui.painter().rect_filled(
+                                        snapped_track,
+                                        Rounding::same(1.0),
+                                        STATUS_RED,
+                                    );
+                                } else if fill_px > 0.0 && snapped_track.height() > 0.0 {
+                                    let fill_rect = Rect::from_min_size(
+                                        snapped_track.min,
+                                        Vec2::new(
+                                            fill_px / ppp.max(0.5),
+                                            snapped_track.height(),
+                                        ),
+                                    );
+                                    if included {
+                                        paint_horizontal_wt_gradient_bar(
+                                            ui.painter(),
+                                            snapped_track,
+                                            fill_rect,
+                                            1.0,
+                                        );
+                                    } else {
+                                        let grey_col = lerp_color(pod_fill, pal.muted, 0.35);
+                                        ui.painter().rect_filled(
+                                            fill_rect,
+                                            Rounding::same(1.0),
+                                            grey_col,
+                                        );
+                                    }
+                                }
+                                let _ = bar_resp.on_hover_text(format!(
+                                    "{:.2}% used · {}",
+                                    ratio * 100.0,
+                                    if included {
+                                        "Included in scan scope"
+                                    } else {
+                                        "Not scanned (excluded from scope)"
+                                    }
+                                ));
+
+                                ui.add_space(SPACE_4);
+
+                                // Row 4: In-place Scope controls (Include checkbox + Exclusions overlay) & per-drive Rescan
+                                let (ctrl_rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(inner_w, 18.0), Sense::hover());
+                                let rescan_w = if included {
+                                    if busy_this_drive { 68.0 } else { 52.0 }
+                                } else {
+                                    0.0
+                                };
+                                let left_ctrl_w = if rescan_w > 0.0 {
+                                    (inner_w - rescan_w - SPACE_4).max(80.0)
+                                } else {
+                                    inner_w
+                                };
+                                let mut lc_ui = table_cell_ui(
+                                    ui,
+                                    Rect::from_min_size(ctrl_rect.min, Vec2::new(left_ctrl_w, 18.0)),
+                                    Layout::left_to_right(Align::Center),
+                                );
+                                lc_ui.spacing_mut().item_spacing.x = SPACE_4;
+
+                                let cb_lbl = if compact { "Scan" } else { "Include" };
+                                let was_excluded = !included;
+                                if draw_compact_pod_checkbox(
+                                    &mut lc_ui,
+                                    &mut included,
+                                    cb_lbl,
+                                    was_excluded,
+                                    pal,
+                                ) {
+                                    let mut next_cfg = config.clone();
+                                    if let Some(t) = next_cfg
+                                        .targets
+                                        .iter_mut()
+                                        .find(|t| t.letter.to_ascii_uppercase() == dl)
+                                    {
+                                        t.enabled = included;
+                                    }
+                                    emit(UiAction::SaveConfig(next_cfg));
+                                }
+
+                                let excl_lbl = match (compact, excl_count) {
+                                    (true, 0) => "Excl".to_string(),
+                                    (true, k) => format!("Excl ({k})"),
+                                    (false, 0) => "Exclusions".to_string(),
+                                    (false, k) => format!("Exclusions ({k})"),
+                                };
+                                let is_excl_open = ui_state.open_pod_scope_drive == Some(dl);
+                                let excl_resp = draw_z_button(
+                                    &mut lc_ui,
+                                    &excl_lbl,
+                                    Vec2::new(0.0, 18.0),
+                                    10.5,
+                                    RADIUS_PILL,
+                                    true,
+                                    is_excl_open,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                );
+                                if excl_resp
+                                    .on_hover_text(format!("Manage folder exclusions on {dl}:\\"))
+                                    .clicked()
+                                {
+                                    ui_state.open_pod_scope_drive =
+                                        if is_excl_open { None } else { Some(dl) };
+                                }
+
+                                if included {
+                                    let mut rc_ui = table_cell_ui(
+                                        ui,
+                                        Rect::from_min_max(
+                                            Pos2::new(ctrl_rect.max.x - rescan_w, ctrl_rect.min.y),
+                                            ctrl_rect.max,
+                                        ),
+                                        Layout::right_to_left(Align::Center),
+                                    );
+                                    let r_lbl = if busy_this_drive {
+                                        "Scanning…"
+                                    } else {
+                                        "Rescan"
+                                    };
+                                    let r_resp = draw_z_button(
+                                        &mut rc_ui,
+                                        r_lbl,
+                                        Vec2::new(0.0, 18.0),
+                                        10.5,
+                                        RADIUS_PILL,
+                                        !busy_this_drive,
+                                        false,
+                                        ButtonVariant::SubtleOutline,
+                                        pal,
+                                    );
+                                    if r_resp
+                                        .on_hover_text(format!(
+                                            "Rescan only {dl}:\\ and merge into current report"
+                                        ))
+                                        .clicked()
+                                    {
+                                        emit(UiAction::StartDriveRescan(dl));
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    if drv_idx == 0 {
+                        ui_state.first_drive_pod_rect = Some(pod_frame.response.rect);
+                    }
+                    if ui_state.open_pod_scope_drive == Some(dl) {
+                        overlay_anchor = Some((dl, pod_frame.response.rect));
+                    }
+                }
+            });
+            drv_offset += cols_in_row;
+        }
+    });
+
+    overlay_anchor
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_pod_scope_overlay(
+    ctx: &egui::Context,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    drive_letter: char,
+    anchor_rect: Rect,
+    system_windows_dir: &str,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    let dl = drive_letter.to_ascii_uppercase();
+    let Some(target) = config
+        .targets
+        .iter()
+        .find(|t| t.letter.to_ascii_uppercase() == dl)
+        .cloned()
+    else {
+        ui_state.open_pod_scope_drive = None;
+        return;
+    };
+
+    let sys_win_key = normalize_path_key(system_windows_dir);
+    let is_sys = dl == 'C' || target.exclusions.iter().any(|e| normalize_path_key(e) == sys_win_key);
+    let screen = ctx.screen_rect();
+    let popup_w = 376.0_f32;
+    let pos_x = anchor_rect.left().clamp(
+        screen.left() + SPACE_16,
+        (screen.right() - SPACE_16 - popup_w).max(screen.left() + SPACE_16),
+    );
+    let pos_y = (anchor_rect.bottom() + SPACE_4)
+        .min((screen.bottom() - 200.0).max(screen.top() + SPACE_16));
+
+    let mut draft = config.clone();
+    let mut changed = false;
+    let mut close_clicked = false;
+
+    let area_resp = egui::Area::new(egui::Id::new(("pod_scope_overlay", dl)))
+        .order(Order::Foreground)
+        .fixed_pos(Pos2::new(pos_x, pos_y))
+        .show(ctx, |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.accent_line,
+                RADIUS_PANEL,
+                Margin::same(SPACE_12),
+                |ui| {
+                    let inner_w = popup_w - SPACE_16 - SPACE_8 - 2.0;
+                    ui.set_width(inner_w);
+                    ui.spacing_mut().item_spacing.y = SPACE_8;
+
+                    draw_split_row(
+                        ui,
+                        24.0,
+                        60.0,
+                        Sense::hover(),
+                        |ui| {
+                            let (title_font, fb) = prop_strong_font(ui_state.has_prop_strong, 13.0);
+                            let mut rt = RichText::new(format!("Drive {dl}:\\ exclusions"))
+                                .font(title_font)
+                                .color(pal.text);
+                            if fb {
+                                rt = rt.strong();
+                            }
+                            ui.label(rt);
+                        },
+                        |ui| {
+                            if draw_z_button(
+                                ui,
+                                "Close",
+                                Vec2::new(56.0, 24.0),
+                                11.5,
+                                RADIUS_CONTROL,
+                                true,
+                                false,
+                                ButtonVariant::SecondaryOutline,
+                                pal,
+                            )
+                            .clicked()
+                            {
+                                close_clicked = true;
+                            }
+                        },
+                    );
+
+                    if target.exclusions.is_empty() {
+                        ui.label(
+                            RichText::new("No folder exclusions on this drive.")
+                                .size(11.5)
+                                .color(pal.muted),
+                        );
+                    } else {
+                        draw_synced_scroll_area(
+                            ui,
+                            ("pod_excl_scroll", dl),
+                            Some(140.0),
+                            [false, true],
+                            pal,
+                            pal.panel,
+                            |ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                if let Some(dt) = draft
+                                    .targets
+                                    .iter_mut()
+                                    .find(|t| t.letter.to_ascii_uppercase() == dl)
+                                {
+                                    let mut remove_idx: Option<usize> = None;
+                                    for (idx, ex) in dt.exclusions.iter().enumerate() {
+                                        let is_locked = is_sys && normalize_path_key(ex) == sys_win_key;
+                                        draw_split_row(
+                                            ui,
+                                            22.0,
+                                            72.0,
+                                            Sense::hover(),
+                                            |ui| {
+                                                draw_truncated_text(
+                                                    ui,
+                                                    ex,
+                                                    FontId::new(11.5, FontFamily::Monospace),
+                                                    pal.text,
+                                                    false,
+                                                );
+                                            },
+                                            |ui| {
+                                                if is_locked {
+                                                    paint_chip(
+                                                        ui,
+                                                        "LOCKED",
+                                                        no_touch_chip_style(pal),
+                                                        pal.panel,
+                                                    );
+                                                } else if draw_z_button(
+                                                    ui,
+                                                    "Remove",
+                                                    Vec2::new(56.0, 20.0),
+                                                    10.5,
+                                                    RADIUS_PILL,
+                                                    true,
+                                                    false,
+                                                    ButtonVariant::SubtleOutline,
+                                                    pal,
+                                                )
+                                                .clicked()
+                                                {
+                                                    remove_idx = Some(idx);
+                                                }
+                                            },
+                                        );
+                                    }
+                                    if let Some(idx) = remove_idx {
+                                        dt.exclusions.remove(idx);
+                                        changed = true;
+                                    }
+                                }
+                            },
+                        );
+                    }
+
+                    let input = ui_state.new_exclusion_inputs.entry(dl).or_default();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        draw_crisp_text_input(
+                            ui,
+                            ("pod_exclusion_input", dl),
+                            input,
+                            (inner_w - 76.0).max(160.0),
+                            &format!("{dl}:\\FolderToExclude"),
+                            pal.input_bg,
+                            pal,
+                        );
+                        if draw_z_button(
+                            ui,
+                            "Add",
+                            Vec2::new(64.0, HEADER_CONTROL_H),
+                            11.5,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            ButtonVariant::SecondaryOutline,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            let trimmed = input.trim().to_string();
+                            if !trimmed.is_empty() {
+                                if let Some(dt) = draft
+                                    .targets
+                                    .iter_mut()
+                                    .find(|t| t.letter.to_ascii_uppercase() == dl)
+                                {
+                                    if !dt
+                                        .exclusions
+                                        .iter()
+                                        .any(|e| normalize_path_key(e) == normalize_path_key(&trimmed))
+                                    {
+                                        dt.exclusions.push(trimmed);
+                                        input.clear();
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                },
+            );
+        });
+
+    if changed {
+        emit(UiAction::SaveConfig(draft));
+    }
+    if close_clicked {
+        ui_state.open_pod_scope_drive = None;
+    } else if ctx.input(|i| i.pointer.primary_clicked()) {
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if !area_resp.response.rect.contains(pos) && !anchor_rect.contains(pos) {
+                ui_state.open_pod_scope_drive = None;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_unattributed_facet_popup_overlay(
+    ctx: &egui::Context,
+    ui_state: &mut StorageUiState,
+    rep: &ScanReport,
+    facet_key: &'static str,
+    trigger_rect: Rect,
+) {
+    let pal = ThemePalette::for_mode(ui_state.applied_theme.unwrap_or(ThemeMode::Dark));
+    let screen = ctx.screen_rect();
+    let popup_w = match facet_key {
+        "unattrib_zone" => 236.0_f32,
+        _ => 216.0_f32,
+    };
+    let pos_x = trigger_rect.left().clamp(
+        screen.left() + SPACE_16,
+        (screen.right() - SPACE_16 - popup_w).max(screen.left() + SPACE_16),
+    );
+    let room_below = screen.bottom() - trigger_rect.bottom() - SPACE_8;
+    let max_popup_h = 240.0_f32;
+    let pos_y = if room_below >= 156.0 {
+        trigger_rect.bottom() + SPACE_4
+    } else {
+        (trigger_rect.top() - SPACE_4 - max_popup_h.min(200.0)).max(screen.top() + SPACE_16)
+    };
+
+    let mut picked = false;
+    let area_resp = egui::Area::new(egui::Id::new(("unattrib_facet_popup", facet_key)))
+        .order(Order::Foreground)
+        .fixed_pos(Pos2::new(pos_x, pos_y))
+        .show(ctx, |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.accent_line,
+                RADIUS_PANEL,
+                Margin::same(SPACE_8),
+                |ui| {
+                    let inner_w = popup_w - SPACE_16 - 2.0;
+                    ui.set_width(inner_w);
+                    draw_synced_scroll_area(
+                        ui,
+                        ("unattrib_facet_scroll", facet_key),
+                        Some(max_popup_h),
+                        [false, true],
+                        &pal,
+                        pal.panel,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            let row_w = ui.available_width().max(120.0);
+                            match facet_key {
+                                "unattrib_drive" => {
+                                    let is_all = ui_state.unattrib_facets.drive.is_none();
+                                    let all_cnt = format!("{}", rep.unattributed.len());
+                                    if draw_facet_popup_row(
+                                        ui,
+                                        row_w,
+                                        "All drives",
+                                        Some(&all_cnt),
+                                        is_all,
+                                        &pal,
+                                    ) {
+                                        ui_state.unattrib_facets.drive = None;
+                                        picked = true;
+                                    }
+                                    for drv in &rep.drives {
+                                        let dl = drv.letter.to_ascii_uppercase();
+                                        let cnt = rep
+                                            .unattributed
+                                            .iter()
+                                            .filter(|it| it.drive_letter.to_ascii_uppercase() == dl)
+                                            .count();
+                                        let sel = ui_state
+                                            .unattrib_facets
+                                            .drive
+                                            .is_some_and(|d| d.to_ascii_uppercase() == dl);
+                                        let meta = format!("{cnt}");
+                                        if draw_facet_popup_row(
+                                            ui,
+                                            row_w,
+                                            &format!("{dl}:\\"),
+                                            Some(&meta),
+                                            sel,
+                                            &pal,
+                                        ) {
+                                            ui_state.unattrib_facets.drive = Some(dl);
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "unattrib_size" => {
+                                    for band in SizeBandFilter::ALL_OPTIONS {
+                                        let cnt = if band == SizeBandFilter::All {
+                                            rep.unattributed.len()
+                                        } else {
+                                            rep.unattributed
+                                                .iter()
+                                                .filter(|it| band.matches_bytes(it.bytes))
+                                                .count()
+                                        };
+                                        let sel = ui_state.unattrib_facets.size_band == band;
+                                        let meta = format!("{cnt}");
+                                        if draw_facet_popup_row(
+                                            ui,
+                                            row_w,
+                                            band.label(),
+                                            Some(&meta),
+                                            sel,
+                                            &pal,
+                                        ) {
+                                            ui_state.unattrib_facets.size_band = band;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "unattrib_zone" => {
+                                    for zone in UnattributedLocationZone::ALL_OPTIONS {
+                                        let cnt = if zone == UnattributedLocationZone::All {
+                                            rep.unattributed.len()
+                                        } else {
+                                            rep.unattributed
+                                                .iter()
+                                                .filter(|it| {
+                                                    UnattributedLocationZone::classify_path(&it.path)
+                                                        == zone
+                                                })
+                                                .count()
+                                        };
+                                        let sel = ui_state.unattrib_facets.location_zone == zone;
+                                        let meta = format!("{cnt}");
+                                        if draw_facet_popup_row(
+                                            ui,
+                                            row_w,
+                                            zone.label(),
+                                            Some(&meta),
+                                            sel,
+                                            &pal,
+                                        ) {
+                                            ui_state.unattrib_facets.location_zone = zone;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        },
+                    );
+                },
+            );
+        });
+
+    if picked {
+        ui_state.open_unattrib_facet_popup = None;
+    } else if ctx.input(|i| i.pointer.primary_clicked()) {
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if !area_resp.response.rect.contains(pos) && !trigger_rect.contains(pos) {
+                ui_state.open_unattrib_facet_popup = None;
+            }
+        }
+    }
+}
+
 pub fn draw_app_ui(
     ctx: &egui::Context,
     ui_state: &mut StorageUiState,
     config: &AppConfig,
     report: Option<&ScanReport>,
     scanning: bool,
+    progress: Option<&ScanProgressSnapshot>,
+    system_windows_dir: &str,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    let empty_busy = BTreeSet::new();
+    draw_app_ui_with_drive_busy(
+        ctx,
+        ui_state,
+        config,
+        report,
+        scanning,
+        &empty_busy,
+        progress,
+        system_windows_dir,
+        emit,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_app_ui_with_drive_busy(
+    ctx: &egui::Context,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    report: Option<&ScanReport>,
+    scanning: bool,
+    rescanning_drives: &BTreeSet<char>,
     progress: Option<&ScanProgressSnapshot>,
     system_windows_dir: &str,
     emit: &mut dyn FnMut(UiAction),
@@ -2685,28 +3558,39 @@ pub fn draw_app_ui(
     if ctx.input(|i| i.key_pressed(Key::Escape)) {
         ui_state.open_reverse_dep_id = None;
         ui_state.open_facet_popup = None;
+        ui_state.open_unattrib_facet_popup = None;
+        ui_state.open_pod_scope_drive = None;
     }
     let mut active_facet_anchor: Option<(&'static str, Rect)> = None;
+    let mut active_unattrib_facet_anchor: Option<(&'static str, Rect)> = None;
+    let mut active_pod_overlay: Option<(char, Rect)> = None;
+    let any_scan_active = scanning || !rescanning_drives.is_empty();
+    let scope_stale = report.is_some_and(|r| r.is_scope_stale(config));
 
-    // Top Header (no divider line beneath header)
-    egui::TopBottomPanel::top("header_panel")
+    // Masthead row ONLY (title + live status + [ThemeToggle] [Rescan / Rescan needed] [Settings])
+    // Keeping pods/search/filter inside CentralPanel below lets the raised ledger cover them up to here (FIX 4).
+    egui::TopBottomPanel::top("masthead_panel")
         .show_separator_line(false)
         .frame(
             egui::Frame::none()
                 .fill(pal.bg)
                 .stroke(Stroke::NONE)
-                .inner_margin(Margin::symmetric(SPACE_16, SPACE_12)),
+                .inner_margin(Margin {
+                    left: SPACE_16,
+                    right: SPACE_16,
+                    top: SPACE_12,
+                    bottom: SPACE_8,
+                }),
         )
         .show(ctx, |ui| {
-            // Row 1: Title, quiet Read-only + scan metadata, [Theme Toggle Icon][Rescan][Settings]
             draw_split_row(
                 ui,
                 HEADER_CONTROL_H,
-                236.0,
+                276.0,
                 Sense::hover(),
                 |ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_8;
-                    let (status, status_color) = if scanning {
+                    let (status, status_color) = if any_scan_active {
                         let s = if let Some(p) = progress {
                             format!(
                                 "Read-only · {} · {} dirs · {}",
@@ -2718,6 +3602,14 @@ pub fn draw_app_ui(
                             "Read-only · Scanning...".to_string()
                         };
                         (s, pal.delta_grew)
+                    } else if scope_stale {
+                        (
+                            format!(
+                                "Read-only · Scope changed — rescan needed (last: {})",
+                                report.map_or("", |r| r.scan_timestamp_display.as_str())
+                            ),
+                            pal.delta_grew,
+                        )
                     } else if let Some(rep) = report {
                         (
                             format!(
@@ -2740,7 +3632,6 @@ pub fn draw_app_ui(
                     );
                 },
                 |ui| {
-                    // Right-to-left placement -> rightmost Settings, then Rescan, then Theme Icon immediately left of Rescan.
                     ui.spacing_mut().item_spacing.x = SPACE_8;
                     let settings_lbl = match ui_state.active_view {
                         ActiveView::Settings | ActiveView::Dependencies => "Back to Apps",
@@ -2760,25 +3651,41 @@ pub fn draw_app_ui(
                     .clicked()
                     {
                         ui_state.open_reverse_dep_id = None;
+                        ui_state.open_pod_scope_drive = None;
+                        ui_state.open_facet_popup = None;
+                        ui_state.open_unattrib_facet_popup = None;
                         ui_state.active_view = match ui_state.active_view {
                             ActiveView::Main => ActiveView::Settings,
                             ActiveView::Settings | ActiveView::Dependencies => ActiveView::Main,
                         };
                     }
 
-                    let rescan_lbl = if scanning { "Scanning..." } else { "Rescan" };
-                    if draw_z_button(
+                    let rescan_lbl = if scanning {
+                        "Scanning..."
+                    } else if scope_stale {
+                        "Rescan needed"
+                    } else {
+                        "Rescan"
+                    };
+                    let rescan_min_w = if scope_stale { 116.0 } else { 76.0 };
+                    let rescan_resp = draw_z_button(
                         ui,
                         rescan_lbl,
-                        Vec2::new(76.0, HEADER_CONTROL_H),
+                        Vec2::new(rescan_min_w, HEADER_CONTROL_H),
                         12.0,
                         RADIUS_CONTROL,
-                        !scanning,
+                        !any_scan_active,
                         false,
                         ButtonVariant::PrimaryOutline,
                         &pal,
-                    )
-                    .clicked()
+                    );
+                    if rescan_resp
+                        .on_hover_text(if scope_stale {
+                            "Scan scope, exclusions, or container rules changed — click to rescan enabled drives"
+                        } else {
+                            "Rescan all enabled drives and registry"
+                        })
+                        .clicked()
                     {
                         emit(UiAction::StartRescan);
                     }
@@ -2792,501 +3699,12 @@ pub fn draw_app_ui(
                     }
                 },
             );
-
-            // Row 2: Drive Instrument Pods (single tabular-mono hierarchy + flush 2px WT gradient bar)
-            if let Some(rep) = report {
-                if !rep.drives.is_empty() {
-                    ui.add_space(SPACE_8);
-                    let n = rep.drives.len().max(1);
-                    let avail = ui.available_width();
-                    let tile_w = ((avail - SPACE_8 * ((n - 1) as f32)) / (n as f32)).max(132.0);
-                    let ppp = ctx.pixels_per_point();
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_8;
-                        for (drv_idx, drv) in rep.drives.iter().enumerate() {
-                            let ratio = if drv.total_bytes > 0 {
-                                (drv.used_bytes as f64 / drv.total_bytes as f64).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let pod_frame = draw_crisp_frame(
-                                ui,
-                                pal.panel,
-                                pal.border,
-                                RADIUS_PANEL,
-                                Margin::symmetric(SPACE_12, SPACE_8),
-                                |ui| {
-                                    let inner_w = (tile_w - SPACE_12 * 2.0 - 2.0).max(112.0);
-                                    ui.set_width(inner_w);
-                                    ui.vertical(|ui| {
-                                        ui.spacing_mut().item_spacing.y = 0.0;
-
-                                        // Row 1: Drive identity ("C:\") on left, "<used> of <total>" (11pt Consolas Regular) on right
-                                        let (row1_rect, row1_resp) =
-                                            ui.allocate_exact_size(Vec2::new(inner_w, 18.0), Sense::hover());
-                                        let (drv_font, _drv_fallback_strong) =
-                                            prop_strong_font(ui_state.has_prop_strong, 13.0);
-                                        let drv_galley = ui.fonts(|f| {
-                                            f.layout_no_wrap(
-                                                format!("{}:\\", drv.letter),
-                                                drv_font,
-                                                pal.text,
-                                            )
-                                        });
-                                        let drv_pos =
-                                            optical_galley_pos(ui, row1_rect, &drv_galley, None, false);
-                                        ui.painter().galley(drv_pos, drv_galley, pal.text);
-
-                                        let mono_pod = mono_font_for(ui, 11.0, false);
-                                        let mut cap_job = egui::text::LayoutJob::default();
-                                        cap_job.append(
-                                            &format_size_2dec(drv.used_bytes),
-                                            0.0,
-                                            egui::TextFormat {
-                                                font_id: mono_pod.clone(),
-                                                color: pal.text,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        cap_job.append(
-                                            " of ",
-                                            0.0,
-                                            egui::TextFormat {
-                                                font_id: mono_pod.clone(),
-                                                color: pal.muted,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        cap_job.append(
-                                            &format_size_2dec(drv.total_bytes),
-                                            0.0,
-                                            egui::TextFormat {
-                                                font_id: mono_pod.clone(),
-                                                color: pal.text,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        let cap_galley = ui.fonts(|f| f.layout_job(cap_job));
-                                        let cap_pos = optical_galley_pos(
-                                            ui,
-                                            row1_rect,
-                                            &cap_galley,
-                                            Some(row1_rect.max.x),
-                                            false,
-                                        );
-                                        ui.painter().galley(cap_pos, cap_galley, pal.text);
-                                        let _ = row1_resp.on_hover_text(format!(
-                                            "Used: {} / Total: {}",
-                                            format_exact_bytes(drv.used_bytes),
-                                            format_exact_bytes(drv.total_bytes)
-                                        ));
-
-                                        ui.add_space(SPACE_4);
-
-                                        // Row 2: "<free> free" in the same 11pt Consolas Regular scale (muted companion)
-                                        let (row2_rect, row2_resp) =
-                                            ui.allocate_exact_size(Vec2::new(inner_w, 16.0), Sense::hover());
-                                        let free_lbl = format!("{} free", format_size_2dec(drv.free_bytes));
-                                        let free_galley =
-                                            ui.fonts(|f| f.layout_no_wrap(free_lbl, mono_pod, pal.muted));
-                                        let free_pos = optical_galley_pos(
-                                            ui,
-                                            row2_rect,
-                                            &free_galley,
-                                            Some(row2_rect.max.x),
-                                            false,
-                                        );
-                                        ui.painter().galley(free_pos, free_galley, pal.muted);
-                                        let _ = row2_resp.on_hover_text(format!(
-                                            "Free: {} ({:.1}% free)",
-                                            format_exact_bytes(drv.free_bytes),
-                                            (1.0 - ratio) * 100.0
-                                        ));
-
-                                        ui.add_space(SPACE_8);
-
-                                        // Row 3: Slim 2px flush proportional bar in WT horizontal gradient (red only if total == 0)
-                                        let bar_w = inner_w.floor().max(80.0);
-                                        let (bar_rect, bar_resp) = ui.allocate_exact_size(
-                                            Vec2::new(bar_w, PROP_BAR_H),
-                                            Sense::hover(),
-                                        );
-                                        let snapped_track = snap_rect_to_pixels(bar_rect, ppp);
-                                        let track_col = lerp_color(pal.panel, pal.border, 0.65);
-                                        ui.painter()
-                                            .rect_filled(snapped_track, Rounding::same(1.0), track_col);
-                                        let track_px = (snapped_track.width() * ppp).round();
-                                        let fill_px = if drv.total_bytes == 0 || drv.used_bytes == 0 {
-                                            0.0
-                                        } else {
-                                            ((track_px as f64) * ratio)
-                                                .round()
-                                                .clamp(2.0, track_px as f64) as f32
-                                        };
-                                        if drv.total_bytes == 0 && snapped_track.width() > 2.0 {
-                                            ui.painter().rect_filled(
-                                                snapped_track,
-                                                Rounding::same(1.0),
-                                                STATUS_RED,
-                                            );
-                                        } else if fill_px > 0.0 && snapped_track.height() > 0.0 {
-                                            let fill_rect = Rect::from_min_size(
-                                                snapped_track.min,
-                                                Vec2::new(fill_px / ppp.max(0.5), snapped_track.height()),
-                                            );
-                                            paint_horizontal_wt_gradient_bar(
-                                                ui.painter(),
-                                                snapped_track,
-                                                fill_rect,
-                                                1.0,
-                                            );
-                                        }
-                                        let _ = bar_resp.on_hover_text(format!(
-                                            "{:.2}% used · {}",
-                                            ratio * 100.0,
-                                            if drv.full_walk_enabled {
-                                                "Full walk"
-                                            } else {
-                                                "Install paths only"
-                                            }
-                                        ));
-                                    });
-                                },
-                            );
-                            if drv_idx == 0 {
-                                ui_state.first_drive_pod_rect = Some(pod_frame.response.rect);
-                            }
-                        }
-                    });
-                }
-            }
-
-            if ui_state.active_view == ActiveView::Main {
-                let total_apps_count = report.map_or(0, |r| r.apps.len());
-                let shown_count = ui_state
-                    .cached_filtered
-                    .as_ref()
-                    .map_or(0, |cf| cf.visible_indices.len());
-                let mut list_view_dirty = false;
-
-                ui.add_space(SPACE_8);
-                // Row 3: Search input + Clear + Reset filters
-                let mut search_dirty = false;
-                let any_filter_non_default = !ui_state.search_query.trim().is_empty()
-                    || ui_state.filter_chip != AppFilterChip::All
-                    || !ui_state.facets.is_default();
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width(), HEADER_CONTROL_H),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
-                        let prev_q = ui_state.search_query.clone();
-                        draw_crisp_text_input(
-                            ui,
-                            "main_app_filter",
-                            &mut ui_state.search_query,
-                            272.0,
-                            "Search app, publisher, category, or path...",
-                            pal.header_input_bg,
-                            &pal,
-                        );
-                        if ui_state.search_query != prev_q {
-                            search_dirty = true;
-                        }
-                        if !ui_state.search_query.is_empty()
-                            && draw_z_button(
-                                ui,
-                                "Clear",
-                                Vec2::new(56.0, HEADER_CONTROL_H),
-                                11.5,
-                                6.0,
-                                true,
-                                false,
-                                ButtonVariant::SubtleOutline,
-                                &pal,
-                            )
-                            .clicked()
-                        {
-                            ui_state.search_query.clear();
-                            search_dirty = true;
-                        }
-                        if any_filter_non_default
-                            && draw_z_button(
-                                ui,
-                                "Reset filters",
-                                Vec2::new(88.0, HEADER_CONTROL_H),
-                                11.5,
-                                RADIUS_CONTROL,
-                                true,
-                                false,
-                                ButtonVariant::SubtleOutline,
-                                &pal,
-                            )
-                            .clicked()
-                        {
-                            ui_state.search_query.clear();
-                            ui_state.filter_chip = AppFilterChip::All;
-                            ui_state.facets = FacetFilters::default();
-                            ui_state.open_facet_popup = None;
-                            list_view_dirty = true;
-                        }
-                    },
-                );
-                if search_dirty {
-                    list_view_dirty = true;
-                }
-
-                ui.add_space(SPACE_4);
-                // Row 4: Single-select filter chip row + live "N of M apps" count (left) + invariant attributed total (right)
-                let has_c_label = format!("Has {sys_drive_letter}: footprint");
-                let chips = [
-                    (AppFilterChip::All, "All"),
-                    (AppFilterChip::Grew, "Grew"),
-                    (AppFilterChip::NoTouch, "NO-TOUCH"),
-                    (AppFilterChip::Standalone, "Standalone"),
-                    (AppFilterChip::HasSystemDriveFootprint, has_c_label.as_str()),
-                ];
-                draw_split_row(
-                    ui,
-                    22.0,
-                    156.0,
-                    Sense::hover(),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_8;
-                        for &(chip, lbl) in &chips {
-                            let selected = ui_state.filter_chip == chip;
-                            if draw_filter_radio_chip(ui, lbl, selected, &pal) && !selected {
-                                ui_state.filter_chip = chip;
-                                list_view_dirty = true;
-                            }
-                        }
-                        if report.is_some() {
-                            let filtered_active = ui_state.filter_chip != AppFilterChip::All
-                                || !ui_state.search_query.trim().is_empty()
-                                || !ui_state.facets.is_default();
-                            let count_txt = format!("{shown_count} of {total_apps_count} apps");
-                            let count_rt = RichText::new(count_txt)
-                                .size(11.5)
-                                .color(if filtered_active { pal.text } else { pal.muted });
-                            ui.add(egui::Label::new(count_rt).selectable(false));
-                        }
-                    },
-                    |ui| {
-                        if let Some(cr) = &ui_state.cached_report {
-                            let sum_font = mono_font_for(ui, 11.5, false);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&cr.attributed_label)
-                                        .font(sum_font)
-                                        .color(pal.muted),
-                                )
-                                .selectable(false),
-                            )
-                            .on_hover_text(&cr.attributed_tip);
-                        }
-                    },
-                );
-
-                // Row 5: Facet dropdown selectors (wrapped cleanly, neutral at rest, AND-combined with chips + search)
-                if report.is_some() {
-                    ui.add_space(SPACE_4);
-                    let has_growth = ui_state
-                        .cached_report
-                        .as_ref()
-                        .is_some_and(|cr| cr.has_growth_baseline);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-
-                        let pub_lbl = match ui_state.facets.publisher.as_deref() {
-                            None => "Publisher: All".to_string(),
-                            Some(k) if k == NO_PUBLISHER_FACET_KEY => {
-                                "Publisher: (no publisher)".to_string()
-                            }
-                            Some(k) => {
-                                let short: String = k.chars().take(24).collect();
-                                if k.chars().count() > 24 {
-                                    format!("Publisher: {short}…")
-                                } else {
-                                    format!("Publisher: {k}")
-                                }
-                            }
-                        };
-                        let pub_open = ui_state.open_facet_popup == Some("publisher");
-                        let pub_resp = draw_facet_selector_button(
-                            ui,
-                            "publisher",
-                            &pub_lbl,
-                            pub_open,
-                            ui_state.facets.publisher.is_some(),
-                            &pal,
-                        );
-                        if pub_resp.clicked() {
-                            ui_state.open_facet_popup =
-                                if pub_open { None } else { Some("publisher") };
-                        }
-                        if ui_state.open_facet_popup == Some("publisher") {
-                            active_facet_anchor = Some(("publisher", pub_resp.rect));
-                        }
-
-                        let cat_lbl = match ui_state.facets.category {
-                            None => "Category: All".to_string(),
-                            Some(c) => format!("Category: {}", c.label()),
-                        };
-                        let cat_open = ui_state.open_facet_popup == Some("category");
-                        let cat_resp = draw_facet_selector_button(
-                            ui,
-                            "category",
-                            &cat_lbl,
-                            cat_open,
-                            ui_state.facets.category.is_some(),
-                            &pal,
-                        );
-                        if cat_resp.clicked() {
-                            ui_state.open_facet_popup =
-                                if cat_open { None } else { Some("category") };
-                        }
-                        if ui_state.open_facet_popup == Some("category") {
-                            active_facet_anchor = Some(("category", cat_resp.rect));
-                        }
-
-                        let drv_lbl = match ui_state.facets.drive {
-                            None => "Drive: All".to_string(),
-                            Some(d) => format!("Drive: {}:\\", d.to_ascii_uppercase()),
-                        };
-                        let drv_open = ui_state.open_facet_popup == Some("drive");
-                        let drv_resp = draw_facet_selector_button(
-                            ui,
-                            "drive",
-                            &drv_lbl,
-                            drv_open,
-                            ui_state.facets.drive.is_some(),
-                            &pal,
-                        );
-                        if drv_resp.clicked() {
-                            ui_state.open_facet_popup = if drv_open { None } else { Some("drive") };
-                        }
-                        if ui_state.open_facet_popup == Some("drive") {
-                            active_facet_anchor = Some(("drive", drv_resp.rect));
-                        }
-
-                        let size_lbl = if ui_state.facets.size_band == SizeBandFilter::All {
-                            "Size: All".to_string()
-                        } else {
-                            format!("Size: {}", ui_state.facets.size_band.label())
-                        };
-                        let size_open = ui_state.open_facet_popup == Some("size");
-                        let size_resp = draw_facet_selector_button(
-                            ui,
-                            "size",
-                            &size_lbl,
-                            size_open,
-                            ui_state.facets.size_band != SizeBandFilter::All,
-                            &pal,
-                        );
-                        if size_resp.clicked() {
-                            ui_state.open_facet_popup = if size_open { None } else { Some("size") };
-                        }
-                        if ui_state.open_facet_popup == Some("size") {
-                            active_facet_anchor = Some(("size", size_resp.rect));
-                        }
-
-                        let dep_lbl = if ui_state.facets.dep_state == DepStateFilter::All {
-                            "Deps: All".to_string()
-                        } else {
-                            format!("Deps: {}", ui_state.facets.dep_state.label())
-                        };
-                        let dep_open = ui_state.open_facet_popup == Some("deps");
-                        let dep_resp = draw_facet_selector_button(
-                            ui,
-                            "deps",
-                            &dep_lbl,
-                            dep_open,
-                            ui_state.facets.dep_state != DepStateFilter::All,
-                            &pal,
-                        );
-                        if dep_resp.clicked() {
-                            ui_state.open_facet_popup = if dep_open { None } else { Some("deps") };
-                        }
-                        if ui_state.open_facet_popup == Some("deps") {
-                            active_facet_anchor = Some(("deps", dep_resp.rect));
-                        }
-
-                        let zone_lbl = if ui_state.facets.footprint_zone == FootprintZoneFilter::All
-                        {
-                            "Zone: All".to_string()
-                        } else {
-                            format!("Zone: {}", ui_state.facets.footprint_zone.label())
-                        };
-                        let zone_open = ui_state.open_facet_popup == Some("zone");
-                        let zone_resp = draw_facet_selector_button(
-                            ui,
-                            "zone",
-                            &zone_lbl,
-                            zone_open,
-                            ui_state.facets.footprint_zone != FootprintZoneFilter::All,
-                            &pal,
-                        );
-                        if zone_resp.clicked() {
-                            ui_state.open_facet_popup = if zone_open { None } else { Some("zone") };
-                        }
-                        if ui_state.open_facet_popup == Some("zone") {
-                            active_facet_anchor = Some(("zone", zone_resp.rect));
-                        }
-
-                        if has_growth {
-                            let gr_lbl = if ui_state.facets.growth == GrowthFacetFilter::All {
-                                "Growth: All".to_string()
-                            } else {
-                                format!("Growth: {}", ui_state.facets.growth.label())
-                            };
-                            let gr_open = ui_state.open_facet_popup == Some("growth");
-                            let gr_resp = draw_facet_selector_button(
-                                ui,
-                                "growth",
-                                &gr_lbl,
-                                gr_open,
-                                ui_state.facets.growth != GrowthFacetFilter::All,
-                                &pal,
-                            );
-                            if gr_resp.clicked() {
-                                ui_state.open_facet_popup =
-                                    if gr_open { None } else { Some("growth") };
-                            }
-                            if ui_state.open_facet_popup == Some("growth") {
-                                active_facet_anchor = Some(("growth", gr_resp.rect));
-                            }
-                        }
-                    });
-                }
-
-                if list_view_dirty {
-                    emit(UiAction::UpdateListView {
-                        sort_mode: ui_state.sort_mode,
-                        sort_direction: ui_state.sort_direction,
-                        filter_chip: ui_state.filter_chip,
-                        search_query: ui_state.search_query.clone(),
-                        facets: ui_state.facets.clone(),
-                    });
-                }
-            }
-
-            if let Some(rep) = report {
-                for w in &rep.warnings {
-                    ui.add_space(SPACE_4);
-                    draw_truncated_text(
-                        ui,
-                        &format!("Warning: {w}"),
-                        FontId::new(11.0, FontFamily::Proportional),
-                        pal.status_red,
-                        false,
-                    );
-                }
-            }
         });
 
     match ui_state.active_view {
         ActiveView::Main => {
-            // Collapsible & drag-resizable Pinned Bottom Panel rendered BEFORE CentralPanel so only CentralPanel scrolls.
+            // Collapsible & drag-resizable Pinned Bottom Panel rendered BEFORE CentralPanel so it can rise
+            // up to just below masthead_panel (`max_ledger_h = client_height - masthead_height - 4.0`).
             if let Some(rep) = report {
                 const LEDGER_MIN_H: f32 = 156.0;
                 let max_ledger_h = (ctx.available_rect().height() - 4.0).max(LEDGER_MIN_H);
@@ -3334,7 +3752,8 @@ pub fn draw_app_ui(
                             let cur = ui_state
                                 .ledger_height_px
                                 .unwrap_or_else(|| ui_state.ledger_drag_start_h.unwrap_or(panel_outer_h));
-                            let next_h = (cur - grip_resp.drag_delta().y).clamp(LEDGER_MIN_H, max_ledger_h);
+                            let next_h =
+                                (cur - grip_resp.drag_delta().y).clamp(LEDGER_MIN_H, max_ledger_h);
                             ui_state.ledger_height_px = Some(next_h);
                         }
                         if grip_resp.drag_stopped() {
@@ -3376,7 +3795,8 @@ pub fn draw_app_ui(
                     } else {
                         None
                     };
-                    draw_pinned_bottom_groups(ui, ui_state, rep, &pal, body_budget_h, emit);
+                    active_unattrib_facet_anchor =
+                        draw_pinned_bottom_groups(ui, ui_state, rep, &pal, body_budget_h, emit);
                 });
             }
 
@@ -3384,7 +3804,7 @@ pub fn draw_app_ui(
             let v_pad = if rem_h < TABLE_HEADER_H + SPACE_16 + 8.0 {
                 0.0
             } else {
-                SPACE_8
+                SPACE_4
             };
             egui::CentralPanel::default()
                 .frame(
@@ -3393,6 +3813,356 @@ pub fn draw_app_ui(
                         .inner_margin(Margin::symmetric(SPACE_16, v_pad)),
                 )
                 .show(ctx, |ui| {
+                    if ui.available_height() <= 12.0 {
+                        return;
+                    }
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+
+                    if let Some(rep) = report {
+                        active_pod_overlay = draw_drive_pods_grid(
+                            ui,
+                            ui_state,
+                            config,
+                            rep,
+                            scanning,
+                            rescanning_drives,
+                            &pal,
+                            emit,
+                        );
+                    }
+
+                    if ui.available_height() >= HEADER_CONTROL_H {
+                        let total_apps_count = report.map_or(0, |r| r.apps.len());
+                        let shown_count = ui_state
+                            .cached_filtered
+                            .as_ref()
+                            .map_or(0, |cf| cf.visible_indices.len());
+                        let mut list_view_dirty = false;
+
+                        ui.add_space(SPACE_8);
+                        // Search input + Clear + Reset filters
+                        let mut search_dirty = false;
+                        let any_filter_non_default = !ui_state.search_query.trim().is_empty()
+                            || ui_state.filter_chip != AppFilterChip::All
+                            || !ui_state.facets.is_default();
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), HEADER_CONTROL_H),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
+                                let prev_q = ui_state.search_query.clone();
+                                draw_crisp_text_input(
+                                    ui,
+                                    "main_app_filter",
+                                    &mut ui_state.search_query,
+                                    272.0,
+                                    "Search app, publisher, category, or path...",
+                                    pal.header_input_bg,
+                                    &pal,
+                                );
+                                if ui_state.search_query != prev_q {
+                                    search_dirty = true;
+                                }
+                                if !ui_state.search_query.is_empty()
+                                    && draw_z_button(
+                                        ui,
+                                        "Clear",
+                                        Vec2::new(56.0, HEADER_CONTROL_H),
+                                        11.5,
+                                        6.0,
+                                        true,
+                                        false,
+                                        ButtonVariant::SubtleOutline,
+                                        &pal,
+                                    )
+                                    .clicked()
+                                {
+                                    ui_state.search_query.clear();
+                                    search_dirty = true;
+                                }
+                                if any_filter_non_default
+                                    && draw_z_button(
+                                        ui,
+                                        "Reset filters",
+                                        Vec2::new(88.0, HEADER_CONTROL_H),
+                                        11.5,
+                                        RADIUS_CONTROL,
+                                        true,
+                                        false,
+                                        ButtonVariant::SubtleOutline,
+                                        &pal,
+                                    )
+                                    .clicked()
+                                {
+                                    ui_state.search_query.clear();
+                                    ui_state.filter_chip = AppFilterChip::All;
+                                    ui_state.facets = FacetFilters::default();
+                                    ui_state.open_facet_popup = None;
+                                    list_view_dirty = true;
+                                }
+                            },
+                        );
+                        if search_dirty {
+                            list_view_dirty = true;
+                        }
+
+                        if ui.available_height() >= 26.0 {
+                            ui.add_space(SPACE_4);
+                            let has_c_label = format!("Has {sys_drive_letter}: footprint");
+                            let chips = [
+                                (AppFilterChip::All, "All"),
+                                (AppFilterChip::Grew, "Grew"),
+                                (AppFilterChip::NoTouch, "NO-TOUCH"),
+                                (AppFilterChip::Standalone, "Standalone"),
+                                (AppFilterChip::HasSystemDriveFootprint, has_c_label.as_str()),
+                            ];
+                            draw_split_row(
+                                ui,
+                                22.0,
+                                156.0,
+                                Sense::hover(),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                                    for &(chip, lbl) in &chips {
+                                        let selected = ui_state.filter_chip == chip;
+                                        if draw_filter_radio_chip(ui, lbl, selected, &pal)
+                                            && !selected
+                                        {
+                                            ui_state.filter_chip = chip;
+                                            list_view_dirty = true;
+                                        }
+                                    }
+                                    if report.is_some() {
+                                        let filtered_active = ui_state.filter_chip
+                                            != AppFilterChip::All
+                                            || !ui_state.search_query.trim().is_empty()
+                                            || !ui_state.facets.is_default();
+                                        let count_txt =
+                                            format!("{shown_count} of {total_apps_count} apps");
+                                        let count_rt = RichText::new(count_txt).size(11.5).color(
+                                            if filtered_active { pal.text } else { pal.muted },
+                                        );
+                                        ui.add(egui::Label::new(count_rt).selectable(false));
+                                    }
+                                },
+                                |ui| {
+                                    if let Some(cr) = &ui_state.cached_report {
+                                        let sum_font = mono_font_for(ui, 11.5, false);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&cr.attributed_label)
+                                                    .font(sum_font)
+                                                    .color(pal.muted),
+                                            )
+                                            .selectable(false),
+                                        )
+                                        .on_hover_text(&cr.attributed_tip);
+                                    }
+                                },
+                            );
+                        }
+
+                        if report.is_some() && ui.available_height() >= 28.0 {
+                            ui.add_space(SPACE_4);
+                            let has_growth = ui_state
+                                .cached_report
+                                .as_ref()
+                                .is_some_and(|cr| cr.has_growth_baseline);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+
+                                let pub_lbl = match ui_state.facets.publisher.as_deref() {
+                                    None => "Publisher: All".to_string(),
+                                    Some(k) if k == NO_PUBLISHER_FACET_KEY => {
+                                        "Publisher: (no publisher)".to_string()
+                                    }
+                                    Some(k) => {
+                                        let short: String = k.chars().take(24).collect();
+                                        if k.chars().count() > 24 {
+                                            format!("Publisher: {short}…")
+                                        } else {
+                                            format!("Publisher: {k}")
+                                        }
+                                    }
+                                };
+                                let pub_open = ui_state.open_facet_popup == Some("publisher");
+                                let pub_resp = draw_facet_selector_button(
+                                    ui,
+                                    "publisher",
+                                    &pub_lbl,
+                                    pub_open,
+                                    ui_state.facets.publisher.is_some(),
+                                    &pal,
+                                );
+                                if pub_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if pub_open { None } else { Some("publisher") };
+                                }
+                                if ui_state.open_facet_popup == Some("publisher") {
+                                    active_facet_anchor = Some(("publisher", pub_resp.rect));
+                                }
+
+                                let cat_lbl = match ui_state.facets.category {
+                                    None => "Category: All".to_string(),
+                                    Some(c) => format!("Category: {}", c.label()),
+                                };
+                                let cat_open = ui_state.open_facet_popup == Some("category");
+                                let cat_resp = draw_facet_selector_button(
+                                    ui,
+                                    "category",
+                                    &cat_lbl,
+                                    cat_open,
+                                    ui_state.facets.category.is_some(),
+                                    &pal,
+                                );
+                                if cat_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if cat_open { None } else { Some("category") };
+                                }
+                                if ui_state.open_facet_popup == Some("category") {
+                                    active_facet_anchor = Some(("category", cat_resp.rect));
+                                }
+
+                                let drv_lbl = match ui_state.facets.drive {
+                                    None => "Drive: All".to_string(),
+                                    Some(d) => format!("Drive: {}:\\", d.to_ascii_uppercase()),
+                                };
+                                let drv_open = ui_state.open_facet_popup == Some("drive");
+                                let drv_resp = draw_facet_selector_button(
+                                    ui,
+                                    "drive",
+                                    &drv_lbl,
+                                    drv_open,
+                                    ui_state.facets.drive.is_some(),
+                                    &pal,
+                                );
+                                if drv_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if drv_open { None } else { Some("drive") };
+                                }
+                                if ui_state.open_facet_popup == Some("drive") {
+                                    active_facet_anchor = Some(("drive", drv_resp.rect));
+                                }
+
+                                let size_lbl = if ui_state.facets.size_band == SizeBandFilter::All {
+                                    "Size: All".to_string()
+                                } else {
+                                    format!("Size: {}", ui_state.facets.size_band.label())
+                                };
+                                let size_open = ui_state.open_facet_popup == Some("size");
+                                let size_resp = draw_facet_selector_button(
+                                    ui,
+                                    "size",
+                                    &size_lbl,
+                                    size_open,
+                                    ui_state.facets.size_band != SizeBandFilter::All,
+                                    &pal,
+                                );
+                                if size_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if size_open { None } else { Some("size") };
+                                }
+                                if ui_state.open_facet_popup == Some("size") {
+                                    active_facet_anchor = Some(("size", size_resp.rect));
+                                }
+
+                                let dep_lbl = if ui_state.facets.dep_state == DepStateFilter::All {
+                                    "Deps: All".to_string()
+                                } else {
+                                    format!("Deps: {}", ui_state.facets.dep_state.label())
+                                };
+                                let dep_open = ui_state.open_facet_popup == Some("deps");
+                                let dep_resp = draw_facet_selector_button(
+                                    ui,
+                                    "deps",
+                                    &dep_lbl,
+                                    dep_open,
+                                    ui_state.facets.dep_state != DepStateFilter::All,
+                                    &pal,
+                                );
+                                if dep_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if dep_open { None } else { Some("deps") };
+                                }
+                                if ui_state.open_facet_popup == Some("deps") {
+                                    active_facet_anchor = Some(("deps", dep_resp.rect));
+                                }
+
+                                let zone_lbl =
+                                    if ui_state.facets.footprint_zone == FootprintZoneFilter::All {
+                                        "Zone: All".to_string()
+                                    } else {
+                                        format!("Zone: {}", ui_state.facets.footprint_zone.label())
+                                    };
+                                let zone_open = ui_state.open_facet_popup == Some("zone");
+                                let zone_resp = draw_facet_selector_button(
+                                    ui,
+                                    "zone",
+                                    &zone_lbl,
+                                    zone_open,
+                                    ui_state.facets.footprint_zone != FootprintZoneFilter::All,
+                                    &pal,
+                                );
+                                if zone_resp.clicked() {
+                                    ui_state.open_facet_popup =
+                                        if zone_open { None } else { Some("zone") };
+                                }
+                                if ui_state.open_facet_popup == Some("zone") {
+                                    active_facet_anchor = Some(("zone", zone_resp.rect));
+                                }
+
+                                if has_growth {
+                                    let gr_lbl = if ui_state.facets.growth == GrowthFacetFilter::All
+                                    {
+                                        "Growth: All".to_string()
+                                    } else {
+                                        format!("Growth: {}", ui_state.facets.growth.label())
+                                    };
+                                    let gr_open = ui_state.open_facet_popup == Some("growth");
+                                    let gr_resp = draw_facet_selector_button(
+                                        ui,
+                                        "growth",
+                                        &gr_lbl,
+                                        gr_open,
+                                        ui_state.facets.growth != GrowthFacetFilter::All,
+                                        &pal,
+                                    );
+                                    if gr_resp.clicked() {
+                                        ui_state.open_facet_popup =
+                                            if gr_open { None } else { Some("growth") };
+                                    }
+                                    if ui_state.open_facet_popup == Some("growth") {
+                                        active_facet_anchor = Some(("growth", gr_resp.rect));
+                                    }
+                                }
+                            });
+                        }
+
+                        if list_view_dirty {
+                            emit(UiAction::UpdateListView {
+                                sort_mode: ui_state.sort_mode,
+                                sort_direction: ui_state.sort_direction,
+                                filter_chip: ui_state.filter_chip,
+                                search_query: ui_state.search_query.clone(),
+                                facets: ui_state.facets.clone(),
+                            });
+                        }
+                    }
+
+                    if let Some(rep) = report {
+                        for w in &rep.warnings {
+                            ui.add_space(SPACE_4);
+                            draw_truncated_text(
+                                ui,
+                                &format!("Warning: {w}"),
+                                FontId::new(11.0, FontFamily::Proportional),
+                                pal.status_red,
+                                false,
+                            );
+                        }
+                    }
+
+                    ui.add_space(SPACE_4);
                     if ui.available_height() >= TABLE_HEADER_H + 6.0 {
                         draw_main_app_list(ui, ui_state, report, &pal, emit);
                     }
@@ -3406,28 +4176,97 @@ pub fn draw_app_ui(
             } else {
                 ui_state.open_facet_popup = None;
             }
+            if let (Some(rep), Some((facet_key, trigger_rect))) =
+                (report, active_unattrib_facet_anchor)
+            {
+                draw_unattributed_facet_popup_overlay(ctx, ui_state, rep, facet_key, trigger_rect);
+            } else {
+                ui_state.open_unattrib_facet_popup = None;
+            }
+            if let (Some(_rep), Some((pod_dl, pod_rect))) = (report, active_pod_overlay) {
+                draw_pod_scope_overlay(
+                    ctx,
+                    ui_state,
+                    config,
+                    pod_dl,
+                    pod_rect,
+                    system_windows_dir,
+                    &pal,
+                    emit,
+                );
+            }
         }
         ActiveView::Dependencies => {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
                         .fill(pal.bg)
-                        .inner_margin(Margin::symmetric(SPACE_16, SPACE_12)),
+                        .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
+                    if let Some(rep) = report {
+                        active_pod_overlay = draw_drive_pods_grid(
+                            ui,
+                            ui_state,
+                            config,
+                            rep,
+                            scanning,
+                            rescanning_drives,
+                            &pal,
+                            emit,
+                        );
+                        ui.add_space(SPACE_8);
+                    }
                     draw_dependencies_view(ui, ui_state, report, &pal);
                 });
+            if let (Some(_rep), Some((pod_dl, pod_rect))) = (report, active_pod_overlay) {
+                draw_pod_scope_overlay(
+                    ctx,
+                    ui_state,
+                    config,
+                    pod_dl,
+                    pod_rect,
+                    system_windows_dir,
+                    &pal,
+                    emit,
+                );
+            }
         }
         ActiveView::Settings => {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
                         .fill(pal.bg)
-                        .inner_margin(Margin::symmetric(SPACE_16, SPACE_12)),
+                        .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
                 )
                 .show(ctx, |ui| {
+                    if let Some(rep) = report {
+                        active_pod_overlay = draw_drive_pods_grid(
+                            ui,
+                            ui_state,
+                            config,
+                            rep,
+                            scanning,
+                            rescanning_drives,
+                            &pal,
+                            emit,
+                        );
+                        ui.add_space(SPACE_8);
+                    }
                     draw_settings_view(ui, ui_state, config, report, system_windows_dir, &pal, emit);
                 });
+            if let (Some(_rep), Some((pod_dl, pod_rect))) = (report, active_pod_overlay) {
+                draw_pod_scope_overlay(
+                    ctx,
+                    ui_state,
+                    config,
+                    pod_dl,
+                    pod_rect,
+                    system_windows_dir,
+                    &pal,
+                    emit,
+                );
+            }
         }
     }
 }
@@ -4061,6 +4900,22 @@ fn draw_main_app_list(
                                     },
                                     pal.panel_alt,
                                 );
+                                if !app.bases.is_empty()
+                                    && app.bases.iter().all(|b| {
+                                        matches!(
+                                            b,
+                                            AttributionBasis::ContainerRule
+                                                | AttributionBasis::ExecutableScan
+                                        )
+                                    })
+                                {
+                                    paint_chip(
+                                        &mut cat_ui,
+                                        "inferred",
+                                        confidence_chip_style(DependencyConfidence::Inferred, pal),
+                                        pal.panel_alt,
+                                    );
+                                }
                                 let rev_info = cached_report
                                     .as_ref()
                                     .and_then(|cr| cr.rev_by_app_id.get(&app.id).cloned())
@@ -4355,10 +5210,7 @@ fn draw_main_app_list(
                                             b_rect,
                                             Layout::left_to_right(Align::Center),
                                         );
-                                        let basis_str = item
-                                            .basis
-                                            .map(|b| b.label())
-                                            .unwrap_or("—");
+                                        let basis_str = item.basis_label();
                                         draw_word_capped_text_cached(
                                             &mut b_ui,
                                             basis_str,
@@ -5026,7 +5878,7 @@ fn draw_pinned_bottom_groups(
     pal: &ThemePalette,
     body_budget_h: Option<f32>,
     emit: &mut dyn FnMut(UiAction),
-) {
+) -> Option<(&'static str, Rect)> {
     ui.spacing_mut().item_spacing.y = SPACE_4;
     let aligned_w = (ui.available_width() - SCROLL_GUTTER_W).max(200.0);
 
@@ -5107,7 +5959,7 @@ fn draw_pinned_bottom_groups(
                 height_px: ui_state.ledger_height_px,
             });
         }
-        return;
+        return None;
     }
 
     let (hdr_rect, hdr_resp) = ui.allocate_exact_size(Vec2::new(aligned_w, 18.0), Sense::click());
@@ -5136,7 +5988,7 @@ fn draw_pinned_bottom_groups(
             collapsed: true,
             height_px: ui_state.ledger_height_px,
         });
-        return;
+        return None;
     }
 
     let any_expanded = ui_state.expand_windows_system
@@ -5154,7 +6006,10 @@ fn draw_pinned_bottom_groups(
     let first_unattrib_web_search_rect = &mut ui_state.first_unattrib_web_search_rect;
     let unattrib_mid_row_rect = &mut ui_state.unattrib_mid_row_rect;
     let unattrib_search_query = &mut ui_state.unattrib_search_query;
+    let unattrib_facets = &mut ui_state.unattrib_facets;
+    let open_unattrib_facet_popup = &mut ui_state.open_unattrib_facet_popup;
     let unattrib_sort = &mut ui_state.unattrib_sort;
+    let mut unattrib_facet_anchor: Option<(&'static str, Rect)> = None;
 
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -5172,7 +6027,7 @@ fn draw_pinned_bottom_groups(
                     ui,
                     "Windows & system",
                     rep.windows_system_total_bytes,
-                    "ESTIMATE · system remainder + pagefile/hiberfil",
+                    "ESTIMATE · system remainder + OS folders + pagefile/hiberfil",
                     pal.muted,
                     expand_windows_system,
                     true,
@@ -5180,9 +6035,37 @@ fn draw_pinned_bottom_groups(
                     |ui| {
                         for sys in &rep.windows_system {
                             for rf in &sys.root_files {
-                                draw_simple_item_row(ui, &rf.path, rf.bytes, Some(("ROOT", no_touch_chip_style(pal))), pal);
+                                let _ = draw_simple_item_row(
+                                    ui,
+                                    &rf.path,
+                                    rf.bytes,
+                                    Some(("ROOT", no_touch_chip_style(pal))),
+                                    pal,
+                                );
                             }
-                            draw_simple_item_row(
+                            for osf in &sys.os_folders {
+                                let resp = draw_simple_item_row(
+                                    ui,
+                                    &osf.path,
+                                    osf.bytes,
+                                    Some(("SYSTEM", no_touch_chip_style(pal))),
+                                    pal,
+                                );
+                                let _ = resp.on_hover_text(osf.basis_label());
+                            }
+                            if sys.hardlink_overlap_bytes > 0 {
+                                let resp = draw_simple_item_row(
+                                    ui,
+                                    &format!("{}:\\ hardlink deduplication offset", sys.drive_letter),
+                                    sys.hardlink_overlap_bytes,
+                                    Some(("HARDLINK", qualifier_chip_style(pal))),
+                                    pal,
+                                );
+                                let _ = resp.on_hover_text(
+                                    "NTFS hardlinked files walked via multiple paths on this drive; subtracted once so folder totals reconcile against physical drive used bytes",
+                                );
+                            }
+                            let _ = draw_simple_item_row(
                                 ui,
                                 &format!("{}:\\Windows & system remainder (estimate)", sys.drive_letter),
                                 sys.remainder_bytes,
@@ -5204,7 +6087,7 @@ fn draw_pinned_bottom_groups(
                     pal,
                     |ui| {
                         for item in &rep.your_files {
-                            draw_simple_item_row(ui, &item.path, item.bytes, None, pal);
+                            let _ = draw_simple_item_row(ui, &item.path, item.bytes, None, pal);
                         }
                     },
                 );
@@ -5220,7 +6103,7 @@ fn draw_pinned_bottom_groups(
                     pal,
                     |ui| {
                         for item in rep.shared_caches.iter().take(40) {
-                            draw_simple_item_row(
+                            let _ = draw_simple_item_row(
                                 ui,
                                 &item.path,
                                 item.bytes,
@@ -5241,11 +6124,16 @@ fn draw_pinned_bottom_groups(
                     false,
                     pal,
                     |ui| {
-                        let (filtered_unattrib, filtered_sub_bytes) = filter_and_sort_unattributed(
-                            &rep.unattributed,
-                            unattrib_search_query,
-                            *unattrib_sort,
-                        );
+                        let (filtered_unattrib, filtered_sub_bytes) =
+                            filter_and_sort_unattributed_with_facets(
+                                &rep.unattributed,
+                                unattrib_search_query,
+                                unattrib_facets,
+                                *unattrib_sort,
+                            );
+                        let any_unattrib_filter = !unattrib_search_query.trim().is_empty()
+                            || !unattrib_facets.is_default()
+                            || *unattrib_sort != UnattributedSortMode::SizeDesc;
                         ui.add_space(2.0);
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
@@ -5283,7 +6171,98 @@ fn draw_pinned_bottom_groups(
                                     *unattrib_sort = sort_opt;
                                 }
                             }
-                            let is_filtered = !unattrib_search_query.trim().is_empty();
+                            if any_unattrib_filter
+                                && draw_z_button(
+                                    ui,
+                                    "Reset filters",
+                                    Vec2::new(86.0, 24.0),
+                                    11.0,
+                                    RADIUS_CONTROL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                )
+                                .clicked()
+                            {
+                                unattrib_search_query.clear();
+                                *unattrib_facets = UnattributedFacetFilters::default();
+                                *open_unattrib_facet_popup = None;
+                                *unattrib_sort = UnattributedSortMode::SizeDesc;
+                            }
+                        });
+                        ui.add_space(SPACE_4);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                            ui.add_space(SPACE_16);
+
+                            let drv_lbl = match unattrib_facets.drive {
+                                None => "Drive: All".to_string(),
+                                Some(d) => format!("Drive: {}:\\", d.to_ascii_uppercase()),
+                            };
+                            let drv_open = *open_unattrib_facet_popup == Some("unattrib_drive");
+                            let drv_resp = draw_facet_selector_button(
+                                ui,
+                                "unattrib_drive",
+                                &drv_lbl,
+                                drv_open,
+                                unattrib_facets.drive.is_some(),
+                                pal,
+                            );
+                            if drv_resp.clicked() {
+                                *open_unattrib_facet_popup =
+                                    if drv_open { None } else { Some("unattrib_drive") };
+                            }
+                            if *open_unattrib_facet_popup == Some("unattrib_drive") {
+                                unattrib_facet_anchor = Some(("unattrib_drive", drv_resp.rect));
+                            }
+
+                            let size_lbl = if unattrib_facets.size_band == SizeBandFilter::All {
+                                "Size: All".to_string()
+                            } else {
+                                format!("Size: {}", unattrib_facets.size_band.label())
+                            };
+                            let size_open = *open_unattrib_facet_popup == Some("unattrib_size");
+                            let size_resp = draw_facet_selector_button(
+                                ui,
+                                "unattrib_size",
+                                &size_lbl,
+                                size_open,
+                                unattrib_facets.size_band != SizeBandFilter::All,
+                                pal,
+                            );
+                            if size_resp.clicked() {
+                                *open_unattrib_facet_popup =
+                                    if size_open { None } else { Some("unattrib_size") };
+                            }
+                            if *open_unattrib_facet_popup == Some("unattrib_size") {
+                                unattrib_facet_anchor = Some(("unattrib_size", size_resp.rect));
+                            }
+
+                            let zone_lbl = if unattrib_facets.location_zone == UnattributedLocationZone::All {
+                                "Zone: All".to_string()
+                            } else {
+                                format!("Zone: {}", unattrib_facets.location_zone.label())
+                            };
+                            let zone_open = *open_unattrib_facet_popup == Some("unattrib_zone");
+                            let zone_resp = draw_facet_selector_button(
+                                ui,
+                                "unattrib_zone",
+                                &zone_lbl,
+                                zone_open,
+                                unattrib_facets.location_zone != UnattributedLocationZone::All,
+                                pal,
+                            );
+                            if zone_resp.clicked() {
+                                *open_unattrib_facet_popup =
+                                    if zone_open { None } else { Some("unattrib_zone") };
+                            }
+                            if *open_unattrib_facet_popup == Some("unattrib_zone") {
+                                unattrib_facet_anchor = Some(("unattrib_zone", zone_resp.rect));
+                            }
+
+                            let is_filtered = !unattrib_search_query.trim().is_empty()
+                                || !unattrib_facets.is_default();
                             let stats_txt = format!(
                                 "{} of {} folders · {}",
                                 filtered_unattrib.len(),
@@ -5352,6 +6331,8 @@ fn draw_pinned_bottom_groups(
     }
     if was_unattrib_expanded && !ui_state.expand_unattributed {
         ui_state.unattrib_search_query.clear();
+        ui_state.unattrib_facets = UnattributedFacetFilters::default();
+        ui_state.open_unattrib_facet_popup = None;
         ui_state.unattrib_sort = UnattributedSortMode::SizeDesc;
     }
 
@@ -5417,6 +6398,8 @@ fn draw_pinned_bottom_groups(
             },
         );
     }
+
+    unattrib_facet_anchor
 }
 
 fn draw_pinned_group_card(
@@ -5495,7 +6478,7 @@ fn draw_simple_item_row(
     bytes: u64,
     chip: Option<(&str, ChipStyle)>,
     pal: &ThemePalette,
-) {
+) -> egui::Response {
     let hover_slot = ui.painter().add(egui::Shape::Noop);
     let row_resp = draw_split_row(
         ui,
@@ -5529,6 +6512,7 @@ fn draw_simple_item_row(
             egui::Shape::rect_filled(full_hover_rect, Rounding::ZERO, pal.widget_hover),
         );
     }
+    row_resp
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5955,7 +6939,7 @@ fn draw_settings_view(
                                 if draw_crisp_checkbox(
                                     ui,
                                     &mut target.enabled,
-                                    "Enable full drive walk",
+                                    "Include drive in scan scope",
                                     pal,
                                 ) {
                                     changed = true;
@@ -6066,6 +7050,269 @@ fn draw_settings_view(
                 );
             }
 
+            // App Container Rulebook (FIX 6): drive-root container folder names & explicit container paths.
+            ui.add_space(SPACE_4);
+            let rulebook_frame = draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.border,
+                RADIUS_PANEL,
+                Margin::symmetric(SPACE_12, SPACE_8),
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = SPACE_8;
+
+                    draw_split_row(
+                        ui,
+                        24.0,
+                        124.0,
+                        Sense::hover(),
+                        |ui| {
+                            ui.label(
+                                RichText::new("App Container Rulebook")
+                                    .size(13.5)
+                                    .color(pal.text),
+                            );
+                        },
+                        |ui| {
+                            let is_default_names = draft.containers.root_folder_names.len()
+                                == DEFAULT_CONTAINER_NAMES.len()
+                                && draft
+                                    .containers
+                                    .root_folder_names
+                                    .iter()
+                                    .zip(DEFAULT_CONTAINER_NAMES.iter())
+                                    .all(|(a, b)| a.eq_ignore_ascii_case(b));
+                            if !is_default_names
+                                && draw_z_button(
+                                    ui,
+                                    "Reset defaults",
+                                    Vec2::new(104.0, 24.0),
+                                    11.5,
+                                    RADIUS_CONTROL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SecondaryOutline,
+                                    pal,
+                                )
+                                .clicked()
+                            {
+                                draft.containers.root_folder_names =
+                                    ContainerRulebook::default().root_folder_names;
+                                changed = true;
+                            }
+                        },
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Immediate subfolders inside drive-root container folders (e.g. D:\\Games\\<App>, Y:\\Apps\\<App>) or explicit container paths are promoted as individual folder-only apps when no stronger registry or Steam rule owns them.",
+                        )
+                        .size(11.5)
+                        .color(pal.muted),
+                    );
+
+                    ui.label(
+                        RichText::new("Drive-root container folder names:")
+                            .size(11.5)
+                            .color(pal.muted),
+                    );
+                    let mut remove_name_idx: Option<usize> = None;
+                    let max_row_w = (ui.available_width() - SPACE_16).max(200.0);
+                    let name_font = FontId::new(11.5, FontFamily::Monospace);
+                    let mut name_rows: Vec<Vec<(usize, String)>> = Vec::new();
+                    let mut cur_row: Vec<(usize, String)> = Vec::new();
+                    let mut cur_row_w = 0.0_f32;
+                    for (idx, name) in draft.containers.root_folder_names.iter().enumerate() {
+                        let text_w = ui
+                            .fonts(|f| f.layout_no_wrap(name.clone(), name_font.clone(), pal.text))
+                            .size()
+                            .x;
+                        let chip_w = text_w + SPACE_8 * 2.0 + SPACE_4 + 56.0 + 4.0;
+                        let next_w = if cur_row.is_empty() {
+                            chip_w
+                        } else {
+                            cur_row_w + SPACE_8 + chip_w
+                        };
+                        if !cur_row.is_empty() && next_w > max_row_w {
+                            name_rows.push(std::mem::take(&mut cur_row));
+                            cur_row_w = chip_w;
+                        } else {
+                            cur_row_w = next_w;
+                        }
+                        cur_row.push((idx, name.clone()));
+                    }
+                    if !cur_row.is_empty() {
+                        name_rows.push(cur_row);
+                    }
+                    for row in name_rows {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                            ui.add_space(SPACE_8);
+                            for (idx, name) in row {
+                                draw_crisp_frame(
+                                    ui,
+                                    pal.panel_alt,
+                                    pal.border,
+                                    RADIUS_CONTROL,
+                                    Margin::symmetric(SPACE_8, 2.0),
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_4;
+                                            ui.label(
+                                                RichText::new(&name)
+                                                    .font(name_font.clone())
+                                                    .color(pal.text),
+                                            );
+                                            if draw_z_button(
+                                                ui,
+                                                "Remove",
+                                                Vec2::new(56.0, 20.0),
+                                                10.5,
+                                                RADIUS_PILL,
+                                                true,
+                                                false,
+                                                ButtonVariant::SubtleOutline,
+                                                pal,
+                                            )
+                                            .clicked()
+                                            {
+                                                remove_name_idx = Some(idx);
+                                            }
+                                        });
+                                    },
+                                );
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_name_idx {
+                        if draft.containers.remove_root_name(idx) {
+                            changed = true;
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        draw_crisp_text_input(
+                            ui,
+                            "container_name_input",
+                            &mut ui_state.new_container_name_input,
+                            240.0,
+                            "Folder name (e.g. Tools, Emulators)...",
+                            pal.input_bg,
+                            pal,
+                        );
+                        if draw_z_button(
+                            ui,
+                            "Add name",
+                            Vec2::new(92.0, HEADER_CONTROL_H),
+                            12.0,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            ButtonVariant::SecondaryOutline,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            let candidate = ui_state.new_container_name_input.clone();
+                            if draft.containers.add_root_name(&candidate) {
+                                ui_state.new_container_name_input.clear();
+                                changed = true;
+                            }
+                        }
+                    });
+
+                    ui.label(
+                        RichText::new("Explicit container folder paths:")
+                            .size(11.5)
+                            .color(pal.muted),
+                    );
+                    if draft.containers.explicit_paths.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(SPACE_8);
+                            ui.label(
+                                RichText::new("No custom explicit paths configured.")
+                                    .size(11.0)
+                                    .color(pal.subtle_text),
+                            );
+                        });
+                    } else {
+                        let mut remove_path_idx: Option<usize> = None;
+                        for (idx, ep) in draft.containers.explicit_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add_space(SPACE_8);
+                                draw_truncated_text(
+                                    ui,
+                                    ep,
+                                    FontId::new(11.5, FontFamily::Monospace),
+                                    pal.text,
+                                    false,
+                                );
+                                if draw_z_button(
+                                    ui,
+                                    "Remove",
+                                    Vec2::new(60.0, 22.0),
+                                    11.0,
+                                    RADIUS_CONTROL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                )
+                                .clicked()
+                                {
+                                    remove_path_idx = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_path_idx {
+                            if draft.containers.remove_explicit_path(idx) {
+                                changed = true;
+                            }
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        draw_crisp_text_input(
+                            ui,
+                            "container_path_input",
+                            &mut ui_state.new_container_path_input,
+                            280.0,
+                            r"D:\Work\PortableTools",
+                            pal.input_bg,
+                            pal,
+                        );
+                        if draw_z_button(
+                            ui,
+                            "Add path",
+                            Vec2::new(92.0, HEADER_CONTROL_H),
+                            12.0,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            ButtonVariant::SecondaryOutline,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            let candidate = ui_state.new_container_path_input.clone();
+                            if draft.containers.add_explicit_path(&candidate) {
+                                ui_state.new_container_path_input.clear();
+                                changed = true;
+                            }
+                        }
+                    });
+                },
+            );
+            if ui_state.settings_focus_containers {
+                ui.scroll_to_rect(rulebook_frame.response.rect, Some(Align::BOTTOM));
+                if rulebook_frame.response.rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
+                    ui_state.settings_focus_containers = false;
+                }
+            }
+
             // About card repeating the WT header lockup (§6.4)
             ui.add_space(SPACE_4);
             draw_crisp_frame(
@@ -6127,6 +7374,8 @@ mod tests {
                 is_system_drive: true,
                 full_walk_enabled: true,
                 exclusions: vec!["C:\\Windows".into()],
+                last_scanned_unix: None,
+                last_scanned_display: None,
             }],
             registry_stats: RegistryDiscoveryStats {
                 raw_display_name_entries: 1,
@@ -6152,6 +7401,7 @@ mod tests {
                         zone: Some(ZoneKind::Body),
                         qualifier: None,
                         basis: Some(AttributionBasis::InstallLocation),
+                        basis_detail: None,
                         no_touch: None,
                         drive_letter: 'C',
                     },
@@ -6161,6 +7411,7 @@ mod tests {
                         zone: Some(ZoneKind::Red),
                         qualifier: Some(LocationQualifier::RoamingConfig),
                         basis: Some(AttributionBasis::ExactName),
+                        basis_detail: None,
                         no_touch: None,
                         drive_letter: 'C',
                     },
@@ -6189,6 +7440,7 @@ mod tests {
                 zone: None,
                 qualifier: None,
                 basis: None,
+                basis_detail: None,
                 no_touch: None,
                 drive_letter: 'C',
             }],
@@ -6196,6 +7448,8 @@ mod tests {
             windows_system: vec![SystemDriveBreakdown {
                 drive_letter: 'C',
                 root_files: vec![],
+                os_folders: vec![],
+                hardlink_overlap_bytes: 0,
                 remainder_bytes: 35_000,
                 total_bytes: 35_000,
                 scanned_non_system_bytes: 65_000,
@@ -6229,6 +7483,7 @@ mod tests {
                 }],
             }],
             installed_registry_names: vec![],
+            applied_containers: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -6376,6 +7631,7 @@ mod tests {
                     zone: Some(ZoneKind::Body),
                     qualifier: None,
                     basis: Some(AttributionBasis::ExactName),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: 'C',
                 }],
@@ -6400,6 +7656,8 @@ mod tests {
                 is_system_drive: true,
                 full_walk_enabled: true,
                 exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
             }],
             registry_stats: RegistryDiscoveryStats {
                 raw_display_name_entries: 262,
@@ -6416,6 +7674,8 @@ mod tests {
             windows_system: vec![SystemDriveBreakdown {
                 drive_letter: 'C',
                 root_files: vec![],
+                os_folders: vec![],
+                hardlink_overlap_bytes: 0,
                 remainder_bytes: 250_000_000,
                 total_bytes: 250_000_000,
                 scanned_non_system_bytes: 0,
@@ -6428,6 +7688,7 @@ mod tests {
             unattributed_total_bytes: 0,
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
+            applied_containers: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -6499,6 +7760,8 @@ mod tests {
                 is_system_drive: true,
                 full_walk_enabled: true,
                 exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
             }],
             registry_stats: RegistryDiscoveryStats {
                 raw_display_name_entries: 0,
@@ -6515,6 +7778,8 @@ mod tests {
             windows_system: vec![SystemDriveBreakdown {
                 drive_letter: 'C',
                 root_files: vec![],
+                os_folders: vec![],
+                hardlink_overlap_bytes: 0,
                 remainder_bytes: 249_990_000,
                 total_bytes: 249_990_000,
                 scanned_non_system_bytes: 10_000,
@@ -6540,6 +7805,7 @@ mod tests {
             unattributed_total_bytes: 10_000,
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
+            applied_containers: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -6649,6 +7915,8 @@ mod tests {
                 is_system_drive: true,
                 full_walk_enabled: true,
                 exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
             }],
             registry_stats: RegistryDiscoveryStats {
                 raw_display_name_entries: 1,
@@ -6673,6 +7941,7 @@ mod tests {
                     zone: Some(ZoneKind::Body),
                     qualifier: None,
                     basis: Some(AttributionBasis::InstallLocation),
+                    basis_detail: None,
                     no_touch: None,
                     drive_letter: 'C',
                 }],
@@ -6689,6 +7958,8 @@ mod tests {
             windows_system: vec![SystemDriveBreakdown {
                 drive_letter: 'C',
                 root_files: vec![],
+                os_folders: vec![],
+                hardlink_overlap_bytes: 0,
                 remainder_bytes: 249_900_000,
                 total_bytes: 249_900_000,
                 scanned_non_system_bytes: 100_000,
@@ -6701,6 +7972,7 @@ mod tests {
             unattributed_total_bytes: 0,
             reverse_dependencies: vec![],
             installed_registry_names: vec![],
+            applied_containers: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
         };
@@ -6792,5 +8064,250 @@ mod tests {
             over_static_or_btn.platform_output.cursor_icon,
             egui::CursorIcon::Text
         );
+    }
+
+    fn make_synthetic_report_for_drives(count: usize) -> (ScanReport, AppConfig) {
+        let letters = ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+        let mut drives = Vec::new();
+        let mut targets = Vec::new();
+        let mut windows_system = Vec::new();
+        for idx in 0..count.min(letters.len()) {
+            let dl = letters[idx];
+            let is_sys = idx == 0;
+            let total_bytes = 500_000_000_000_u64 + (idx as u64) * 125_000_000_000;
+            let used_bytes = (total_bytes as f64 * (0.45 + (idx % 4) as f64 * 0.12)) as u64;
+            let free_bytes = total_bytes - used_bytes;
+            let excl = if is_sys {
+                vec!["C:\\Windows".into()]
+            } else if idx == 1 {
+                vec![format!("{dl}:\\Backup")]
+            } else {
+                vec![]
+            };
+            let enabled = !(count > 1 && idx == 1);
+            drives.push(DriveInfo {
+                letter: dl,
+                root: format!("{dl}:\\"),
+                total_bytes,
+                free_bytes,
+                used_bytes,
+                is_system_drive: is_sys,
+                full_walk_enabled: enabled,
+                exclusions: excl.clone(),
+                last_scanned_unix: enabled.then_some(4_000),
+                last_scanned_display: enabled.then_some("2026-11-27 18:10:00".into()),
+            });
+            targets.push(y_core::config::DriveScanTarget {
+                letter: dl,
+                enabled,
+                exclusions: excl,
+            });
+            if enabled {
+                windows_system.push(SystemDriveBreakdown {
+                    drive_letter: dl,
+                    root_files: vec![],
+                    os_folders: vec![],
+                    hardlink_overlap_bytes: 0,
+                    remainder_bytes: used_bytes,
+                    total_bytes: used_bytes,
+                    scanned_non_system_bytes: 0,
+                    drive_used_bytes: used_bytes,
+                    drive_free_bytes: free_bytes,
+                    drive_total_bytes: total_bytes,
+                });
+            }
+        }
+        let containers = ContainerRulebook::default();
+        let mut cfg = AppConfig::default();
+        cfg.targets = targets;
+        cfg.containers = containers.clone();
+        let report = ScanReport {
+            scan_timestamp_unix: 4_000,
+            scan_timestamp_display: "2026-11-27 18:10:00".into(),
+            duration_ms: 1200,
+            drives,
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: 1,
+                raw_with_install_location: 1,
+                canonical_apps: 1,
+                canonical_with_direct_install_location: 1,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps: vec![AttributedApp {
+                id: "reg:sample".into(),
+                display_name: "Sample Tool".into(),
+                publishers: vec!["Pub".into()],
+                install_location: Some("C:\\Apps\\Sample".into()),
+                total_bytes: 100_000,
+                previous_bytes: None,
+                growth: GrowthDelta::NoBaseline,
+                no_touch: None,
+                bases: vec![AttributionBasis::ContainerRule],
+                items: vec![BreakdownItem {
+                    path: "C:\\Apps\\Sample".into(),
+                    bytes: 100_000,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::ContainerRule),
+                    basis_detail: Some("layout rule: Apps".into()),
+                    no_touch: None,
+                    drive_letter: 'C',
+                }],
+                dependencies: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: y_core::model::AppCategory::Utilities,
+                category_basis: "rule".into(),
+            }],
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system,
+            windows_system_total_bytes: 0,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            applied_containers: Some(containers),
+            catalog_source: "embedded".into(),
+            warnings: vec![],
+        };
+        (report, cfg)
+    }
+
+    #[test]
+    fn ledger_covers_pods_and_filter_row_at_max_height() {
+        let (report, cfg) = make_synthetic_report_for_drives(4);
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut state = StorageUiState::default();
+        state.expand_unattributed = true;
+        state.ledger_height_px = Some(2000.0);
+
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut state,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    "C:\\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+
+        let clamped = state.ledger_height_px.expect("ledger height retained");
+        let masthead_h = ctx
+            .memory(|m| m.area_rect(egui::Id::new("masthead_panel")))
+            .map_or(48.0, |r| r.height());
+        let expected_max = 720.0 - masthead_h - 4.0;
+        assert!(
+            (clamped - expected_max).abs() <= 2.0,
+            "expected ledger max height {clamped} ~= {expected_max} (covering pods + filter row below masthead {masthead_h})"
+        );
+    }
+
+    #[test]
+    fn pod_scope_controls_and_settings_container_rulebook_render_and_mark_stale() {
+        let (report, cfg) = make_synthetic_report_for_drives(3);
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut state = StorageUiState::default();
+        state.open_pod_scope_drive = Some('C');
+
+        let main_out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut state,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    "C:\\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!main_out.shapes.is_empty());
+        assert!(!report.is_scope_stale(&cfg));
+
+        let mut modified_cfg = cfg.clone();
+        assert!(modified_cfg.containers.add_root_name("CustomTools"));
+        assert!(report.is_scope_stale(&modified_cfg));
+
+        state.active_view = ActiveView::Settings;
+        state.settings_focus_containers = true;
+        let settings_out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut state,
+                    &modified_cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    "C:\\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!settings_out.shapes.is_empty());
+    }
+
+    #[test]
+    fn adaptive_drive_pod_grid_fits_1_2_5_10_drives_without_overflow() {
+        for count in [1usize, 2, 5, 10] {
+            let (report, cfg) = make_synthetic_report_for_drives(count);
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let mut state = StorageUiState::default();
+
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut state,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        "C:\\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            let pod_r = state.first_drive_pod_rect.expect("drive pod rendered");
+            assert!(pod_r.width() >= 140.0 && pod_r.height() >= 60.0);
+            for cs in &out.shapes {
+                let bb = cs.shape.visual_bounding_rect();
+                if bb.is_positive() {
+                    assert!(
+                        bb.max.x <= 1020.5 && bb.min.x >= -0.5,
+                        "shape overflow for {count} drives: {bb:?}"
+                    );
+                }
+            }
+        }
     }
 }

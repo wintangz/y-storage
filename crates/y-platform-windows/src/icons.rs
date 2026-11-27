@@ -67,13 +67,17 @@ pub fn populate_report_icons(report: &mut ScanReport) {
 
     let mut icon_cache: HashMap<(String, i32), Option<CachedAppIcon>> = HashMap::new();
     for app in &mut report.apps {
-        if !app.id.starts_with("reg:") {
+        if !(app.id.starts_with("reg:")
+            || app.id.starts_with("steam:")
+            || app.id.starts_with("container:")
+            || app.id.starts_with("exe:"))
+        {
             continue;
         }
         if app.icon_rgba.is_some() {
             continue;
         }
-        if app.display_icon.is_none() {
+        if app.id.starts_with("reg:") && app.display_icon.is_none() {
             if let Some(ic) = reg_icon_map.get(&app.id) {
                 app.display_icon = Some(ic.clone());
             }

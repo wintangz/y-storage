@@ -433,9 +433,19 @@ pub fn extract_dotnet_major_from_tfm(raw: &str) -> Option<u32> {
     None
 }
 
-pub fn parse_steam_appmanifest(acf_text: &str) -> Option<(String, String, bool)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteamAppManifest {
+    pub appid: String,
+    pub name: String,
+    pub installdir: String,
+    pub has_ea_script: bool,
+}
+
+#[must_use]
+pub fn parse_steam_appmanifest_full(acf_text: &str) -> Option<SteamAppManifest> {
     let mut installdir: Option<String> = None;
     let mut appid: Option<String> = None;
+    let mut name: Option<String> = None;
     let mut has_ea_script = false;
 
     for line in acf_text.lines() {
@@ -451,10 +461,45 @@ pub fn parse_steam_appmanifest(acf_text: &str) -> Option<(String, String, bool)>
                 installdir = Some(val.to_string());
             } else if key.eq_ignore_ascii_case("appid") {
                 appid = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("name") {
+                name = Some(val.to_string());
             }
         }
     }
-    Some((appid?, installdir?, has_ea_script))
+    let installdir = installdir?;
+    let appid = appid?;
+    let fallback_name = installdir.clone();
+    Some(SteamAppManifest {
+        appid,
+        name: name.filter(|s| !s.trim().is_empty()).unwrap_or(fallback_name),
+        installdir,
+        has_ea_script,
+    })
+}
+
+pub fn parse_steam_appmanifest(acf_text: &str) -> Option<(String, String, bool)> {
+    let full = parse_steam_appmanifest_full(acf_text)?;
+    Some((full.appid, full.installdir, full.has_ea_script))
+}
+
+#[must_use]
+pub fn parse_steam_libraryfolders_vdf(vdf_text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = BTreeSet::new();
+    for line in vdf_text.lines() {
+        let tokens: Vec<&str> = line.split('"').collect();
+        if tokens.len() >= 4 && tokens[1].trim().eq_ignore_ascii_case("path") {
+            let unescaped = tokens[3].replace("\\\\", "\\");
+            let norm = crate::discovery::normalize_windows_path(&unescaped);
+            if norm.len() >= 3 {
+                let key = normalize_path_key(&norm);
+                if seen.insert(key) {
+                    paths.push(norm);
+                }
+            }
+        }
+    }
+    paths
 }
 
 pub fn analyze_report_dependencies(

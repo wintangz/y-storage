@@ -29,6 +29,8 @@ fn versioned_product_under_publisher_rule_sums_versions_and_skips_non_versions()
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = RegistryDiscoveryStats {
         raw_display_name_entries: 1,
@@ -156,6 +158,8 @@ fn xdata_rule_matches_installed_and_known_apps_without_force_matching_unknowns()
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = RegistryDiscoveryStats {
         raw_display_name_entries: 1,
@@ -341,6 +345,8 @@ fn standalone_playwright_tabnine_and_split_containers_preserve_reconciliation() 
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = RegistryDiscoveryStats {
         raw_display_name_entries: 0,
@@ -440,6 +446,8 @@ fn catalog_embed_override_and_corrupt_fallback_work_as_specified() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let mut report = attribute_scan(
         1,
@@ -587,6 +595,8 @@ fn msteams_and_steam_collision_attributes_steam_folders_to_steam_and_cleans_mste
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let apps = vec![
         InstalledApp {
@@ -749,6 +759,8 @@ fn generic_substring_and_ambiguous_app_name_collisions_never_force_match() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let units = vec![
         // Real MSTeams fallback vs absent Steam (using Generic X/Y via XData):
@@ -891,6 +903,8 @@ fn vc_package_cache_lands_on_its_own_versions_row() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let units = vec![
         ScannedUnit {
@@ -1059,6 +1073,8 @@ fn split_family_row_sums_reconcile_with_former_merged_total() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let units = vec![
         ScannedUnit {

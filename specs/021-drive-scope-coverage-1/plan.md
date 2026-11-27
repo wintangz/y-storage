@@ -1,0 +1,9 @@
+# Implementation Plan: `drive-scope-coverage-1`
+
+1. **Step 0**: Capture pre-change 4-drive live baseline (`before_scan.json`) and scaffold `specs/021-drive-scope-coverage-1/`.
+2. **Step 1 (FIX 1)**: Replace quote-fragment web query in `apps/y-storage/src/unattributed_assist.rs` with natural phrasing + tests.
+3. **Step 2 (Core Models, Config, PE, History)**: Extend `crates/y-core/src/{config,model,pe,dependencies,history}.rs` with `ContainerRulebook`, `UnattributedFacetFilters`, new `AttributionBasis` variants (`SteamManifest`, `ContainerRule`, `ExecutableScan`), `basis_detail`, `DriveInfo.last_scanned_*`, `SystemDriveBreakdown.{os_folders,hardlink_overlap_bytes}`, PE `ProductName` parser, `libraryfolders.vdf` / full `appmanifest_*.acf` parsers, and partial/per-drive history growth calculation.
+4. **Step 3 (FIX 3 & FIX 6 Attribution, Tree, Scanner)**: Update `crates/y-core/src/{tree,attribution,categories}.rs` and `crates/y-platform-windows/src/{scanner,icons}.rs` for container decomposition & attribution, cross-drive Steam library discovery, drive-root executable inference, drive-root OS folder labeling, NTFS hardlink reconciliation accounting, and single-drive rescan merge.
+5. **Step 4 (FIX 2, 3, 4, 5, 6a UI & Harness)**: Update `apps/y-storage/src/{list_query,ui,win32_host,main}.rs` for pod scope controls & overlay, adaptive 1..10+ drive grid, per-drive rescan state, `masthead_panel` / full-cover ledger max height, Unattributed 3-facet bar, Settings Container Rulebook, and synthetic multi-drive screenshot harness flags.
+6. **Step 5 (`DESIGN.md`)**: Update `DESIGN.md` `§11`.
+7. **Step 6 (Verify & Ship)**: Run `cargo test --workspace`, release build, live 4-drive comparison scan (`before_scan.json` vs `after_scan.json`), inspect all 12 screenshots (`(a)`–`(g)` + `1, 2, 5, 10` drive simulations), deploy `Y:\Apps\y-storage\y-storage.exe`, write `verification.md`, and commit cleanly.

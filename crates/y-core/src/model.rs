@@ -64,6 +64,9 @@ pub enum AttributionBasis {
     Publisher,
     PackageFallback,
     StandaloneFolder,
+    SteamManifest,
+    ContainerRule,
+    ExecutableScan,
 }
 
 impl AttributionBasis {
@@ -76,6 +79,9 @@ impl AttributionBasis {
             Self::Publisher => "publisher match",
             Self::PackageFallback => "package name",
             Self::StandaloneFolder => "standalone folder",
+            Self::SteamManifest => "Steam manifest",
+            Self::ContainerRule => "layout rule",
+            Self::ExecutableScan => "executable scan (inferred)",
         }
     }
 }
@@ -208,6 +214,10 @@ pub struct DriveInfo {
     pub is_system_drive: bool,
     pub full_walk_enabled: bool,
     pub exclusions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scanned_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scanned_display: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,8 +406,20 @@ pub struct BreakdownItem {
     pub zone: Option<ZoneKind>,
     pub qualifier: Option<LocationQualifier>,
     pub basis: Option<AttributionBasis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_detail: Option<String>,
     pub no_touch: Option<NoTouchCategory>,
     pub drive_letter: char,
+}
+
+impl BreakdownItem {
+    #[must_use]
+    pub fn basis_label(&self) -> &str {
+        self.basis_detail
+            .as_deref()
+            .or_else(|| self.basis.map(AttributionBasis::label))
+            .unwrap_or("—")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,7 +457,11 @@ pub struct AttributedApp {
 pub struct SystemDriveBreakdown {
     pub drive_letter: char,
     pub root_files: Vec<BreakdownItem>,
+    #[serde(default)]
+    pub os_folders: Vec<BreakdownItem>,
     pub remainder_bytes: u64,
+    #[serde(default)]
+    pub hardlink_overlap_bytes: u64,
     pub total_bytes: u64,
     pub scanned_non_system_bytes: u64,
     pub drive_used_bytes: u64,
@@ -477,9 +503,47 @@ pub struct ScanReport {
     pub catalog_source: String,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_containers: Option<crate::config::ContainerRulebook>,
 }
 
 impl ScanReport {
+    /// Returns `true` when drive scope, drive exclusions, or container rules in `config`
+    /// differ from the configuration that produced this report.
+    #[must_use]
+    pub fn is_scope_stale(&self, config: &crate::config::AppConfig) -> bool {
+        for drv in &self.drives {
+            let letter = drv.letter.to_ascii_uppercase();
+            if config.is_drive_enabled(letter) != drv.full_walk_enabled {
+                return true;
+            }
+            let mut report_ex: Vec<String> = drv
+                .exclusions
+                .iter()
+                .map(|e| crate::discovery::normalize_path_key(e))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut cfg_ex: Vec<String> = config
+                .exclusions_for_drive(letter)
+                .into_iter()
+                .map(|e| crate::discovery::normalize_path_key(&e))
+                .filter(|s| !s.is_empty())
+                .collect();
+            report_ex.sort();
+            report_ex.dedup();
+            cfg_ex.sort();
+            cfg_ex.dedup();
+            if report_ex != cfg_ex {
+                return true;
+            }
+        }
+        if let Some(ref applied) = self.applied_containers {
+            if applied != &config.containers {
+                return true;
+            }
+        }
+        false
+    }
     #[must_use]
     pub fn total_apps_bytes_on_drive(&self, drive_letter: char) -> u64 {
         let target = drive_letter.to_ascii_uppercase();

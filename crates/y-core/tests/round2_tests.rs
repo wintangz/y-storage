@@ -97,6 +97,8 @@ fn attribution_coverage_2_routes_green_caches_dot_folders_and_flutter_preserving
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = RegistryDiscoveryStats {
         raw_display_name_entries: 1,
@@ -210,6 +212,8 @@ fn dependencies_invert_cleanly_without_inflating_app_totals() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = RegistryDiscoveryStats {
         raw_display_name_entries: 3,
@@ -395,6 +399,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
                         zone: Some(ZoneKind::Body),
                         qualifier: None,
                         basis: Some(AttributionBasis::InstallLocation),
+                        basis_detail: None,
                         no_touch: None,
                         drive_letter: 'Z',
                     },
@@ -404,6 +409,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
                         zone: Some(ZoneKind::Red),
                         qualifier: None,
                         basis: Some(AttributionBasis::Token),
+                        basis_detail: None,
                         no_touch: None,
                         drive_letter: 'C',
                     },
@@ -430,6 +436,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
                     zone: Some(ZoneKind::Body),
                     qualifier: None,
                     basis: Some(AttributionBasis::ExactName),
+                    basis_detail: None,
                     no_touch: Some(NoTouchCategory::SystemRuntime),
                     drive_letter: 'C',
                 }],
@@ -452,6 +459,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
         installed_registry_names: vec![],
         catalog_source: "embedded".into(),
         warnings: vec![],
+        applied_containers: None,
     };
     let services = vec![
         WindowsServiceEntry {

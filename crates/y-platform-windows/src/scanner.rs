@@ -1,4 +1,7 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -13,17 +16,20 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_MODE_BACKGROUND_END,
     THREAD_PRIORITY_LOWEST,
 };
-use y_core::attribution::attribute_scan;
+use y_core::attribution::{
+    AttributionOptions, RootExeCandidate, attribute_scan_with_options,
+    classify_drive_root_os_folder, merge_drive_rescan,
+};
 use y_core::config::AppConfig;
+use y_core::dependencies::{parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf};
 use y_core::discovery::{
-    build_registry_catalog, is_subpath_of, normalize_path_key, normalize_windows_path,
-    path_drive_letter,
+    build_registry_catalog, is_subpath_of, normalize_app_token, normalize_path_key,
+    normalize_windows_path, path_drive_letter,
 };
-use y_core::history::HistoryEntryRef;
-use y_core::model::{DriveInfo, FolderNode, ScanReport, ScannedUnit};
-use y_core::tree::{
-    decompose_scanned_tree, deduplicate_secondary_install_trees, is_root_system_file_name,
-};
+use y_core::history::{HistoryEntryRef, ScanHistory, recompute_report_growth_from_history};
+use y_core::model::{DriveInfo, FolderNode, InstalledApp, ScanReport, ScannedUnit};
+use y_core::pe::{is_plausible_main_exe_name, parse_pe_version_product_name};
+use y_core::tree::{decompose_scanned_tree_with_containers, is_root_system_file_name};
 
 use crate::paths::{
     current_local_timestamp, enumerate_fixed_drives, get_windows_directory,
@@ -670,6 +676,7 @@ fn scan_drive_parallel_tier(
     (root_node, rs)
 }
 
+#[allow(dead_code)]
 fn size_single_directory(
     dir_path: &str,
     exclusions: &[String],
@@ -677,6 +684,278 @@ fn size_single_directory(
     progress: &ProgressCounters,
 ) -> u64 {
     sum_subtree_bytes_iterative(dir_path, exclusions, sys_win_key, progress)
+}
+
+fn find_steamapps_dirs_in_node(node: &FolderNode, depth: usize, out: &mut BTreeSet<String>) {
+    let pk = normalize_path_key(&node.path);
+    if pk.ends_with("\\steamapps") {
+        out.insert(normalize_windows_path(&node.path));
+        return;
+    }
+    if depth >= 4 {
+        return;
+    }
+    for ch in &node.children {
+        find_steamapps_dirs_in_node(ch, depth + 1, out);
+    }
+}
+
+fn discover_steam_libraries_and_apps(
+    walked_roots: &[FolderNode],
+    enabled_letters: &HashSet<char>,
+    steam_path: Option<&str>,
+    apps: &mut Vec<InstalledApp>,
+) -> Vec<String> {
+    let mut steamapps_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut seed_steamapps: Vec<String> = Vec::new();
+
+    if let Some(sp) = steam_path {
+        if let Some(dl) = path_drive_letter(sp) {
+            if enabled_letters.contains(&dl.to_ascii_uppercase()) {
+                let sa = format!("{}\\steamapps", normalize_windows_path(sp).trim_end_matches('\\'));
+                if Path::new(&sa).is_dir() {
+                    seed_steamapps.push(sa);
+                }
+            }
+        }
+    }
+
+    for root in walked_roots {
+        let mut found = BTreeSet::new();
+        find_steamapps_dirs_in_node(root, 0, &mut found);
+        for sa in found {
+            seed_steamapps.push(sa);
+        }
+    }
+
+    // Parse libraryfolders.vdf in every seed steamapps directory, filtered strictly to scanned drives.
+    let mut queue: VecDeque<String> = seed_steamapps.into_iter().collect();
+    let mut vdf_checked: HashSet<String> = HashSet::new();
+    while let Some(sa_dir) = queue.pop_front() {
+        let sa_norm = normalize_windows_path(&sa_dir);
+        let sa_key = normalize_path_key(&sa_norm);
+        if let Some(dl) = path_drive_letter(&sa_norm) {
+            if !enabled_letters.contains(&dl.to_ascii_uppercase()) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if !Path::new(&sa_norm).is_dir() {
+            continue;
+        }
+        steamapps_dirs.insert(sa_norm.clone());
+        if vdf_checked.insert(sa_key) {
+            let vdf_path = Path::new(&sa_norm).join("libraryfolders.vdf");
+            if let Ok(vdf_text) = std::fs::read_to_string(vdf_path) {
+                for lib_root in parse_steam_libraryfolders_vdf(&vdf_text) {
+                    if let Some(dl) = path_drive_letter(&lib_root) {
+                        if enabled_letters.contains(&dl.to_ascii_uppercase()) {
+                            let next_sa = format!("{}\\steamapps", lib_root.trim_end_matches('\\'));
+                            if Path::new(&next_sa).is_dir() {
+                                queue.push_back(next_sa);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut steam_lib_roots: Vec<String> = Vec::new();
+    let mut seen_libs: HashSet<String> = HashSet::new();
+    for sa in &steamapps_dirs {
+        let lib_root = sa
+            .trim_end_matches('\\')
+            .strip_suffix("\\steamapps")
+            .unwrap_or(sa)
+            .to_string();
+        let lk = normalize_path_key(&lib_root);
+        if seen_libs.insert(lk) {
+            steam_lib_roots.push(lib_root.clone());
+        }
+
+        // Ensure a Steam client bucket exists when scanning a drive containing steam.exe.
+        if Path::new(&lib_root).join("steam.exe").is_file() {
+            let steam_idx = apps
+                .iter()
+                .position(|a| normalize_app_token(&a.display_name) == "steam");
+            if let Some(idx) = steam_idx {
+                let norm = normalize_windows_path(&lib_root);
+                if !apps[idx]
+                    .all_install_locations
+                    .iter()
+                    .any(|p| normalize_path_key(p) == normalize_path_key(&norm))
+                {
+                    apps[idx].all_install_locations.push(norm);
+                }
+            } else {
+                let norm = normalize_windows_path(&lib_root);
+                apps.push(InstalledApp {
+                    id: "steam:client".to_string(),
+                    display_name: "Steam".to_string(),
+                    display_version: String::new(),
+                    uninstall_guids: Vec::new(),
+                    aliases: Vec::new(),
+                    publishers: vec!["Valve Corporation".to_string()],
+                    direct_install_location: Some(norm.clone()),
+                    inferred_install_location: None,
+                    all_install_locations: vec![norm],
+                    no_touch: None,
+                    is_store_fallback: false,
+                    display_icon: Some(format!("{}\\steam.exe", lib_root.trim_end_matches('\\'))),
+                });
+            }
+        }
+
+        let Ok(rd) = std::fs::read_dir(sa) else {
+            continue;
+        };
+        for ent in rd.flatten() {
+            let fname = ent.file_name().to_string_lossy().to_string();
+            let fl = fname.to_ascii_lowercase();
+            if !fl.starts_with("appmanifest_") || !fl.ends_with(".acf") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(ent.path()) else {
+                continue;
+            };
+            let Some(man) = parse_steam_appmanifest_full(&text) else {
+                continue;
+            };
+            let game_dir = normalize_windows_path(&format!("{sa}\\common\\{}", man.installdir));
+            if !Path::new(&game_dir).is_dir() {
+                continue;
+            }
+            let gk = normalize_path_key(&game_dir);
+            let man_tok = normalize_app_token(&man.name);
+
+            let matched_pos = apps.iter().position(|a| {
+                a.all_install_locations
+                    .iter()
+                    .any(|loc| normalize_path_key(loc) == gk)
+                    || (!man_tok.is_empty() && normalize_app_token(&a.display_name) == man_tok)
+                    || (!man_tok.is_empty()
+                        && a.aliases
+                            .iter()
+                            .any(|al| normalize_app_token(al) == man_tok))
+            });
+
+            if let Some(pos) = matched_pos {
+                if !apps[pos]
+                    .all_install_locations
+                    .iter()
+                    .any(|loc| normalize_path_key(loc) == gk)
+                {
+                    apps[pos].all_install_locations.push(game_dir);
+                }
+            } else {
+                apps.push(InstalledApp {
+                    id: format!("steam:app:{}", man.appid),
+                    display_name: man.name,
+                    display_version: String::new(),
+                    uninstall_guids: Vec::new(),
+                    aliases: Vec::new(),
+                    publishers: Vec::new(),
+                    direct_install_location: Some(game_dir.clone()),
+                    inferred_install_location: None,
+                    all_install_locations: vec![game_dir],
+                    no_touch: None,
+                    is_store_fallback: false,
+                    display_icon: None,
+                });
+            }
+        }
+    }
+
+    steam_lib_roots
+}
+
+fn probe_drive_root_executables(
+    walked_roots: &[FolderNode],
+    config: &AppConfig,
+    catalog_apps: &[InstalledApp],
+    steam_lib_roots: &[String],
+) -> HashMap<String, RootExeCandidate> {
+    let mut out = HashMap::new();
+    let known_loc_keys: HashSet<String> = catalog_apps
+        .iter()
+        .flat_map(|a| a.all_install_locations.iter())
+        .chain(steam_lib_roots.iter())
+        .map(|p| normalize_path_key(p))
+        .collect();
+
+    for root in walked_roots {
+        for child in &root.children {
+            let pk = normalize_path_key(&child.path);
+            let leaf_lower = child.name.to_ascii_lowercase();
+            if classify_drive_root_os_folder(&pk, &leaf_lower).is_some()
+                || config.containers.matches_container_dir(&child.path).is_some()
+                || known_loc_keys.contains(&pk)
+            {
+                continue;
+            }
+            let Ok(rd) = std::fs::read_dir(&child.path) else {
+                continue;
+            };
+            let folder_tok = normalize_app_token(&child.name);
+            let mut best: Option<(i32, u64, String, Option<String>)> = None;
+            for ent in rd.flatten() {
+                let Ok(ft) = ent.file_type() else {
+                    continue;
+                };
+                if !ft.is_file() {
+                    continue;
+                }
+                let fname = ent.file_name().to_string_lossy().to_string();
+                if !is_plausible_main_exe_name(&fname) {
+                    continue;
+                }
+                let p = ent.path();
+                let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                if size < 16_384 {
+                    continue;
+                }
+                let Ok(mut f) = File::open(&p) else {
+                    continue;
+                };
+                let mut mz = [0u8; 2];
+                if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
+                    continue;
+                }
+                let product_name = parse_pe_version_product_name(&mut f);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let stem_tok = normalize_app_token(stem);
+                let mut score = 0i32;
+                if !folder_tok.is_empty() && stem_tok == folder_tok {
+                    score += 100;
+                }
+                if product_name.is_some() {
+                    score += 30;
+                }
+                if size >= 200_000 {
+                    score += 10;
+                }
+                let exe_str = normalize_windows_path(&p.to_string_lossy());
+                if best
+                    .as_ref()
+                    .is_none_or(|(bs, bsz, _, _)| (score, size) > (*bs, *bsz))
+                {
+                    best = Some((score, size, exe_str, product_name));
+                }
+            }
+            if let Some((_, _, exe_path, product_name)) = best {
+                out.insert(
+                    pk,
+                    RootExeCandidate {
+                        exe_path,
+                        product_name,
+                    },
+                );
+            }
+        }
+    }
+    out
 }
 
 pub fn scan_directory_tree_for_test(
@@ -706,6 +985,45 @@ pub fn execute_scan_with_progress(
     previous_history: Option<&HistoryEntryRef>,
     on_progress: Option<&(dyn Fn(ScanProgressSnapshot) + Sync)>,
 ) -> ScanReport {
+    execute_scan_internal(config, previous_history, None, None, on_progress)
+}
+
+pub fn execute_scan_with_history(
+    config: &AppConfig,
+    history: &ScanHistory,
+    on_progress: Option<&(dyn Fn(ScanProgressSnapshot) + Sync)>,
+) -> ScanReport {
+    execute_scan_internal(config, history.latest_per_app(), Some(history), None, on_progress)
+}
+
+pub fn execute_single_drive_rescan(
+    base_report: &ScanReport,
+    drive_letter: char,
+    config: &AppConfig,
+    history: &ScanHistory,
+    on_progress: Option<&(dyn Fn(ScanProgressSnapshot) + Sync)>,
+) -> ScanReport {
+    let target = drive_letter.to_ascii_uppercase();
+    let single = execute_scan_internal(
+        config,
+        history.latest_for_drive(target),
+        Some(history),
+        Some(target),
+        on_progress,
+    );
+    let mut merged = merge_drive_rescan(base_report, target, single, history);
+    y_core::categories::classify_report_apps(&mut merged, crate::paths::has_game_manifest_dir);
+    crate::icons::populate_report_icons(&mut merged);
+    merged
+}
+
+fn execute_scan_internal(
+    config: &AppConfig,
+    previous_history: Option<&HistoryEntryRef>,
+    history_ref: Option<&ScanHistory>,
+    only_drive: Option<char>,
+    on_progress: Option<&(dyn Fn(ScanProgressSnapshot) + Sync)>,
+) -> ScanReport {
     let start = std::time::Instant::now();
     let sys_win = get_windows_directory();
     let sys_win_key = normalize_path_key(&sys_win);
@@ -726,7 +1044,7 @@ pub fn execute_scan_with_progress(
 
     let raw_reg = enumerate_uninstall_registry();
     let steam_path = read_steam_install_path();
-    let catalog = build_registry_catalog(&raw_reg, steam_path.as_deref());
+    let mut catalog = build_registry_catalog(&raw_reg, steam_path.as_deref());
     let shell_folders = resolve_personal_shell_folders(&drives);
     let shell_keys: HashSet<String> = shell_folders
         .iter()
@@ -738,8 +1056,8 @@ pub fn execute_scan_with_progress(
     let active_phase = Arc::new(Mutex::new("Preparing scan".to_string()));
     let stop_reporter = Arc::new(AtomicBool::new(false));
 
-    let mut all_units: Vec<ScannedUnit> = Vec::new();
     let mut enabled_letters: HashSet<char> = HashSet::new();
+    let mut walked_trees: Vec<(FolderNode, Vec<(String, u64)>)> = Vec::new();
 
     std::thread::scope(|scope| {
         if let Some(cb) = on_progress {
@@ -763,8 +1081,11 @@ pub fn execute_scan_with_progress(
         }
 
         for drv in &drives {
-            if drv.full_walk_enabled {
-                enabled_letters.insert(drv.letter.to_ascii_uppercase());
+            let dl = drv.letter.to_ascii_uppercase();
+            let should_walk = drv.full_walk_enabled
+                && only_drive.is_none_or(|only| only.to_ascii_uppercase() == dl);
+            if should_walk {
+                enabled_letters.insert(dl);
                 *active_phase.lock().unwrap() = format!("Scanning {}", drv.root);
                 let (root_tree, root_sys) = parallel_scan_drive_root(
                     &drv.root,
@@ -773,51 +1094,37 @@ pub fn execute_scan_with_progress(
                     &shell_keys,
                     &progress,
                 );
-                let units =
-                    decompose_scanned_tree(&root_tree, &catalog.apps, &shell_folders, &root_sys);
-                all_units.extend(units);
+                walked_trees.push((root_tree, root_sys));
             }
         }
-
-        *active_phase.lock().unwrap() = "Sizing app install locations".to_string();
-        let mut secondary_candidates: Vec<String> = Vec::new();
-        let mut seen_sec_keys: HashSet<String> = HashSet::new();
-        for app in &catalog.apps {
-            for loc in &app.all_install_locations {
-                if let Some(letter) = path_drive_letter(loc) {
-                    if !enabled_letters.contains(&letter.to_ascii_uppercase()) {
-                        let norm = normalize_windows_path(loc);
-                        let key = normalize_path_key(&norm);
-                        if seen_sec_keys.insert(key) && std::path::Path::new(&norm).is_dir() {
-                            secondary_candidates.push(norm);
-                        }
-                    }
-                }
-            }
-        }
-
-        let sec_sized: Mutex<Vec<(String, u64)>> =
-            Mutex::new(Vec::with_capacity(secondary_candidates.len()));
-        let sec_queue: Mutex<VecDeque<String>> =
-            Mutex::new(secondary_candidates.into_iter().collect());
-        std::thread::scope(|s| {
-            for _ in 0..4 {
-                s.spawn(|| {
-                    let _io = BackgroundIoGuard::enter();
-                    loop {
-                        let next = sec_queue.lock().unwrap().pop_front();
-                        let Some(path) = next else { break };
-                        let bytes = size_single_directory(&path, &[], &sys_win_key, &progress);
-                        sec_sized.lock().unwrap().push((path, bytes));
-                    }
-                });
-            }
-        });
-
-        let sec_units = deduplicate_secondary_install_trees(&sec_sized.into_inner().unwrap());
-        all_units.extend(sec_units);
         stop_reporter.store(true, Ordering::Relaxed);
     });
+
+    let walked_roots: Vec<FolderNode> = walked_trees.iter().map(|(n, _)| n.clone()).collect();
+    let steam_lib_roots = discover_steam_libraries_and_apps(
+        &walked_roots,
+        &enabled_letters,
+        steam_path.as_deref(),
+        &mut catalog.apps,
+    );
+    let root_exe_candidates = probe_drive_root_executables(
+        &walked_roots,
+        config,
+        &catalog.apps,
+        &steam_lib_roots,
+    );
+
+    let mut all_units: Vec<ScannedUnit> = Vec::new();
+    for (root_tree, root_sys) in &walked_trees {
+        let units = decompose_scanned_tree_with_containers(
+            root_tree,
+            &catalog.apps,
+            &shell_folders,
+            root_sys,
+            &config.containers,
+        );
+        all_units.extend(units);
+    }
 
     if let Some(cb) = on_progress {
         cb(ScanProgressSnapshot {
@@ -827,6 +1134,39 @@ pub fn execute_scan_with_progress(
             files_counted: progress.files_counted.load(Ordering::Relaxed),
             bytes_counted: progress.bytes_counted.load(Ordering::Relaxed),
         });
+    }
+
+    let (ts_unix, ts_display) = current_local_timestamp();
+    for drv in &mut drives {
+        let dl = drv.letter.to_ascii_uppercase();
+        if enabled_letters.contains(&dl) {
+            drv.last_scanned_unix = Some(ts_unix);
+            drv.last_scanned_display = Some(ts_display.clone());
+        } else {
+            drv.last_scanned_unix = None;
+            drv.last_scanned_display = None;
+        }
+    }
+
+    let options = AttributionOptions {
+        containers: Some(&config.containers),
+        steam_library_roots: &steam_lib_roots,
+        root_exe_candidates: Some(&root_exe_candidates),
+    };
+    let mut report = attribute_scan_with_options(
+        ts_unix,
+        ts_display,
+        0,
+        drives,
+        catalog.stats,
+        &catalog.apps,
+        &catalog.guid_to_app_name,
+        &all_units,
+        previous_history,
+        &options,
+    );
+    if let Some(hist) = history_ref {
+        recompute_report_growth_from_history(&mut report, hist);
     }
 
     if let Some(cb) = on_progress {
@@ -839,18 +1179,6 @@ pub fn execute_scan_with_progress(
         });
     }
 
-    let (ts_unix, ts_display) = current_local_timestamp();
-    let mut report = attribute_scan(
-        ts_unix,
-        ts_display,
-        0,
-        drives,
-        catalog.stats,
-        &catalog.apps,
-        &catalog.guid_to_app_name,
-        &all_units,
-        previous_history,
-    );
     crate::dep_scan::enrich_report_with_dependencies(&mut report);
     y_core::categories::classify_report_apps(&mut report, crate::paths::has_game_manifest_dir);
     crate::icons::populate_report_icons(&mut report);

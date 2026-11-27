@@ -49,7 +49,8 @@ fn is_drive_root_segment(segment: &str) -> bool {
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-/// Constructs `"<folder_name>" "<parent_name>" "what is this folder"` from an unattributed folder path.
+/// Constructs a natural search query (`"what is the {folder} folder in {parent}"`, or
+/// `"what is the {folder} folder"` at a drive root) from an unattributed folder path.
 #[must_use]
 pub fn build_unattributed_search_query(path: &str) -> String {
     let normalized = normalize_unattributed_target_path(path);
@@ -69,11 +70,11 @@ pub fn build_unattributed_search_query(path: &str) -> String {
     };
 
     if !name.is_empty() && !parent.is_empty() {
-        format!("\"{name}\" \"{parent}\" \"what is this folder\"")
+        format!("what is the {name} folder in {parent}")
     } else if !name.is_empty() {
-        format!("\"{name}\" \"what is this folder\"")
+        format!("what is the {name} folder")
     } else {
-        "\"what is this folder\"".to_string()
+        "what is this folder".to_string()
     }
 }
 
@@ -105,21 +106,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_query_quotes_folder_parent_and_phrase_cleanly() {
+    fn search_query_uses_natural_question_template_without_quote_fragments() {
+        assert_eq!(
+            build_unattributed_search_query(r"C:\Users\Win\AppData\Local\Firaxis Games"),
+            "what is the Firaxis Games folder in Local"
+        );
         assert_eq!(
             build_unattributed_search_query(
                 r"C:\Users\Win\AppData\Local\Microsoft\onecoremsvsmon"
             ),
-            "\"onecoremsvsmon\" \"Microsoft\" \"what is this folder\""
+            "what is the onecoremsvsmon folder in Microsoft"
         );
         assert_eq!(
             build_unattributed_search_query(r"C:\Users\Win\onecoremsvsmon\"),
-            "\"onecoremsvsmon\" \"Win\" \"what is this folder\""
+            "what is the onecoremsvsmon folder in Win"
         );
         assert_eq!(
             build_unattributed_search_query(r"C:\SWSetup"),
-            "\"SWSetup\" \"what is this folder\""
+            "what is the SWSetup folder"
         );
+        assert_eq!(
+            build_unattributed_search_query(r"D:\Media"),
+            "what is the Media folder"
+        );
+        assert!(!build_unattributed_search_query(r"D:\Media").contains('"'));
     }
 
     #[test]
@@ -128,9 +138,10 @@ mod tests {
         let (query, url) = build_unattributed_search_url(path);
         assert_eq!(
             query,
-            "\"C++ #1 (100%)\" \"Vendor & Co\" \"what is this folder\""
+            "what is the C++ #1 (100%) folder in Vendor & Co"
         );
-        assert!(url.starts_with("https://www.google.com/search?q=%22"));
+        assert!(!query.contains('"'));
+        assert!(url.starts_with("https://www.google.com/search?q=what%20is%20the%20"));
         assert!(url.contains("%2B%2B"));
         assert!(url.contains("%231"));
         assert!(url.contains("%25"));
@@ -147,7 +158,7 @@ mod tests {
         let quoted_name = r#"C:\Cache\Weird"Sub\Folder"Name"#;
         assert_eq!(
             build_unattributed_search_query(quoted_name),
-            "\"Folder Name\" \"Weird Sub\" \"what is this folder\""
+            "what is the Folder Name folder in Weird Sub"
         );
     }
 

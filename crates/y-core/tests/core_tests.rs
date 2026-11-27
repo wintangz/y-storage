@@ -311,6 +311,8 @@ fn personal_shell_folders_and_drive_reconciliation_conserve_every_byte() {
         is_system_drive: true,
         full_walk_enabled: true,
         exclusions: vec!["C:\\Windows".into()],
+        last_scanned_unix: None,
+        last_scanned_display: None,
     };
     let stats = y_core::model::RegistryDiscoveryStats {
         raw_display_name_entries: 1,
@@ -390,6 +392,8 @@ fn scan_history_config_and_cache_roundtrip_atomically() {
             is_system_drive: true,
             full_walk_enabled: true,
             exclusions: vec!["C:\\Windows".into()],
+            last_scanned_unix: None,
+            last_scanned_display: None,
         },
         DriveInfo {
             letter: 'D',
@@ -400,6 +404,8 @@ fn scan_history_config_and_cache_roundtrip_atomically() {
             is_system_drive: false,
             full_walk_enabled: false,
             exclusions: vec![],
+            last_scanned_unix: None,
+            last_scanned_display: None,
         },
     ];
 

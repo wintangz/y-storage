@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::normalize_path_key;
+use crate::discovery::{is_subpath_of, normalize_path_key, normalize_windows_path, path_drive_letter};
 use crate::model::{AppCategory, DriveInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -258,6 +258,228 @@ pub struct WindowPlacementConfig {
     pub maximized: bool,
 }
 
+pub const DEFAULT_CONTAINER_NAMES: &[&str] = &[
+    "Apps",
+    "Games",
+    "Game",
+    "Programs",
+    "Program Files",
+    "Software",
+    "Softwares",
+    "PortableApps",
+];
+
+fn default_container_names() -> Vec<String> {
+    DEFAULT_CONTAINER_NAMES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// User-editable app container rulebook: matches top-level drive-root folder names or explicit full paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerRulebook {
+    #[serde(default = "default_container_names")]
+    pub root_folder_names: Vec<String>,
+    #[serde(default)]
+    pub explicit_paths: Vec<String>,
+}
+
+impl Default for ContainerRulebook {
+    fn default() -> Self {
+        Self {
+            root_folder_names: default_container_names(),
+            explicit_paths: Vec::new(),
+        }
+    }
+}
+
+impl ContainerRulebook {
+    /// Returns the matching container label if `path` is either a configured drive-root container
+    /// directory (e.g. `D:\Games` -> `Some("Games")`) or an explicit container path (`Some("D:\\Tools")`).
+    #[must_use]
+    pub fn matches_container_dir(&self, path: &str) -> Option<String> {
+        let norm = normalize_windows_path(path);
+        let pk = normalize_path_key(&norm);
+        if pk.is_empty() || pk.len() <= 3 {
+            return None;
+        }
+        for ep in &self.explicit_paths {
+            let ek = normalize_path_key(ep);
+            if !ek.is_empty() && ek == pk {
+                return Some(normalize_windows_path(ep));
+            }
+        }
+        let trimmed = norm.trim_end_matches('\\');
+        let parts: Vec<&str> = trimmed.split('\\').collect();
+        if parts.len() == 2 && path_drive_letter(trimmed).is_some() {
+            let folder_name = parts[1];
+            if let Some(matched) = self
+                .root_folder_names
+                .iter()
+                .find(|name| name.trim().eq_ignore_ascii_case(folder_name))
+            {
+                return Some(matched.trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// Returns true when `path` is a strict ancestor of an explicit full-path container rule,
+    /// ensuring tree decomposition splits intermediate directories to reach it.
+    #[must_use]
+    pub fn is_ancestor_of_explicit(&self, path: &str) -> bool {
+        let pk = normalize_path_key(path);
+        if pk.is_empty() {
+            return false;
+        }
+        self.explicit_paths.iter().any(|ep| {
+            let ek = normalize_path_key(ep);
+            !ek.is_empty() && ek != pk && is_subpath_of(&ek, &pk)
+        })
+    }
+
+    pub fn add_root_name(&mut self, raw: &str) -> bool {
+        let clean = raw
+            .trim()
+            .trim_matches(['\\', '/', '"'])
+            .trim()
+            .to_string();
+        if clean.is_empty() || clean.contains('\\') || clean.contains('/') {
+            return false;
+        }
+        if self
+            .root_folder_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&clean))
+        {
+            return false;
+        }
+        self.root_folder_names.push(clean);
+        true
+    }
+
+    pub fn remove_root_name(&mut self, idx: usize) -> bool {
+        if idx < self.root_folder_names.len() {
+            self.root_folder_names.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_explicit_path(&mut self, raw: &str) -> bool {
+        let norm = normalize_windows_path(raw);
+        let pk = normalize_path_key(&norm);
+        if norm.len() <= 3 || path_drive_letter(&norm).is_none() {
+            return false;
+        }
+        if self
+            .explicit_paths
+            .iter()
+            .any(|p| normalize_path_key(p) == pk)
+        {
+            return false;
+        }
+        self.explicit_paths.push(norm);
+        true
+    }
+
+    pub fn remove_explicit_path(&mut self, idx: usize) -> bool {
+        if idx < self.explicit_paths.len() {
+            self.explicit_paths.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UnattributedLocationZone {
+    #[default]
+    All,
+    AppDataLocal,
+    AppDataRoaming,
+    AppDataLocalLow,
+    ProgramData,
+    ProgramFiles,
+    UserProfileRoot,
+    OtherDriveLocation,
+}
+
+impl UnattributedLocationZone {
+    pub const ALL_OPTIONS: [Self; 8] = [
+        Self::All,
+        Self::AppDataLocal,
+        Self::AppDataRoaming,
+        Self::AppDataLocalLow,
+        Self::ProgramData,
+        Self::ProgramFiles,
+        Self::UserProfileRoot,
+        Self::OtherDriveLocation,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All locations",
+            Self::AppDataLocal => "AppData Local",
+            Self::AppDataRoaming => "AppData Roaming",
+            Self::AppDataLocalLow => "AppData LocalLow",
+            Self::ProgramData => "ProgramData",
+            Self::ProgramFiles => "Program Files",
+            Self::UserProfileRoot => "User profile root",
+            Self::OtherDriveLocation => "Other drive location",
+        }
+    }
+
+    #[must_use]
+    pub fn classify_path(path: &str) -> Self {
+        let p = normalize_path_key(path);
+        if p.contains("\\appdata\\locallow\\") || p.ends_with("\\appdata\\locallow") {
+            return Self::AppDataLocalLow;
+        }
+        if p.contains("\\appdata\\roaming\\") || p.ends_with("\\appdata\\roaming") {
+            return Self::AppDataRoaming;
+        }
+        if p.contains("\\appdata\\local\\") || p.ends_with("\\appdata\\local") {
+            return Self::AppDataLocal;
+        }
+        if p.contains(":\\programdata\\") || p.ends_with(":\\programdata") {
+            return Self::ProgramData;
+        }
+        if p.contains(":\\program files\\")
+            || p.contains(":\\program files (x86)\\")
+            || p.ends_with(":\\program files")
+            || p.ends_with(":\\program files (x86)")
+        {
+            return Self::ProgramFiles;
+        }
+        let parts: Vec<&str> = p.trim_end_matches('\\').split('\\').collect();
+        if parts.len() >= 3 && parts[1] == "users" {
+            return Self::UserProfileRoot;
+        }
+        Self::OtherDriveLocation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnattributedFacetFilters {
+    pub drive: Option<char>,
+    pub size_band: SizeBandFilter,
+    pub location_zone: UnattributedLocationZone,
+}
+
+impl UnattributedFacetFilters {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.drive.is_none()
+            && self.size_band == SizeBandFilter::All
+            && self.location_zone == UnattributedLocationZone::All
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub version: u32,
@@ -278,6 +500,8 @@ pub struct AppConfig {
     pub ledger_collapsed: bool,
     #[serde(default)]
     pub ledger_height_px: Option<f32>,
+    #[serde(default)]
+    pub containers: ContainerRulebook,
     pub targets: Vec<DriveScanTarget>,
 }
 
@@ -294,6 +518,7 @@ impl Default for AppConfig {
             facets: FacetFilters::default(),
             ledger_collapsed: false,
             ledger_height_px: None,
+            containers: ContainerRulebook::default(),
             targets: vec![DriveScanTarget {
                 letter: 'C',
                 enabled: true,
@@ -346,6 +571,7 @@ impl AppConfig {
             facets: FacetFilters::default(),
             ledger_collapsed: false,
             ledger_height_px: None,
+            containers: ContainerRulebook::default(),
             targets,
         }
     }

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::config::ContainerRulebook;
 use crate::discovery::{is_subpath_of, normalize_path_key, path_drive_letter};
 use crate::model::{FolderNode, InstalledApp, ScannedUnit, ScannedUnitKind};
 
@@ -23,7 +24,12 @@ pub fn is_personal_shell_folder(path: &str, shell_folders: &[String]) -> bool {
     shell_folders.iter().any(|sf| normalize_path_key(sf) == pk)
 }
 
-fn is_container_dir(path: &str, apps: &[InstalledApp], shell_folders: &[String]) -> bool {
+fn is_container_dir(
+    path: &str,
+    apps: &[InstalledApp],
+    shell_folders: &[String],
+    containers: &ContainerRulebook,
+) -> bool {
     let pk = normalize_path_key(path);
 
     // Never split personal shell folders: they stay atomic under "Your files".
@@ -33,6 +39,11 @@ fn is_container_dir(path: &str, apps: &[InstalledApp], shell_folders: &[String])
 
     // Drive roots (e.g. c:\, d:\)
     if pk.len() == 3 && pk.ends_with(":\\") {
+        return true;
+    }
+
+    // User-configured or default container rulebook match (drive-root name or explicit path) or strict ancestor.
+    if containers.matches_container_dir(path).is_some() || containers.is_ancestor_of_explicit(path) {
         return true;
     }
 
@@ -77,13 +88,22 @@ fn is_container_dir(path: &str, apps: &[InstalledApp], shell_folders: &[String])
         "\\steamlibrary\\steamapps",
         "\\steamlibrary\\steamapps\\common",
         "\\epic games",
-        "\\games",
-        "\\softwares",
-        "\\apps",
     ];
     if suffix_containers
         .iter()
         .any(|sfx| pk.ends_with(sfx) || (pk.len() > 2 && &pk[2..] == *sfx))
+    {
+        return true;
+    }
+
+    // Also split nested Steam library folders (`*\Steam\steamapps`, `*\Steam\steamapps\common`, `*\SteamLibrary\...`)
+    // even if a parent directory like `D:\Games` was removed from the container rulebook.
+    if pk.ends_with("\\steam")
+        || pk.ends_with("\\steam\\steamapps")
+        || pk.ends_with("\\steam\\steamapps\\common")
+        || pk.ends_with("\\steamlibrary")
+        || pk.ends_with("\\steamlibrary\\steamapps")
+        || pk.ends_with("\\steamlibrary\\steamapps\\common")
     {
         return true;
     }
@@ -124,6 +144,22 @@ pub fn decompose_scanned_tree(
     shell_folders: &[String],
     root_system_files: &[(String, u64)],
 ) -> Vec<ScannedUnit> {
+    decompose_scanned_tree_with_containers(
+        root,
+        apps,
+        shell_folders,
+        root_system_files,
+        &ContainerRulebook::default(),
+    )
+}
+
+pub fn decompose_scanned_tree_with_containers(
+    root: &FolderNode,
+    apps: &[InstalledApp],
+    shell_folders: &[String],
+    root_system_files: &[(String, u64)],
+    containers: &ContainerRulebook,
+) -> Vec<ScannedUnit> {
     let mut units = Vec::new();
     let drive_letter = path_drive_letter(&root.path).unwrap_or('C');
 
@@ -148,6 +184,7 @@ pub fn decompose_scanned_tree(
         drive_letter: char,
         apps: &[InstalledApp],
         shell_folders: &[String],
+        containers: &ContainerRulebook,
         install_keys: &HashSet<String>,
         out: &mut Vec<ScannedUnit>,
     ) {
@@ -163,7 +200,7 @@ pub fn decompose_scanned_tree(
             return;
         }
 
-        if is_container_dir(&node.path, apps, shell_folders) && !node.children.is_empty() {
+        if is_container_dir(&node.path, apps, shell_folders, containers) && !node.children.is_empty() {
             if node.direct_file_bytes > 0 {
                 let parts: Vec<&str> = pk.trim_end_matches('\\').split('\\').collect();
                 let is_registry_hive_container = (parts.len() == 3 && parts[1] == "users")
@@ -182,7 +219,15 @@ pub fn decompose_scanned_tree(
                 });
             }
             for child in &node.children {
-                visit(child, drive_letter, apps, shell_folders, install_keys, out);
+                visit(
+                    child,
+                    drive_letter,
+                    apps,
+                    shell_folders,
+                    containers,
+                    install_keys,
+                    out,
+                );
             }
             return;
         }
@@ -213,6 +258,7 @@ pub fn decompose_scanned_tree(
             drive_letter,
             apps,
             shell_folders,
+            containers,
             &install_keys,
             &mut units,
         );

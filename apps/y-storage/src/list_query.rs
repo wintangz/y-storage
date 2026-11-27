@@ -3,10 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use y_core::config::{
     AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
-    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, SortDirection,
+    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, SizeBandFilter, SortDirection,
+    UnattributedFacetFilters, UnattributedLocationZone,
 };
-#[cfg(test)]
-use y_core::config::SizeBandFilter;
 use y_core::model::{
     AppCategory, AttributedApp, AttributionBasis, GrowthDelta, ScanReport, UnattributedItem,
     ZoneKind,
@@ -50,17 +49,53 @@ fn unattrib_leaf_lower(path: &str) -> String {
 }
 
 /// View-only substring filter & sort over `ScanReport.unattributed` without modifying report items or totals.
+#[cfg(test)]
 #[must_use]
 pub fn filter_and_sort_unattributed<'a>(
     items: &'a [UnattributedItem],
     query: &str,
     sort: UnattributedSortMode,
 ) -> (Vec<(usize, &'a UnattributedItem)>, u64) {
+    filter_and_sort_unattributed_with_facets(
+        items,
+        query,
+        &UnattributedFacetFilters::default(),
+        sort,
+    )
+}
+
+/// View-only search, multi-facet (`Drive`, `Size`, `Location zone`) AND-filter, and 4-mode sort
+/// over `ScanReport.unattributed`, preserving original report items and group totals unchanged.
+#[must_use]
+pub fn filter_and_sort_unattributed_with_facets<'a>(
+    items: &'a [UnattributedItem],
+    query: &str,
+    facets: &UnattributedFacetFilters,
+    sort: UnattributedSortMode,
+) -> (Vec<(usize, &'a UnattributedItem)>, u64) {
     let q = query.trim().to_ascii_lowercase();
     let mut out: Vec<(usize, &'a UnattributedItem)> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| q.is_empty() || it.path.to_ascii_lowercase().contains(&q))
+        .filter(|(_, it)| {
+            if !q.is_empty() && !it.path.to_ascii_lowercase().contains(&q) {
+                return false;
+            }
+            if let Some(drv) = facets.drive {
+                if it.drive_letter.to_ascii_uppercase() != drv.to_ascii_uppercase() {
+                    return false;
+                }
+            }
+            if facets.size_band != SizeBandFilter::All && !facets.size_band.matches_bytes(it.bytes) {
+                return false;
+            }
+            if facets.location_zone != UnattributedLocationZone::All
+                && UnattributedLocationZone::classify_path(&it.path) != facets.location_zone
+            {
+                return false;
+            }
+            true
+        })
         .collect();
     match sort {
         UnattributedSortMode::SizeDesc => {
@@ -574,6 +609,7 @@ mod tests {
                 zone: Some(ZoneKind::Body),
                 qualifier: None,
                 basis: bases.first().copied(),
+                basis_detail: None,
                 no_touch,
                 drive_letter: dl,
             })
@@ -1173,6 +1209,8 @@ mod tests {
                 is_system_drive: true,
                 full_walk_enabled: true,
                 exclusions: vec![],
+                last_scanned_unix: None,
+                last_scanned_display: None,
             }],
             registry_stats: y_core::model::RegistryDiscoveryStats {
                 raw_display_name_entries: 3,
@@ -1194,6 +1232,7 @@ mod tests {
             installed_registry_names: vec![],
             catalog_source: String::new(),
             warnings: vec![],
+            applied_containers: None,
         };
         let mut stale = FacetFilters {
             publisher: Some("Vanished Publisher".into()),
@@ -1203,5 +1242,97 @@ mod tests {
         sanitize_facets_for_report(&mut stale, &rep);
         assert_eq!(stale.publisher, None);
         assert_eq!(stale.drive, None);
+    }
+
+    #[test]
+    fn unattributed_facets_combine_with_and_and_classify_all_seven_zones() {
+        let items = vec![
+            UnattributedItem {
+                path: r"C:\Users\Win\AppData\Local\Firaxis Games".into(),
+                bytes: 2_000_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\Users\Win\AppData\Roaming\UserBenchmark".into(),
+                bytes: 200_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\Users\Win\AppData\LocalLow\CampfireStudio".into(),
+                bytes: 50_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\ProgramData\USOShared".into(),
+                bytes: 120_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\Program Files\IIS".into(),
+                bytes: 15_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Body),
+            },
+            UnattributedItem {
+                path: r"C:\Users\Win\onecoremsvsmon".into(),
+                bytes: 96_000_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"D:\Media".into(),
+                bytes: 150_000_000_000,
+                drive_letter: 'D',
+                zone_hint: Some(ZoneKind::Red),
+            },
+        ];
+
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[0].path),
+            UnattributedLocationZone::AppDataLocal
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[1].path),
+            UnattributedLocationZone::AppDataRoaming
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[2].path),
+            UnattributedLocationZone::AppDataLocalLow
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[3].path),
+            UnattributedLocationZone::ProgramData
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[4].path),
+            UnattributedLocationZone::ProgramFiles
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[5].path),
+            UnattributedLocationZone::UserProfileRoot
+        );
+        assert_eq!(
+            UnattributedLocationZone::classify_path(&items[6].path),
+            UnattributedLocationZone::OtherDriveLocation
+        );
+
+        let f = UnattributedFacetFilters {
+            drive: Some('C'),
+            size_band: SizeBandFilter::Between100MbAnd1Gb,
+            location_zone: UnattributedLocationZone::AppDataRoaming,
+        };
+        let (rows, sub) = filter_and_sort_unattributed_with_facets(
+            &items,
+            "user",
+            &f,
+            UnattributedSortMode::SizeDesc,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(sub, 200_000_000);
+        assert_eq!(rows[0].1.path, r"C:\Users\Win\AppData\Roaming\UserBenchmark");
     }
 }

@@ -13,14 +13,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use egui::{Pos2, RawInput, Rect, Vec2, ViewportId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
-use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SizeBandFilter, SortDirection, ThemeMode};
-use y_core::history::ScanHistory;
-use y_core::model::ScanReport;
+use y_core::config::{
+    AppConfig, AppFilterChip, AppSortMode, ContainerRulebook, DriveScanTarget, SizeBandFilter,
+    SortDirection, ThemeMode, UnattributedLocationZone,
+};
+use y_core::history::{ScanHistory, ScanScopeKind};
+use y_core::model::{
+    AppCategory, AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, GrowthDelta,
+    RegistryDiscoveryStats, ScanReport, SystemDriveBreakdown, UnattributedItem, ZoneKind,
+};
 use y_platform_windows::paths::{enumerate_fixed_drives, get_windows_directory};
 use y_platform_windows::query_process_memory_bytes;
-use y_platform_windows::scanner::execute_scan_with_progress;
+use y_platform_windows::scanner::{execute_scan_with_history, execute_scan_with_progress};
 
 use crate::png::save_bgra_u32_as_png;
 use crate::sw_painter::SoftwarePainter;
@@ -29,7 +35,7 @@ use crate::win32_host::{
     AppController, dpi_to_ppp, run_gui_app, run_perf_benchmark, run_titlebar_capture,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CliScanOutput {
     working_set_bytes: u64,
     private_bytes: u64,
@@ -48,11 +54,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut scan_cli_out: Option<PathBuf> = None;
     let mut ephemeral = false;
+    let mut scan_all_drives = false;
     let mut smoke_gui_ms: Option<u64> = None;
     let mut smoke_gui_out: Option<PathBuf> = None;
     let mut bench_perf_out: Option<PathBuf> = None;
     let mut capture_titlebar_out: Option<PathBuf> = None;
     let mut screenshot_out: Option<PathBuf> = None;
+    let mut screenshot_report_json: Option<PathBuf> = None;
     let mut screenshot_view = "main".to_string();
     let mut screenshot_theme = ThemeMode::Dark;
     let mut screenshot_dpi: u32 = 96;
@@ -65,6 +73,12 @@ fn main() {
     let mut screenshot_facet_publisher: Option<String> = None;
     let mut screenshot_facet_size = SizeBandFilter::All;
     let mut screenshot_unattrib_search = String::new();
+    let mut screenshot_unattrib_drive: Option<char> = None;
+    let mut screenshot_unattrib_size = SizeBandFilter::All;
+    let mut screenshot_unattrib_zone = UnattributedLocationZone::All;
+    let mut screenshot_exclude_drives: Vec<char> = Vec::new();
+    let mut screenshot_all_drives_enabled = false;
+    let mut screenshot_sim_drives: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -76,6 +90,66 @@ fn main() {
                 }
             }
             "--ephemeral" => ephemeral = true,
+            "--all-drives" => scan_all_drives = true,
+            "--all-drives-enabled" => screenshot_all_drives_enabled = true,
+            "--report-json" => {
+                if i + 1 < args.len() {
+                    screenshot_report_json = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
+            "--exclude-drive" => {
+                if i + 1 < args.len() {
+                    if let Some(ch) = args[i + 1].trim().chars().next() {
+                        screenshot_exclude_drives.push(ch.to_ascii_uppercase());
+                    }
+                    i += 1;
+                }
+            }
+            "--unattrib-drive" => {
+                if i + 1 < args.len() {
+                    screenshot_unattrib_drive = args[i + 1]
+                        .trim()
+                        .chars()
+                        .next()
+                        .map(|c| c.to_ascii_uppercase());
+                    i += 1;
+                }
+            }
+            "--unattrib-size" => {
+                if i + 1 < args.len() {
+                    screenshot_unattrib_size = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "ge-10gb" | ">=10gb" => SizeBandFilter::Ge10Gb,
+                        "1-10gb" | "1gb-10gb" => SizeBandFilter::Between1And10Gb,
+                        "ge-1gb" | ">=1gb" => SizeBandFilter::Ge1Gb,
+                        "100mb-1gb" => SizeBandFilter::Between100MbAnd1Gb,
+                        "lt-100mb" | "<100mb" => SizeBandFilter::Lt100Mb,
+                        _ => SizeBandFilter::All,
+                    };
+                    i += 1;
+                }
+            }
+            "--unattrib-zone" => {
+                if i + 1 < args.len() {
+                    screenshot_unattrib_zone = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "appdata-local" | "local" => UnattributedLocationZone::AppDataLocal,
+                        "appdata-roaming" | "roaming" => UnattributedLocationZone::AppDataRoaming,
+                        "appdata-locallow" | "locallow" => UnattributedLocationZone::AppDataLocalLow,
+                        "programdata" => UnattributedLocationZone::ProgramData,
+                        "program-files" => UnattributedLocationZone::ProgramFiles,
+                        "user-profile" | "user-root" => UnattributedLocationZone::UserProfileRoot,
+                        "other" | "other-drive" => UnattributedLocationZone::OtherDriveLocation,
+                        _ => UnattributedLocationZone::All,
+                    };
+                    i += 1;
+                }
+            }
+            "--sim-drives" => {
+                if i + 1 < args.len() {
+                    screenshot_sim_drives = args[i + 1].parse::<usize>().ok();
+                    i += 1;
+                }
+            }
             "--smoke-gui-ms" => {
                 if i + 2 < args.len() {
                     smoke_gui_ms = args[i + 1].parse().ok();
@@ -202,7 +276,7 @@ fn main() {
     }
 
     if let Some(out_path) = scan_cli_out {
-        run_cli_scan(&out_path, ephemeral);
+        run_cli_scan(&out_path, ephemeral, scan_all_drives);
         return;
     }
 
@@ -210,6 +284,7 @@ fn main() {
         let sort_dir = screenshot_sort_dir.unwrap_or_else(|| screenshot_sort.default_direction());
         if let Err(err) = render_screenshot(
             &png_path,
+            screenshot_report_json.as_ref(),
             &screenshot_view,
             screenshot_theme,
             screenshot_dpi,
@@ -222,6 +297,12 @@ fn main() {
             screenshot_facet_publisher.as_deref(),
             screenshot_facet_size,
             &screenshot_unattrib_search,
+            screenshot_unattrib_drive,
+            screenshot_unattrib_size,
+            screenshot_unattrib_zone,
+            &screenshot_exclude_drives,
+            screenshot_all_drives_enabled,
+            screenshot_sim_drives,
         ) {
             eprintln!("render screenshot failed: {err}");
             std::process::exit(1);
@@ -267,7 +348,7 @@ fn main() {
     }
 }
 
-fn run_cli_scan(out_path: &PathBuf, ephemeral: bool) {
+fn run_cli_scan(out_path: &PathBuf, ephemeral: bool, all_drives: bool) {
     let drives = enumerate_fixed_drives();
     let sys_win = get_windows_directory();
     let config_path = AppConfig::default_path();
@@ -275,20 +356,35 @@ fn run_cli_scan(out_path: &PathBuf, ephemeral: bool) {
     let cache_path = FolderSizeCache::default_path();
     let last_scan_path = default_last_scan_path();
 
-    let config = if ephemeral {
-        AppConfig::for_detected_drives(&drives, &sys_win)
+    let mut config = if ephemeral {
+        if config_path.exists() {
+            AppConfig::load_or_default(&config_path, &drives, &sys_win)
+        } else {
+            AppConfig::for_detected_drives(&drives, &sys_win)
+        }
     } else {
         AppConfig::load_or_default(&config_path, &drives, &sys_win)
     };
-    let mut history = if ephemeral {
-        ScanHistory::default()
-    } else {
+    if all_drives {
+        for t in &mut config.targets {
+            t.enabled = true;
+        }
+    }
+    let mut history = if history_path.exists() {
         ScanHistory::load_or_default(&history_path)
+    } else {
+        ScanHistory::default()
     };
 
-    let report = execute_scan_with_progress(&config, history.latest_per_app(), None);
+    let report = execute_scan_with_history(&config, &history, None);
     if !ephemeral {
-        history.record_report(&report);
+        let refreshed: Vec<char> = config
+            .targets
+            .iter()
+            .filter(|t| t.enabled)
+            .map(|t| t.letter)
+            .collect();
+        history.record_report_with_scope(&report, ScanScopeKind::Full, &refreshed);
         let _ = history.save_atomic(&history_path);
         let mut cache = FolderSizeCache::load_or_default(&cache_path);
         cache.update_from_report(&report);
@@ -310,6 +406,191 @@ fn run_cli_scan(out_path: &PathBuf, ephemeral: bool) {
     std::fs::write(out_path, json).expect("write CLI scan JSON");
 }
 
+fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConfig) {
+    let letters = ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+    let count = drive_count.clamp(1, letters.len());
+
+    let sample_specs = [
+        ("Microsoft Edge", "Microsoft Corporation", AppCategory::Browsers, 8_280_000_000_u64, 'C'),
+        ("Visual Studio Code", "Microsoft Corporation", AppCategory::Development, 4_120_000_000, 'C'),
+        ("Discord", "Discord Inc.", AppCategory::Communication, 2_310_000_000, 'C'),
+        ("RustRover", "JetBrains s.r.o.", AppCategory::Development, 3_640_000_000, 'C'),
+        ("ShareX", "", AppCategory::Utilities, 412_000_000, 'C'),
+        ("qBittorrent", "The qBittorrent project", AppCategory::Utilities, 198_000_000, 'C'),
+    ];
+    let mut apps: Vec<AttributedApp> = sample_specs
+        .iter()
+        .enumerate()
+        .map(|(i, (name, pub_name, cat, sz, dl))| AttributedApp {
+            id: format!("sim:app:{i}"),
+            display_name: (*name).to_string(),
+            publishers: if pub_name.is_empty() {
+                vec![]
+            } else {
+                vec![(*pub_name).to_string()]
+            },
+            install_location: Some(format!(r"{dl}:\Program Files\{name}")),
+            total_bytes: *sz,
+            previous_bytes: Some(*sz),
+            growth: GrowthDelta::Changed(0),
+            no_touch: None,
+            bases: vec![AttributionBasis::InstallLocation],
+            items: vec![BreakdownItem {
+                path: format!(r"{dl}:\Program Files\{name}"),
+                bytes: *sz,
+                zone: Some(ZoneKind::Body),
+                qualifier: None,
+                basis: Some(AttributionBasis::InstallLocation),
+                basis_detail: None,
+                no_touch: None,
+                drive_letter: *dl,
+            }],
+            dependencies: vec![],
+            display_icon: None,
+            icon_rgba: None,
+            category: *cat,
+            category_basis: "synthetic".to_string(),
+        })
+        .collect();
+    if count >= 2 {
+        apps.push(AttributedApp {
+            id: "sim:folder-only:d1".to_string(),
+            display_name: "Starbound".to_string(),
+            publishers: vec![],
+            install_location: Some(r"D:\Games\Starbound".to_string()),
+            total_bytes: 5_550_000_000,
+            previous_bytes: None,
+            growth: GrowthDelta::NoBaseline,
+            no_touch: None,
+            bases: vec![AttributionBasis::ContainerRule],
+            items: vec![BreakdownItem {
+                path: r"D:\Games\Starbound".to_string(),
+                bytes: 5_550_000_000,
+                zone: Some(ZoneKind::Body),
+                qualifier: None,
+                basis: Some(AttributionBasis::ContainerRule),
+                basis_detail: Some("layout rule: Games".to_string()),
+                no_touch: None,
+                drive_letter: 'D',
+            }],
+            dependencies: vec![],
+            display_icon: None,
+            icon_rgba: None,
+            category: AppCategory::Games,
+            category_basis: "layout rule: Games".to_string(),
+        });
+    }
+    apps.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+
+    let unattributed = vec![UnattributedItem {
+        path: r"C:\Users\Win\AppData\Local\Firaxis Games".to_string(),
+        bytes: 184_000_000,
+        drive_letter: 'C',
+        zone_hint: Some(ZoneKind::Red),
+    }];
+    let unattrib_total: u64 = unattributed.iter().map(|u| u.bytes).sum();
+
+    let mut drives = Vec::with_capacity(count);
+    let mut targets = Vec::with_capacity(count);
+    let mut windows_system = Vec::new();
+    let mut win_total = 0_u64;
+
+    for idx in 0..count {
+        let dl = letters[idx];
+        let is_sys = idx == 0;
+        let total_bytes = 250_000_000_000_u64 + (idx as u64) * 180_000_000_000;
+        let used_bytes = (total_bytes as f64 * (0.42 + ((idx * 3) % 5) as f64 * 0.11)) as u64;
+        let free_bytes = total_bytes - used_bytes;
+        let included = !((count >= 4 && idx == 1) || (count >= 8 && idx == 7));
+        let excl = if is_sys {
+            vec![r"C:\WINDOWS".to_string()]
+        } else if idx == 1 {
+            vec![format!(r"{dl}:\Backups")]
+        } else {
+            Vec::new()
+        };
+        drives.push(DriveInfo {
+            letter: dl,
+            root: format!(r"{dl}:\"),
+            total_bytes,
+            free_bytes,
+            used_bytes,
+            is_system_drive: is_sys,
+            full_walk_enabled: included,
+            exclusions: excl.clone(),
+            last_scanned_unix: included.then_some(1_795_771_200 - (idx as u64) * 120),
+            last_scanned_display: included.then_some(format!("2026-11-27 18:{:02}:14", 42 - idx * 3)),
+        });
+        targets.push(DriveScanTarget {
+            letter: dl,
+            enabled: included,
+            exclusions: excl,
+        });
+        if included {
+            let apps_on_drv: u64 = apps
+                .iter()
+                .flat_map(|a| a.items.iter())
+                .filter(|it| it.drive_letter == dl)
+                .map(|it| it.bytes)
+                .sum();
+            let unattrib_on_drv: u64 = unattributed
+                .iter()
+                .filter(|u| u.drive_letter == dl)
+                .map(|u| u.bytes)
+                .sum();
+            let scanned_drv = apps_on_drv + unattrib_on_drv;
+            let rem = used_bytes.saturating_sub(scanned_drv);
+            win_total += rem;
+            windows_system.push(SystemDriveBreakdown {
+                drive_letter: dl,
+                root_files: vec![],
+                os_folders: vec![],
+                hardlink_overlap_bytes: 0,
+                remainder_bytes: rem,
+                total_bytes: rem,
+                scanned_non_system_bytes: scanned_drv,
+                drive_used_bytes: used_bytes,
+                drive_free_bytes: free_bytes,
+                drive_total_bytes: total_bytes,
+            });
+        }
+    }
+
+    let containers = ContainerRulebook::default();
+    let mut cfg = AppConfig::default();
+    cfg.targets = targets;
+    cfg.containers = containers.clone();
+
+    let report = ScanReport {
+        scan_timestamp_unix: 1_795_771_200,
+        scan_timestamp_display: "2026-11-27 18:42:14".to_string(),
+        duration_ms: 4820,
+        drives,
+        registry_stats: RegistryDiscoveryStats {
+            raw_display_name_entries: apps.len(),
+            raw_with_install_location: apps.len(),
+            canonical_apps: apps.len(),
+            canonical_with_direct_install_location: apps.len(),
+            canonical_with_inferred_install_location: 0,
+        },
+        apps,
+        shared_caches: vec![],
+        shared_caches_total_bytes: 0,
+        your_files: vec![],
+        your_files_total_bytes: 0,
+        windows_system,
+        windows_system_total_bytes: win_total,
+        unattributed,
+        unattributed_total_bytes: unattrib_total,
+        reverse_dependencies: vec![],
+        installed_registry_names: vec![],
+        applied_containers: Some(containers),
+        catalog_source: "synthetic-layout".to_string(),
+        warnings: vec![],
+    };
+    (report, cfg)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_screenshot_frame(
     report: &y_core::model::ScanReport,
@@ -327,6 +608,9 @@ fn render_screenshot_frame(
     facet_publisher: Option<&str>,
     facet_size: SizeBandFilter,
     unattrib_search: &str,
+    unattrib_drive: Option<char>,
+    unattrib_size: SizeBandFilter,
+    unattrib_zone: UnattributedLocationZone,
 ) -> (usize, usize, Vec<u32>, Option<Rect>) {
     let mut cfg = config.clone();
     cfg.theme_mode = theme;
@@ -339,6 +623,9 @@ fn render_screenshot_frame(
     ui_state.facets.publisher = facet_publisher.map(str::to_string);
     ui_state.facets.size_band = facet_size;
     ui_state.unattrib_search_query = unattrib_search.to_string();
+    ui_state.unattrib_facets.drive = unattrib_drive;
+    ui_state.unattrib_facets.size_band = unattrib_size;
+    ui_state.unattrib_facets.location_zone = unattrib_zone;
     if let Some(c) = ledger_collapsed {
         ui_state.ledger_collapsed = c;
     }
@@ -460,11 +747,57 @@ fn render_screenshot_frame(
         "settings" => {
             ui_state.active_view = ActiveView::Settings;
         }
+        "settings-containers" => {
+            ui_state.active_view = ActiveView::Settings;
+            ui_state.settings_focus_containers = true;
+        }
         "settings-typed" => {
             ui_state.active_view = ActiveView::Settings;
             ui_state
                 .new_exclusion_inputs
                 .insert('C', r"C:\TempBuildCache".to_string());
+        }
+        "pods-scope" | "drive-excluded" | "pods-sim" => {
+            ui_state.active_view = ActiveView::Main;
+            if ledger_collapsed.is_none() {
+                ui_state.ledger_collapsed = true;
+            }
+        }
+        "pod-scope-overlay" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            ui_state.open_pod_scope_drive = Some('C');
+            ui_state
+                .new_exclusion_inputs
+                .insert('C', r"C:\BuildScratch".to_string());
+        }
+        "unattributed-facets" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(430.0);
+            if ui_state.open_unattrib_facet_popup.is_none() {
+                ui_state.open_unattrib_facet_popup = Some("unattrib_zone");
+            }
+        }
+        "folder-only-apps" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            ui_state.facets.drive = Some('D');
+            for a in &report.apps {
+                if a.bases.iter().any(|b| {
+                    matches!(
+                        b,
+                        AttributionBasis::ContainerRule
+                            | AttributionBasis::SteamManifest
+                            | AttributionBasis::ExecutableScan
+                    )
+                }) {
+                    if ui_state.expanded_apps.is_empty() {
+                        ui_state.expanded_apps.insert(a.id.clone());
+                    }
+                }
+            }
         }
         _ => {
             ui_state.active_view = ActiveView::Main;
@@ -487,6 +820,8 @@ fn render_screenshot_frame(
 
     let steps = if hover_size_mode || hover_web_search_tooltip {
         4
+    } else if view == "settings-containers" {
+        8
     } else if hover_web_search_btn || hover_unattrib_row {
         3
     } else {
@@ -615,6 +950,7 @@ fn upscale_crop_nn(
 #[allow(clippy::too_many_arguments)]
 fn render_screenshot(
     out_path: &PathBuf,
+    report_json: Option<&PathBuf>,
     view: &str,
     theme: ThemeMode,
     dpi: u32,
@@ -627,14 +963,49 @@ fn render_screenshot(
     facet_publisher: Option<&str>,
     facet_size: SizeBandFilter,
     unattrib_search: &str,
+    unattrib_drive: Option<char>,
+    unattrib_size: SizeBandFilter,
+    unattrib_zone: UnattributedLocationZone,
+    exclude_drives: &[char],
+    all_drives_enabled: bool,
+    sim_drives: Option<usize>,
 ) -> Result<(), String> {
     let drives = enumerate_fixed_drives();
     let sys_win = get_windows_directory();
-    let config = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
-
-    let mut report = load_last_scan(&default_last_scan_path())
-        .unwrap_or_else(|| execute_scan_with_progress(&config, None, None));
-    if !report.apps.is_empty() && report.apps.iter().all(|a| a.icon_rgba.is_none()) {
+    let (mut report, mut config) = if let Some(n) = sim_drives {
+        build_synthetic_screenshot_report(n)
+    } else {
+        let cfg = AppConfig::load_or_default(&AppConfig::default_path(), &drives, &sys_win);
+        let rep = if let Some(rp) = report_json {
+            let txt = std::fs::read_to_string(rp)
+                .map_err(|e| format!("read --report-json {}: {e}", rp.display()))?;
+            if let Ok(wrapped) = serde_json::from_str::<CliScanOutput>(&txt) {
+                wrapped.report
+            } else {
+                serde_json::from_str::<ScanReport>(&txt)
+                    .map_err(|e| format!("parse --report-json {}: {e}", rp.display()))?
+            }
+        } else {
+            load_last_scan(&default_last_scan_path())
+                .unwrap_or_else(|| execute_scan_with_progress(&cfg, None, None))
+        };
+        (rep, cfg)
+    };
+    if all_drives_enabled {
+        for t in &mut config.targets {
+            t.enabled = true;
+        }
+    }
+    for dl in exclude_drives {
+        if let Some(t) = config
+            .targets
+            .iter_mut()
+            .find(|t| t.letter.to_ascii_uppercase() == *dl)
+        {
+            t.enabled = false;
+        }
+    }
+    if !report.apps.is_empty() && report.apps.iter().all(|a| a.icon_rgba.is_none()) && sim_drives.is_none() {
         y_platform_windows::icons::populate_report_icons(&mut report);
     }
     if !report.apps.is_empty() && report.apps.iter().all(|a| a.category_basis.is_empty()) {
@@ -662,6 +1033,9 @@ fn render_screenshot(
             None,
             SizeBandFilter::All,
             "",
+            None,
+            SizeBandFilter::All,
+            UnattributedLocationZone::All,
         );
         let (lw, _lh, l_px, _) = render_screenshot_frame(
             &report,
@@ -679,6 +1053,9 @@ fn render_screenshot(
             None,
             SizeBandFilter::All,
             "",
+            None,
+            SizeBandFilter::All,
+            UnattributedLocationZone::All,
         );
 
         // Extract top-right header buttons & expanded badge row (Dependencies proven/shared/used-by strip).
@@ -735,6 +1112,9 @@ fn render_screenshot(
         facet_publisher,
         facet_size,
         unattrib_search,
+        unattrib_drive,
+        unattrib_size,
+        unattrib_zone,
     );
 
     if view == "drive-pod-crop-200" {
