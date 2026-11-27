@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::UNIX_EPOCH;
 
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -17,16 +18,17 @@ use windows_sys::Win32::System::Threading::{
     THREAD_PRIORITY_LOWEST,
 };
 use y_core::attribution::{
-    AttributionOptions, RootExeCandidate, attribute_scan_with_options,
-    classify_drive_root_os_folder, merge_drive_rescan,
+    AppPathEvidence, AttributionOptions, EvidenceBundle, RootExeCandidate, ShortcutEvidence,
+    attribute_scan_with_options, classify_drive_root_os_folder, merge_drive_rescan,
 };
+use y_core::cache::{CachedExeEvidence, ExeEvidenceCache};
 use y_core::config::{AppConfig, DEFAULT_PERSONAL_NAMES, PinKind, ZoneRuleKind, ZoneRulebook};
 use y_core::dependencies::{
     parse_epic_manifest_item, parse_steam_appmanifest_full, parse_steam_libraryfolders_vdf,
 };
 use y_core::discovery::{
-    build_registry_catalog_with_services, is_subpath_of, normalize_app_token, normalize_path_key,
-    normalize_windows_path, path_drive_letter,
+    build_registry_catalog_with_services, extract_exe_path_from_command, is_subpath_of,
+    normalize_app_token, normalize_path_key, normalize_windows_path, path_drive_letter,
 };
 use y_core::history::{HistoryEntryRef, ScanHistory, recompute_report_growth_from_history};
 use y_core::model::{
@@ -953,10 +955,93 @@ fn discover_epic_manifest_apps(
     }
 }
 
-fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCandidate> {
+fn file_size_and_mtime(meta: &std::fs::Metadata) -> (u64, u64, u32) {
+    let size = meta.len();
+    let (secs, nanos) = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    (size, secs, nanos)
+}
+
+fn read_principal_exe_evidence_cached(
+    exe_path: &Path,
+    size: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    pre_ver: Option<(Option<String>, Option<String>, Option<String>)>,
+    cache: &mut ExeEvidenceCache,
+    cache_dirty: &mut bool,
+) -> Option<RootExeCandidate> {
+    let exe_str = normalize_windows_path(&exe_path.to_string_lossy());
+    let exe_key = normalize_path_key(&exe_str);
+    if let Some(hit) = cache.get_fresh(&exe_key, size, mtime_secs, mtime_nanos) {
+        return Some(RootExeCandidate {
+            exe_path: exe_str,
+            product_name: hit.product_name.clone(),
+            company_name: hit.company_name.clone(),
+            signer_org: hit.signer_org.clone(),
+        });
+    }
+
+    let (product_name, company_name, file_description) = if let Some(v) = pre_ver {
+        v
+    } else {
+        let Ok(mut f) = File::open(exe_path) else {
+            return None;
+        };
+        let mut mz = [0u8; 2];
+        if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
+            return None;
+        }
+        let ver = y_core::pe::parse_pe_version_strings(&mut f);
+        (ver.product_name, ver.company_name, ver.file_description)
+    };
+    let signer_org = crate::authenticode::extract_authenticode_signer_org(exe_path);
+    cache.upsert(
+        exe_key,
+        CachedExeEvidence {
+            size,
+            mtime_unix_secs: mtime_secs,
+            mtime_subsec_nanos: mtime_nanos,
+            signer_org: signer_org.clone(),
+            company_name: company_name.clone(),
+            product_name: product_name.clone(),
+            file_description,
+        },
+    );
+    *cache_dirty = true;
+
+    Some(RootExeCandidate {
+        exe_path: exe_str,
+        product_name,
+        company_name,
+        signer_org,
+    })
+}
+
+fn probe_dir_for_main_exe(
+    dir_path: &str,
+    folder_name: &str,
+    cache: &mut ExeEvidenceCache,
+    cache_dirty: &mut bool,
+) -> Option<RootExeCandidate> {
     let rd = std::fs::read_dir(dir_path).ok()?;
     let folder_tok = normalize_app_token(folder_name);
-    let mut best: Option<(i32, u64, String, Option<String>, Option<String>)> = None;
+    struct ScoredExe {
+        score: i32,
+        size: u64,
+        mtime_secs: u64,
+        mtime_nanos: u32,
+        path: std::path::PathBuf,
+        product_name: Option<String>,
+        company_name: Option<String>,
+        file_description: Option<String>,
+        cached_signer: Option<Option<String>>,
+    }
+    let mut best: Option<ScoredExe> = None;
     for ent in rd.flatten() {
         let Ok(ft) = ent.file_type() else {
             continue;
@@ -969,47 +1054,88 @@ fn probe_dir_for_main_exe(dir_path: &str, folder_name: &str) -> Option<RootExeCa
             continue;
         }
         let p = ent.path();
-        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        let Ok(meta) = ent.metadata() else {
+            continue;
+        };
+        let (size, mtime_secs, mtime_nanos) = file_size_and_mtime(&meta);
         if size < 16_384 {
             continue;
         }
-        let Ok(mut f) = File::open(&p) else {
-            continue;
-        };
-        let mut mz = [0u8; 2];
-        if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
-            continue;
-        }
-        let ver = y_core::pe::parse_pe_version_strings(&mut f);
+        let exe_str = normalize_windows_path(&p.to_string_lossy());
+        let exe_key = normalize_path_key(&exe_str);
+        let (product_name, company_name, file_description, cached_signer) =
+            if let Some(hit) = cache.get_fresh(&exe_key, size, mtime_secs, mtime_nanos) {
+                (
+                    hit.product_name.clone(),
+                    hit.company_name.clone(),
+                    hit.file_description.clone(),
+                    Some(hit.signer_org.clone()),
+                )
+            } else {
+                let Ok(mut f) = File::open(&p) else {
+                    continue;
+                };
+                let mut mz = [0u8; 2];
+                if f.read_exact(&mut mz).is_err() || mz != [b'M', b'Z'] {
+                    continue;
+                }
+                let ver = y_core::pe::parse_pe_version_strings(&mut f);
+                (ver.product_name, ver.company_name, ver.file_description, None)
+            };
+
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let stem_tok = normalize_app_token(stem);
         let mut score = 0i32;
         if !folder_tok.is_empty() && stem_tok == folder_tok {
             score += 100;
         }
-        if ver.product_name.is_some() {
+        if product_name.is_some() {
             score += 30;
         }
-        if ver.company_name.is_some() {
+        if company_name.is_some() {
             score += 10;
         }
         if size >= 200_000 {
             score += 10;
         }
-        let exe_str = normalize_windows_path(&p.to_string_lossy());
         if best
             .as_ref()
-            .is_none_or(|(bs, bsz, _, _, _)| (score, size) > (*bs, *bsz))
+            .is_none_or(|b| (score, size) > (b.score, b.size))
         {
-            best = Some((score, size, exe_str, ver.product_name, ver.company_name));
+            best = Some(ScoredExe {
+                score,
+                size,
+                mtime_secs,
+                mtime_nanos,
+                path: p,
+                product_name,
+                company_name,
+                file_description,
+                cached_signer,
+            });
         }
     }
-    best.map(
-        |(_, _, exe_path, product_name, company_name)| RootExeCandidate {
-            exe_path,
-            product_name,
-            company_name,
-        },
+    let winner = best?;
+    if let Some(signer_org) = winner.cached_signer {
+        return Some(RootExeCandidate {
+            exe_path: normalize_windows_path(&winner.path.to_string_lossy()),
+            product_name: winner.product_name,
+            company_name: winner.company_name,
+            signer_org,
+        });
+    }
+    read_principal_exe_evidence_cached(
+        &winner.path,
+        winner.size,
+        winner.mtime_secs,
+        winner.mtime_nanos,
+        Some((
+            winner.product_name,
+            winner.company_name,
+            winner.file_description,
+        )),
+        cache,
+        cache_dirty,
     )
 }
 
@@ -1020,6 +1146,8 @@ fn probe_candidate_executables(
     manifest_entries: &[ManifestAppEntry],
     steam_lib_roots: &[String],
     shell_folders: &[String],
+    cache: &mut ExeEvidenceCache,
+    cache_dirty: &mut bool,
 ) -> HashMap<String, RootExeCandidate> {
     let mut out = HashMap::new();
     let known_loc_keys: HashSet<String> = catalog_apps
@@ -1041,7 +1169,7 @@ fn probe_candidate_executables(
         {
             return;
         }
-        if let Some(cand) = probe_dir_for_main_exe(path, name) {
+        if let Some(cand) = probe_dir_for_main_exe(path, name, cache, cache_dirty) {
             out.insert(pk, cand);
         }
     };
@@ -1092,7 +1220,7 @@ fn probe_candidate_executables(
         match pin.kind {
             PinKind::App => {
                 let pk = normalize_path_key(&pin.path);
-                if let Some(cand) = probe_dir_for_main_exe(&pin.path, leaf) {
+                if let Some(cand) = probe_dir_for_main_exe(&pin.path, leaf, cache, cache_dirty) {
                     out.insert(pk, cand);
                 }
             }
@@ -1103,7 +1231,9 @@ fn probe_candidate_executables(
                             let child_p = normalize_windows_path(&ent.path().to_string_lossy());
                             let child_n = ent.file_name().to_string_lossy().to_string();
                             let cpk = normalize_path_key(&child_p);
-                            if let Some(cand) = probe_dir_for_main_exe(&child_p, &child_n) {
+                            if let Some(cand) =
+                                probe_dir_for_main_exe(&child_p, &child_n, cache, cache_dirty)
+                            {
                                 out.insert(cpk, cand);
                             }
                         }
@@ -1112,6 +1242,77 @@ fn probe_candidate_executables(
             }
             PinKind::Personal | PinKind::Ignore => {}
         }
+    }
+
+    out
+}
+
+fn probe_install_root_exes(
+    catalog_apps: &[InstalledApp],
+    manifest_entries: &[ManifestAppEntry],
+    cache: &mut ExeEvidenceCache,
+    cache_dirty: &mut bool,
+) -> HashMap<String, RootExeCandidate> {
+    let mut out = HashMap::new();
+    let mut visited = HashSet::new();
+
+    let mut probe_root = |loc: &str, icon_hint: Option<&str>| {
+        let lk = normalize_path_key(loc);
+        if lk.len() <= 3 || !visited.insert(lk.clone()) {
+            return;
+        }
+        if let Some(icon_raw) = icon_hint {
+            if let Some(icon_exe) = extract_exe_path_from_command(icon_raw) {
+                let p = Path::new(&icon_exe);
+                let base = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if icon_exe.to_ascii_lowercase().ends_with(".exe")
+                    && is_subpath_of(&icon_exe, loc)
+                    && is_plausible_main_exe_name(base)
+                {
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        if meta.is_file() {
+                            let (size, secs, nanos) = file_size_and_mtime(&meta);
+                            if size >= 16_384 {
+                                if let Some(cand) = read_principal_exe_evidence_cached(
+                                    p,
+                                    size,
+                                    secs,
+                                    nanos,
+                                    None,
+                                    cache,
+                                    cache_dirty,
+                                ) {
+                                    out.insert(lk, cand);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if Path::new(loc).is_dir() {
+            let leaf = Path::new(loc)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if let Some(cand) = probe_dir_for_main_exe(loc, leaf, cache, cache_dirty) {
+                out.insert(lk, cand);
+            }
+        }
+    };
+
+    for app in catalog_apps {
+        if app.is_store_fallback || app.id.starts_with("synth:") {
+            continue;
+        }
+        let icon_hint = app.display_icon.as_deref();
+        for loc in &app.all_install_locations {
+            probe_root(loc, icon_hint);
+        }
+    }
+    for m in manifest_entries {
+        probe_root(&m.install_dir, m.display_icon.as_deref());
     }
 
     out
@@ -1346,6 +1547,7 @@ pub fn execute_scoped_fixture_scan_for_test(
             steam_library_roots: &[],
             root_exe_candidates: None,
             services: &[],
+            evidence: EvidenceBundle::default(),
         },
     );
     (report, walked_letters)
@@ -1492,6 +1694,9 @@ fn execute_scan_internal(
         &mut catalog.apps,
     );
     manifest_entries.extend(steam_manifests);
+    let evidence_cache_path = ExeEvidenceCache::default_path();
+    let mut evidence_cache = ExeEvidenceCache::load_or_default(&evidence_cache_path);
+    let mut evidence_cache_dirty = false;
     let root_exe_candidates = probe_candidate_executables(
         &walked_roots,
         config,
@@ -1499,7 +1704,35 @@ fn execute_scan_internal(
         &manifest_entries,
         &steam_lib_roots,
         &shell_folders,
+        &mut evidence_cache,
+        &mut evidence_cache_dirty,
     );
+    let install_root_exes = probe_install_root_exes(
+        &catalog.apps,
+        &manifest_entries,
+        &mut evidence_cache,
+        &mut evidence_cache_dirty,
+    );
+    if evidence_cache_dirty {
+        let _ = evidence_cache.save_atomic(&evidence_cache_path);
+    }
+
+    let app_path_evidence: Vec<AppPathEvidence> = crate::app_paths::enumerate_app_paths()
+        .into_iter()
+        .map(|e| AppPathEvidence {
+            exe_name: e.exe_name,
+            target_path: e.target_path,
+        })
+        .collect();
+    let shortcut_evidence: Vec<ShortcutEvidence> =
+        crate::start_menu::enumerate_start_menu_shortcuts()
+            .into_iter()
+            .map(|s| ShortcutEvidence {
+                display_name: s.display_name,
+                target_path: s.target_path,
+                shortcut_path: s.shortcut_path,
+            })
+            .collect();
 
     let mut all_units: Vec<ScannedUnit> = Vec::new();
     let decomp_opts = DecompositionOptions {
@@ -1547,6 +1780,11 @@ fn execute_scan_internal(
         steam_library_roots: &steam_lib_roots,
         root_exe_candidates: Some(&root_exe_candidates),
         services: &services,
+        evidence: EvidenceBundle {
+            install_root_exes: Some(&install_root_exes),
+            app_paths: &app_path_evidence,
+            shortcuts: &shortcut_evidence,
+        },
     };
     let mut report = attribute_scan_with_options(
         ts_unix,

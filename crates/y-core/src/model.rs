@@ -76,6 +76,11 @@ pub enum AttributionBasis {
     ContainerRule,
     ExecutableScan,
     CompanionReunion,
+    Signature,
+    VersionResource,
+    AppPaths,
+    Shortcut,
+    ServiceRegistration,
     ManualPin,
 }
 
@@ -95,6 +100,11 @@ impl AttributionBasis {
             Self::ContainerRule => "layout rule",
             Self::ExecutableScan => "executable scan (inferred)",
             Self::CompanionReunion => "companion reunion",
+            Self::Signature => "signature",
+            Self::VersionResource => "version resource",
+            Self::AppPaths => "App Paths",
+            Self::Shortcut => "shortcut",
+            Self::ServiceRegistration => "service registration",
             Self::ManualPin => "manual pin",
         }
     }
@@ -546,6 +556,18 @@ pub struct UnattributedItem {
     pub is_loose_files: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceCuratedConflict {
+    pub path: String,
+    pub bytes: u64,
+    pub evidence_app_id: String,
+    pub evidence_app_name: String,
+    pub evidence_basis: AttributionBasis,
+    pub evidence_detail: String,
+    pub curated_app_id: String,
+    pub curated_app_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     pub scan_timestamp_unix: u64,
@@ -576,6 +598,8 @@ pub struct ScanReport {
     pub applied_containers: Option<crate::config::ContainerRulebook>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_zones: Option<crate::config::ZoneRulebook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_curated_conflicts: Vec<EvidenceCuratedConflict>,
 }
 
 impl ScanReport {

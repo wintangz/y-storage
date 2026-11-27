@@ -1279,6 +1279,7 @@ mod tests {
             warnings: vec![],
             applied_containers: None,
             applied_zones: None,
+            evidence_curated_conflicts: vec![],
         };
         let mut stale = FacetFilters {
             publisher: Some("Vanished Publisher".into()),

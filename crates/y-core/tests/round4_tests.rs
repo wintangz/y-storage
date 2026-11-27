@@ -336,6 +336,7 @@ fn executable_inference_pe_product_name_and_os_folder_exclusion_behave_conservat
             exe_path: r"D:\PortableTool\sampler.exe".into(),
             product_name: prod,
             company_name: None,
+            signer_org: None,
         },
     );
 

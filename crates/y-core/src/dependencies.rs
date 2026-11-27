@@ -1296,6 +1296,7 @@ mod tests {
             warnings: vec![],
             applied_containers: None,
             applied_zones: None,
+            evidence_curated_conflicts: vec![],
         };
         let mut ev = HashMap::new();
         ev.insert("reg:edge".into(), AppBinaryEvidence::default());

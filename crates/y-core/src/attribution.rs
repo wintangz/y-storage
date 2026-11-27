@@ -3,16 +3,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::config::{ContainerRulebook, PinKind, ZoneRulebook};
 use crate::dependencies::WindowsServiceEntry;
 use crate::discovery::{
-    AppTokenMatchKind, contains_whole_token_sequence, extract_guid,
+    AppTokenMatchKind, contains_whole_token_sequence, extract_exe_path_from_command, extract_guid,
     has_windows_service_registration_evidence, is_subpath_of, match_adobe_product_subfolder,
     match_app_predicate, normalize_app_token, normalize_path_key, path_drive_letter,
     split_alnum_words, versioned_family_identity_key,
 };
 use crate::history::{HistoryEntryRef, ScanHistory, compute_growth, recompute_report_growth_from_history};
 use crate::model::{
-    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, GrowthDelta, InstalledApp,
-    LocationQualifier, ManifestAppEntry, NoTouchCategory, RegistryDiscoveryStats, ScanReport,
-    ScannedUnit, ScannedUnitKind, SystemDriveBreakdown, UnattributedItem, ZoneKind,
+    AttributedApp, AttributionBasis, BreakdownItem, DriveInfo, EvidenceCuratedConflict,
+    GrowthDelta, InstalledApp, LocationQualifier, ManifestAppEntry, NoTouchCategory,
+    RegistryDiscoveryStats, ScanReport, ScannedUnit, ScannedUnitKind, SystemDriveBreakdown,
+    UnattributedItem, ZoneKind,
 };
 use crate::tree::{is_non_app_internal_subdir_name, is_program_files_inbox_folder};
 use crate::zones::classify_zone;
@@ -22,6 +23,27 @@ pub struct RootExeCandidate {
     pub exe_path: String,
     pub product_name: Option<String>,
     pub company_name: Option<String>,
+    pub signer_org: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppPathEvidence {
+    pub exe_name: String,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutEvidence {
+    pub display_name: String,
+    pub target_path: String,
+    pub shortcut_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceBundle<'a> {
+    pub install_root_exes: Option<&'a HashMap<String, RootExeCandidate>>,
+    pub app_paths: &'a [AppPathEvidence],
+    pub shortcuts: &'a [ShortcutEvidence],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +54,7 @@ pub struct AttributionOptions<'a> {
     pub steam_library_roots: &'a [String],
     pub root_exe_candidates: Option<&'a HashMap<String, RootExeCandidate>>,
     pub services: &'a [WindowsServiceEntry],
+    pub evidence: EvidenceBundle<'a>,
 }
 
 struct AppBucket {
@@ -227,6 +250,11 @@ pub fn attribute_scan_with_options(
             }
         }
     }
+
+    let registered_limit = buckets.len();
+    let registered_evidence =
+        build_registered_app_evidence_index(&buckets, registered_limit, options);
+    let mut evidence_curated_conflicts: Vec<EvidenceCuratedConflict> = Vec::new();
 
     // If C:\XboxGames\Minecraft Launcher exists as a scanned non-empty MSIXVC unit without a Win32 Uninstall
     // registry entry, pre-seed the "Minecraft Launcher" bucket so AppData\Roaming\.minecraft (visited earlier
@@ -596,6 +624,75 @@ pub fn attribute_scan_with_options(
             continue;
         }
 
+        // Evidence step: after registered roots + manifest containers, BEFORE the curated routing table.
+        let mut refused_single_medium_apps: HashSet<usize> = HashSet::new();
+        if !is_unclaimed_manifest_sibling(&path_lower, &manifest_container_keys) {
+            match evaluate_folder_evidence(
+                &buckets,
+                &registered_evidence,
+                &path_lower,
+                &leaf,
+                options,
+                &exe_children_by_parent,
+            ) {
+                EvidenceOutcome::Claim(claim) => {
+                    if let Some((curated_id, curated_name)) = peek_curated_route(
+                        &buckets,
+                        &store_buckets,
+                        guid_to_app_name,
+                        &path_lower,
+                        &leaf,
+                        &leaf_lower,
+                    ) {
+                        if curated_id != buckets[claim.winner_idx].app.id {
+                            evidence_curated_conflicts.push(EvidenceCuratedConflict {
+                                path: unit.path.clone(),
+                                bytes: unit.bytes,
+                                evidence_app_id: buckets[claim.winner_idx].app.id.clone(),
+                                evidence_app_name: buckets[claim.winner_idx].app.display_name.clone(),
+                                evidence_basis: claim.basis,
+                                evidence_detail: claim.basis_detail.clone(),
+                                curated_app_id: curated_id,
+                                curated_app_name: curated_name,
+                            });
+                        }
+                    }
+                    if buckets[claim.winner_idx].app.direct_install_location.is_none()
+                        && buckets[claim.winner_idx].app.inferred_install_location.is_none()
+                    {
+                        buckets[claim.winner_idx].app.inferred_install_location =
+                            Some(unit.path.clone());
+                    }
+                    if buckets[claim.winner_idx].app.display_icon.is_none() {
+                        if let Some(icon_exe) = claim.exe_icon_path {
+                            buckets[claim.winner_idx].app.display_icon = Some(icon_exe);
+                        }
+                    }
+                    let (zone, qual) = classify_zone(&unit.path, true);
+                    let nt = buckets[claim.winner_idx].app.no_touch;
+                    push_item_to_bucket(
+                        &mut buckets[claim.winner_idx],
+                        BreakdownItem {
+                            path: unit.path.clone(),
+                            bytes: unit.bytes,
+                            zone: Some(zone),
+                            qualifier: qual,
+                            basis: Some(claim.basis),
+                            basis_detail: Some(claim.basis_detail),
+                            no_touch: nt,
+                            drive_letter: d_letter,
+                        },
+                        claim.basis,
+                    );
+                    continue;
+                }
+                EvidenceOutcome::RefusedSingleMedium(vetoed) => {
+                    refused_single_medium_apps = vetoed;
+                }
+                EvidenceOutcome::None => {}
+            }
+        }
+
         // Part E: Adobe shared containers (`Common Files\Adobe`, `AppData\*\Adobe`, `com.adobe.dunamis`)
         // attribute product-named subfolders to their installed Adobe product app and route unidentifiable
         // residue to a genuinely registered Creative Cloud app or the family label `"Adobe (shared data)"`.
@@ -907,7 +1004,9 @@ pub fn attribute_scan_with_options(
                     &leaf,
                     options.root_exe_candidates,
                     &exe_children_by_parent,
-                ) {
+                )
+                .filter(|(idx, _)| !refused_single_medium_apps.contains(idx))
+                {
                     if buckets[parent_idx].app.direct_install_location.is_none()
                         && buckets[parent_idx].app.inferred_install_location.is_none()
                     {
@@ -1232,6 +1331,7 @@ pub fn attribute_scan_with_options(
         warnings: Vec::new(),
         applied_containers: options.containers.cloned(),
         applied_zones: Some(effective_zones),
+        evidence_curated_conflicts,
     }
 }
 
@@ -1447,6 +1547,17 @@ pub fn merge_drive_rescan(
     merged_sys.sort_by_key(|s| s.drive_letter.to_ascii_uppercase());
     let windows_system_total_bytes = merged_sys.iter().map(|s| s.total_bytes).sum();
 
+    let mut merged_conflicts: Vec<EvidenceCuratedConflict> = base_report
+        .evidence_curated_conflicts
+        .iter()
+        .filter(|c| {
+            path_drive_letter(&c.path)
+                .is_none_or(|dl| dl.to_ascii_uppercase() != target)
+        })
+        .cloned()
+        .collect();
+    merged_conflicts.extend(single_drive_report.evidence_curated_conflicts);
+
     let mut merged = ScanReport {
         scan_timestamp_unix: single_drive_report.scan_timestamp_unix,
         scan_timestamp_display: single_drive_report.scan_timestamp_display,
@@ -1480,6 +1591,7 @@ pub fn merge_drive_rescan(
         applied_zones: single_drive_report
             .applied_zones
             .or_else(|| base_report.applied_zones.clone()),
+        evidence_curated_conflicts: merged_conflicts,
     };
 
     // Preserve growth baselines for untouched apps, and recompute per-drive growth strictly for
@@ -2079,6 +2191,670 @@ fn try_reunite_component_folder(
             buckets[idx].app.display_name
         ),
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EvidenceFamily {
+    Signature,
+    AppPaths,
+    Shortcut,
+    ServiceRegistration,
+    VersionResource,
+    Stem,
+    Containment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EvidenceStrength {
+    Weak = 1,
+    Medium = 2,
+    Strong = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ClaimGrade {
+    MediumPlusWeak = 1,
+    TwoMedium = 2,
+    Strong = 3,
+}
+
+#[derive(Debug, Clone)]
+struct EvidenceSignal {
+    family: EvidenceFamily,
+    strength: EvidenceStrength,
+    basis: AttributionBasis,
+    detail: String,
+    exe_icon_path: Option<String>,
+}
+
+struct RegisteredAppEvidence {
+    bucket_idx: usize,
+    signer_orgs_lower: Vec<String>,
+    signer_orgs_norm: Vec<String>,
+    known_exe_paths: HashSet<String>,
+    known_exe_names: HashSet<String>,
+    norm_publishers: Vec<String>,
+    install_loc_keys: Vec<String>,
+}
+
+struct FolderEvidenceClaim {
+    winner_idx: usize,
+    basis: AttributionBasis,
+    basis_detail: String,
+    exe_icon_path: Option<String>,
+}
+
+enum EvidenceOutcome {
+    Claim(FolderEvidenceClaim),
+    RefusedSingleMedium(HashSet<usize>),
+    None,
+}
+
+const GENERIC_STUB_EXE_NAMES: &[&str] = &[
+    "setup.exe",
+    "install.exe",
+    "uninstall.exe",
+    "unins000.exe",
+    "unins001.exe",
+    "update.exe",
+    "updater.exe",
+    "launcher.exe",
+    "helper.exe",
+    "app.exe",
+    "main.exe",
+    "run.exe",
+    "start.exe",
+    "client.exe",
+    "server.exe",
+    "service.exe",
+    "daemon.exe",
+    "host.exe",
+    "tool.exe",
+    "stub.exe",
+    "bootstrapper.exe",
+];
+
+const GENERIC_PRODUCT_OVERLAP_STOPWORDS: &[&str] = &[
+    "app",
+    "application",
+    "applications",
+    "client",
+    "desktop",
+    "edition",
+    "for",
+    "free",
+    "helper",
+    "installer",
+    "launcher",
+    "microsoft",
+    "pro",
+    "runtime",
+    "service",
+    "services",
+    "setup",
+    "software",
+    "studio",
+    "system",
+    "the",
+    "tool",
+    "tools",
+    "update",
+    "updater",
+    "utility",
+    "version",
+    "win32",
+    "win64",
+    "windows",
+    "x64",
+    "x86",
+];
+
+fn is_generic_stub_exe_name(lower_name: &str) -> bool {
+    GENERIC_STUB_EXE_NAMES.contains(&lower_name)
+}
+
+fn is_generic_windows_system_exe(exe_key: &str) -> bool {
+    exe_key.contains("\\windows\\")
+        || exe_key.ends_with("\\msiexec.exe")
+        || exe_key.ends_with("\\rundll32.exe")
+        || exe_key.ends_with("\\cmd.exe")
+        || exe_key.ends_with("\\powershell.exe")
+        || exe_key.ends_with("\\explorer.exe")
+}
+
+fn exe_basename_lower(exe_key: &str) -> &str {
+    exe_key.rsplit('\\').next().unwrap_or(exe_key)
+}
+
+fn build_registered_app_evidence_index(
+    buckets: &[AppBucket],
+    registered_limit: usize,
+    options: &AttributionOptions<'_>,
+) -> Vec<RegisteredAppEvidence> {
+    let limit = registered_limit.min(buckets.len());
+    let mut out = Vec::new();
+    for (i, b) in buckets[..limit].iter().enumerate() {
+        if b.app.is_store_fallback || b.app.id.starts_with("synth:") {
+            continue;
+        }
+        let mut signer_orgs_lower = Vec::new();
+        let mut signer_orgs_norm = Vec::new();
+        let mut known_exe_paths = HashSet::new();
+        let mut known_exe_names = HashSet::new();
+        let mut install_loc_keys = Vec::new();
+
+        let mut push_signer = |org: &str| {
+            let low = org.trim().to_ascii_lowercase();
+            if !low.is_empty() && !signer_orgs_lower.contains(&low) {
+                signer_orgs_lower.push(low);
+            }
+            let norm = normalize_company_identity(org);
+            if !norm.is_empty() && !signer_orgs_norm.contains(&norm) {
+                signer_orgs_norm.push(norm);
+            }
+        };
+
+        let mut push_exe = |raw_exe: &str| {
+            let ek = normalize_path_key(raw_exe);
+            if ek.ends_with(".exe") && !is_generic_windows_system_exe(&ek) {
+                let base = exe_basename_lower(&ek).to_string();
+                if !is_generic_stub_exe_name(&base) {
+                    known_exe_names.insert(base);
+                }
+                known_exe_paths.insert(ek);
+            }
+        };
+
+        for loc in &b.app.all_install_locations {
+            let lk = normalize_path_key(loc);
+            if lk.len() > 3 && !install_loc_keys.contains(&lk) {
+                install_loc_keys.push(lk.clone());
+            }
+            if let Some(cand) = options
+                .evidence
+                .install_root_exes
+                .and_then(|m| m.get(&lk))
+                .or_else(|| options.root_exe_candidates.and_then(|m| m.get(&lk)))
+            {
+                push_exe(&cand.exe_path);
+                if let Some(ref org) = cand.signer_org {
+                    push_signer(org);
+                }
+            }
+        }
+
+        if let Some(ref icon_cmd) = b.app.display_icon {
+            if let Some(exe) = extract_exe_path_from_command(icon_cmd) {
+                push_exe(&exe);
+            }
+        }
+
+        let mut norm_publishers = Vec::new();
+        for p in &b.app.publishers {
+            let norm = normalize_company_identity(p);
+            if norm.len() >= 3 && !norm_publishers.contains(&norm) {
+                norm_publishers.push(norm);
+            }
+        }
+
+        out.push(RegisteredAppEvidence {
+            bucket_idx: i,
+            signer_orgs_lower,
+            signer_orgs_norm,
+            known_exe_paths,
+            known_exe_names,
+            norm_publishers,
+            install_loc_keys,
+        });
+    }
+    out
+}
+
+fn signer_matches_app(signer_org: &str, app_ev: &RegisteredAppEvidence) -> bool {
+    let low = signer_org.trim().to_ascii_lowercase();
+    if low.is_empty() {
+        return false;
+    }
+    if app_ev.signer_orgs_lower.contains(&low) {
+        return true;
+    }
+    let norm = normalize_company_identity(signer_org);
+    !norm.is_empty() && app_ev.signer_orgs_norm.contains(&norm)
+}
+
+fn product_token_matches_app(product: &str, app: &InstalledApp) -> bool {
+    let pt = product.trim();
+    if normalize_app_token(pt).len() < 3 {
+        return false;
+    }
+    let matches_name = |app_name: &str| {
+        match_app_predicate(pt, app_name).is_some()
+            || match_app_predicate(app_name, pt) == Some(AppTokenMatchKind::ExactFullToken)
+    };
+    matches_name(&app.display_name) || app.aliases.iter().any(|al| matches_name(al))
+}
+
+fn meaningful_product_stems(text: &str, publisher_words: &HashSet<String>) -> Vec<String> {
+    let all_words: Vec<String> = split_alnum_words(text)
+        .into_iter()
+        .filter(|w| {
+            let alpha_only = w.chars().all(|c| c.is_ascii_alphabetic());
+            let is_ver = w.starts_with('v') && w[1..].chars().all(|c| c.is_ascii_digit());
+            let is_num = w.chars().all(|c| c.is_ascii_digit());
+            !is_num
+                && !is_ver
+                && w.len() >= 3
+                && (!alpha_only || !GENERIC_PRODUCT_OVERLAP_STOPWORDS.contains(&w.as_str()))
+        })
+        .collect();
+    let without_pub: Vec<String> = all_words
+        .iter()
+        .filter(|w| !publisher_words.contains(*w))
+        .cloned()
+        .collect();
+    if without_pub.is_empty() {
+        all_words
+    } else {
+        without_pub
+    }
+}
+
+fn product_stem_overlaps_app(
+    product: &str,
+    app: &InstalledApp,
+    norm_publishers: &[String],
+) -> bool {
+    if product_token_matches_app(product, app) {
+        return true;
+    }
+    let mut pub_words = HashSet::new();
+    for np in norm_publishers {
+        for w in split_alnum_words(np) {
+            if w.len() >= 3 {
+                pub_words.insert(w);
+            }
+        }
+    }
+    let prod_stems = meaningful_product_stems(product, &pub_words);
+    if prod_stems.is_empty() {
+        return false;
+    }
+    let check_name = |name: &str| {
+        let app_stems = meaningful_product_stems(name, &pub_words);
+        prod_stems.iter().any(|ps| {
+            app_stems.iter().any(|as_| {
+                ps == as_
+                    || (ps.len() >= 4
+                        && as_.len() >= 4
+                        && (ps.starts_with(as_.as_str()) || as_.starts_with(ps.as_str())))
+            })
+        })
+    };
+    check_name(&app.display_name) || app.aliases.iter().any(|al| check_name(al))
+}
+
+fn evaluate_folder_evidence(
+    buckets: &[AppBucket],
+    registered_evidence: &[RegisteredAppEvidence],
+    path_lower: &str,
+    leaf: &str,
+    options: &AttributionOptions<'_>,
+    exe_children_by_parent: &HashMap<String, Vec<(&String, &RootExeCandidate)>>,
+) -> EvidenceOutcome {
+    if registered_evidence.is_empty() {
+        return EvidenceOutcome::None;
+    }
+    let principal_exe: Option<&RootExeCandidate> = options
+        .root_exe_candidates
+        .and_then(|m| m.get(path_lower))
+        .or_else(|| {
+            exe_children_by_parent
+                .get(path_lower)
+                .and_then(|v| if v.len() == 1 { Some(v[0].1) } else { None })
+        });
+    let cand_exe_key: Option<String> = principal_exe.map(|c| normalize_path_key(&c.exe_path));
+
+    let leaf_first_alpha = leaf.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+    let leaf_compact: String = leaf
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let leaf_norm_tok = normalize_app_token(leaf);
+
+    // Filter AppPaths, Shortcuts, and Services targeting inside this folder once per unit.
+    let folder_app_paths: Vec<(&AppPathEvidence, String)> = options
+        .evidence
+        .app_paths
+        .iter()
+        .filter_map(|ap| {
+            let tk = normalize_path_key(&ap.target_path);
+            if tk.ends_with(".exe") && is_subpath_of(&tk, path_lower) {
+                Some((ap, tk))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let folder_shortcuts: Vec<(&ShortcutEvidence, String)> = options
+        .evidence
+        .shortcuts
+        .iter()
+        .filter_map(|sc| {
+            let tk = normalize_path_key(&sc.target_path);
+            if tk.ends_with(".exe") && is_subpath_of(&tk, path_lower) {
+                Some((sc, tk))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let folder_services: Vec<(&WindowsServiceEntry, String)> = options
+        .services
+        .iter()
+        .filter_map(|svc| {
+            let ik = normalize_path_key(&svc.normalized_image_path);
+            if ik.ends_with(".exe") && is_subpath_of(&ik, path_lower) {
+                Some((svc, ik))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let exe_company_norm: Option<String> = principal_exe
+        .and_then(|c| c.company_name.as_deref())
+        .map(normalize_company_identity)
+        .filter(|s| s.len() >= 3);
+    let exe_product: Option<&str> = principal_exe
+        .and_then(|c| c.product_name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let exe_signer: Option<&str> = principal_exe
+        .and_then(|c| c.signer_org.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut qualifiers: Vec<(usize, ClaimGrade, Vec<EvidenceSignal>)> = Vec::new();
+    let mut single_medium_only: HashSet<usize> = HashSet::new();
+
+    for app_ev in registered_evidence {
+        let app = &buckets[app_ev.bucket_idx].app;
+        let mut by_family: HashMap<EvidenceFamily, EvidenceSignal> = HashMap::new();
+        let mut record_signal = |sig: EvidenceSignal| {
+            let replace = by_family
+                .get(&sig.family)
+                .is_none_or(|prev| sig.strength > prev.strength);
+            if replace {
+                by_family.insert(sig.family, sig);
+            }
+        };
+
+        // 1. STRONG: Signature (signer org matches install-root signer org AND ProductName token-matches app).
+        if let (Some(ce), Some(signer), Some(pn)) = (principal_exe, exe_signer, exe_product) {
+            if signer_matches_app(signer, app_ev) && product_token_matches_app(pn, app) {
+                let exe_name = exe_basename_lower(cand_exe_key.as_deref().unwrap_or(""));
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::Signature,
+                    strength: EvidenceStrength::Strong,
+                    basis: AttributionBasis::Signature,
+                    detail: format!("signature: signer={signer} + product={pn} ({exe_name})"),
+                    exe_icon_path: Some(ce.exe_path.clone()),
+                });
+            }
+        }
+
+        // 2. STRONG: App Paths entry targeting inside this folder (exe-path equality) resolving to this app.
+        for (ap, tk) in &folder_app_paths {
+            let exe_eq = cand_exe_key
+                .as_deref()
+                .is_none_or(|ck| tk == ck || app_ev.known_exe_paths.contains(tk));
+            if !exe_eq {
+                continue;
+            }
+            let ap_exe_lower = ap.exe_name.trim().to_ascii_lowercase();
+            let ap_stem = ap_exe_lower.strip_suffix(".exe").unwrap_or(&ap_exe_lower);
+            let resolves_to_app = app_ev.known_exe_paths.contains(tk)
+                || (!is_generic_stub_exe_name(&ap_exe_lower)
+                    && app_ev.known_exe_names.contains(&ap_exe_lower))
+                || (!is_generic_stub_exe_name(&ap_exe_lower)
+                    && ap_stem.len() >= 3
+                    && product_token_matches_app(ap_stem, app));
+            if resolves_to_app {
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::AppPaths,
+                    strength: EvidenceStrength::Strong,
+                    basis: AttributionBasis::AppPaths,
+                    detail: format!("App Paths: {} -> {}", ap.exe_name, ap.target_path),
+                    exe_icon_path: Some(ap.target_path.clone()),
+                });
+                break;
+            }
+        }
+
+        // 3. STRONG: Start Menu shortcut targeting inside this folder (exe-path equality) resolving to this app.
+        for (sc, tk) in &folder_shortcuts {
+            let exe_eq = cand_exe_key
+                .as_deref()
+                .is_none_or(|ck| tk == ck || app_ev.known_exe_paths.contains(tk));
+            if !exe_eq {
+                continue;
+            }
+            let resolves_to_app = app_ev.known_exe_paths.contains(tk)
+                || product_token_matches_app(&sc.display_name, app);
+            if resolves_to_app {
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::Shortcut,
+                    strength: EvidenceStrength::Strong,
+                    basis: AttributionBasis::Shortcut,
+                    detail: format!("shortcut: {} -> {}", sc.display_name, sc.target_path),
+                    exe_icon_path: Some(sc.target_path.clone()),
+                });
+                break;
+            }
+        }
+
+        // 4. STRONG / MEDIUM: Service ImagePath inside this folder.
+        for (svc, ik) in &folder_services {
+            let strong_match = cand_exe_key
+                .as_deref()
+                .is_none_or(|ck| ik == ck || app_ev.known_exe_paths.contains(ik))
+                && app_ev.known_exe_paths.contains(ik);
+            if strong_match {
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::ServiceRegistration,
+                    strength: EvidenceStrength::Strong,
+                    basis: AttributionBasis::ServiceRegistration,
+                    detail: format!(
+                        "service registration: {} -> {}",
+                        svc.service_name, svc.normalized_image_path
+                    ),
+                    exe_icon_path: Some(svc.normalized_image_path.clone()),
+                });
+                break;
+            }
+            let svc_label = if svc.display_name.trim().is_empty() {
+                svc.service_name.as_str()
+            } else {
+                svc.display_name.as_str()
+            };
+            if product_token_matches_app(svc_label, app)
+                || product_token_matches_app(&svc.service_name, app)
+            {
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::ServiceRegistration,
+                    strength: EvidenceStrength::Medium,
+                    basis: AttributionBasis::ServiceRegistration,
+                    detail: format!(
+                        "service registration: {} ({})",
+                        svc_label, svc.service_name
+                    ),
+                    exe_icon_path: Some(svc.normalized_image_path.clone()),
+                });
+            }
+        }
+
+        // 5. MEDIUM: Version resource CompanyName == app publisher (normalised) AND ProductName stem-overlaps.
+        if let (Some(ce), Some(cn), Some(pn)) = (principal_exe, exe_company_norm.as_deref(), exe_product)
+        {
+            if app_ev.norm_publishers.iter().any(|p| p == cn)
+                && product_stem_overlaps_app(pn, app, &app_ev.norm_publishers)
+            {
+                let exe_name = exe_basename_lower(cand_exe_key.as_deref().unwrap_or(""));
+                let raw_co = ce.company_name.as_deref().unwrap_or(cn).trim();
+                record_signal(EvidenceSignal {
+                    family: EvidenceFamily::VersionResource,
+                    strength: EvidenceStrength::Medium,
+                    basis: AttributionBasis::VersionResource,
+                    detail: format!(
+                        "version resource: company={raw_co} + product={pn} ({exe_name})"
+                    ),
+                    exe_icon_path: Some(ce.exe_path.clone()),
+                });
+            }
+        }
+
+        // 6. WEAK: Stem / Containment signals (only collected as independent corroborators for a MEDIUM signal).
+        let stem_weak = (leaf_first_alpha
+            && leaf_compact.len() >= 4
+            && leaf_matches_app_stem_tier2(&leaf_compact, &app.display_name))
+            || (leaf_norm_tok.len() >= 3
+                && normalize_app_token(&app.display_name) == leaf_norm_tok);
+        if stem_weak {
+            record_signal(EvidenceSignal {
+                family: EvidenceFamily::Stem,
+                strength: EvidenceStrength::Weak,
+                basis: AttributionBasis::VersionResource,
+                detail: format!("stem match ({leaf})"),
+                exe_icon_path: None,
+            });
+        }
+        if app_ev
+            .install_loc_keys
+            .iter()
+            .any(|loc| is_subpath_of(path_lower, loc))
+        {
+            record_signal(EvidenceSignal {
+                family: EvidenceFamily::Containment,
+                strength: EvidenceStrength::Weak,
+                basis: AttributionBasis::VersionResource,
+                detail: "install-root containment".to_string(),
+                exe_icon_path: None,
+            });
+        }
+
+        let strong_count = by_family
+            .values()
+            .filter(|s| s.strength == EvidenceStrength::Strong)
+            .count();
+        let medium_count = by_family
+            .values()
+            .filter(|s| s.strength == EvidenceStrength::Medium)
+            .count();
+        let weak_count = by_family
+            .values()
+            .filter(|s| s.strength == EvidenceStrength::Weak)
+            .count();
+
+        let grade = if strong_count >= 1 {
+            Some(ClaimGrade::Strong)
+        } else if medium_count >= 2 {
+            Some(ClaimGrade::TwoMedium)
+        } else if medium_count >= 1 && weak_count >= 1 {
+            Some(ClaimGrade::MediumPlusWeak)
+        } else {
+            None
+        };
+
+        if let Some(g) = grade {
+            let mut sigs: Vec<EvidenceSignal> = by_family.into_values().collect();
+            sigs.sort_by(|a, b| {
+                b.strength
+                    .cmp(&a.strength)
+                    .then_with(|| a.family.cmp(&b.family))
+            });
+            qualifiers.push((app_ev.bucket_idx, g, sigs));
+        } else if medium_count == 1 && weak_count == 0 {
+            single_medium_only.insert(app_ev.bucket_idx);
+        }
+    }
+
+    let Some(best_grade) = qualifiers.iter().map(|(_, g, _)| *g).max() else {
+        return if single_medium_only.is_empty() {
+            EvidenceOutcome::None
+        } else {
+            EvidenceOutcome::RefusedSingleMedium(single_medium_only)
+        };
+    };
+    let mut top: Vec<(usize, Vec<EvidenceSignal>)> = qualifiers
+        .into_iter()
+        .filter(|(_, g, _)| *g == best_grade)
+        .map(|(idx, _, sigs)| (idx, sigs))
+        .collect();
+    // Constitutional rule: equal-grade conflict between 2+ apps = no claim.
+    if top.len() != 1 {
+        return EvidenceOutcome::None;
+    }
+
+    let Some((winner_idx, sigs)) = top.pop() else {
+        return EvidenceOutcome::None;
+    };
+    let primary = &sigs[0];
+    let basis_detail = if best_grade == ClaimGrade::Strong {
+        primary.detail.clone()
+    } else if let Some(secondary) = sigs.get(1) {
+        format!("{} + {}", primary.detail, secondary.detail)
+    } else {
+        primary.detail.clone()
+    };
+    let exe_icon_path = sigs.iter().find_map(|s| s.exe_icon_path.clone());
+
+    EvidenceOutcome::Claim(FolderEvidenceClaim {
+        winner_idx,
+        basis: primary.basis,
+        basis_detail,
+        exe_icon_path,
+    })
+}
+
+/// Checks read-only whether the curated routing table (`resolve_adobe_shared_path` + `find_by_token`)
+/// would route `(path_lower, leaf)` to an app bucket, without mutating the real report buckets.
+fn peek_curated_route(
+    buckets: &[AppBucket],
+    store_buckets: &HashMap<String, usize>,
+    guid_to_app_name: &HashMap<String, String>,
+    path_lower: &str,
+    leaf: &str,
+    leaf_lower: &str,
+) -> Option<(String, String)> {
+    let mut tmp_buckets: Vec<AppBucket> = buckets
+        .iter()
+        .map(|b| AppBucket {
+            app: b.app.clone(),
+            bases: Vec::new(),
+            items: Vec::new(),
+            total_bytes: 0,
+        })
+        .collect();
+    let mut tmp_store = store_buckets.clone();
+    if let Some((idx, _)) = resolve_adobe_shared_path(&mut tmp_buckets, &mut tmp_store, path_lower, false) {
+        let app = &tmp_buckets[idx].app;
+        return Some((app.id.clone(), app.display_name.clone()));
+    }
+    if let Some((idx, _)) = find_by_token(
+        &mut tmp_buckets,
+        &mut tmp_store,
+        guid_to_app_name,
+        path_lower,
+        leaf,
+        leaf_lower,
+    ) {
+        let app = &tmp_buckets[idx].app;
+        return Some((app.id.clone(), app.display_name.clone()));
+    }
+    None
 }
 
 enum TwoSegmentMatch {

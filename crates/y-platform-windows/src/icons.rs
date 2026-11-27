@@ -1183,6 +1183,7 @@ mod tests {
             warnings: vec![],
             applied_containers: None,
             applied_zones: None,
+            evidence_curated_conflicts: vec![],
         };
 
         populate_report_icons(&mut report);

@@ -585,6 +585,7 @@ fn f7_tier1_company_name_reunites_zxvm_with_quux_player_name_independently() {
             exe_path: r"D:\zxvm\zxvm_host.exe".into(),
             product_name: ver.product_name,
             company_name: ver.company_name,
+            signer_org: None,
         },
     );
 
@@ -657,6 +658,7 @@ fn tier1_contradiction_vetoes_tier2_stem_match() {
             exe_path: r"D:\Apps\acmeplayer9box\host.exe".into(),
             product_name: Some("Unrelated Tool".into()),
             company_name: Some("Rival Vendor Inc.".into()),
+            signer_org: None,
         },
     );
 

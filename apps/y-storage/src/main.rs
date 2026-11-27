@@ -648,6 +648,7 @@ fn build_synthetic_screenshot_report(drive_count: usize) -> (ScanReport, AppConf
         applied_zones: Some(ZoneRulebook::default()),
         catalog_source: "synthetic-layout".to_string(),
         warnings: vec![],
+        evidence_curated_conflicts: vec![],
     };
     (report, cfg)
 }
@@ -774,6 +775,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
             exe_path: r"D:\Apps\Adobe\Photoshop 2025\Photoshop.exe".into(),
             product_name: Some("Adobe Photoshop 2025".into()),
             company_name: None,
+            signer_org: None,
         },
     );
     exe_map.insert(
@@ -782,6 +784,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
             exe_path: r"D:\Apps\Adobe\Illustrator 2025\Illustrator.exe".into(),
             product_name: Some("Adobe Illustrator 2025".into()),
             company_name: None,
+            signer_org: None,
         },
     );
     exe_map.insert(
@@ -790,6 +793,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
             exe_path: r"D:\Apps\Adobe\Premiere Pro 2025\Premiere.exe".into(),
             product_name: Some("Adobe Premiere Pro 2025".into()),
             company_name: None,
+            signer_org: None,
         },
     );
 
@@ -856,6 +860,7 @@ fn build_group_node_fixture_screenshot_report() -> (ScanReport, AppConfig) {
             steam_library_roots: &[],
             root_exe_candidates: Some(&exe_map),
             services: &[],
+            evidence: y_core::attribution::EvidenceBundle::default(),
         },
     );
     y_core::categories::classify_report_apps(&mut report, |_| false);

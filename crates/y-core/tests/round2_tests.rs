@@ -465,6 +465,7 @@ fn epic_launcher_links_epic_online_services_in_both_directions_without_inflating
         warnings: vec![],
         applied_containers: None,
         applied_zones: None,
+        evidence_curated_conflicts: vec![],
     };
     let services = vec![
         WindowsServiceEntry {

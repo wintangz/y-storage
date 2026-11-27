@@ -8851,6 +8851,7 @@ mod tests {
             applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
+            evidence_curated_conflicts: vec![],
         };
 
         let ctx = egui::Context::default();
@@ -9059,6 +9060,7 @@ mod tests {
             applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
+            evidence_curated_conflicts: vec![],
         };
 
         let ctx = egui::Context::default();
@@ -9179,6 +9181,7 @@ mod tests {
             applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
+            evidence_curated_conflicts: vec![],
         };
 
         let ctx = egui::Context::default();
@@ -9367,6 +9370,7 @@ mod tests {
             applied_zones: None,
             catalog_source: "embedded".into(),
             warnings: vec![],
+            evidence_curated_conflicts: vec![],
         };
 
         let cfg = AppConfig::default();
@@ -9571,6 +9575,7 @@ mod tests {
             applied_zones: Some(zones),
             catalog_source: "embedded".into(),
             warnings: vec![],
+            evidence_curated_conflicts: vec![],
         };
         (report, cfg)
     }
