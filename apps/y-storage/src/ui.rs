@@ -296,6 +296,7 @@ struct CachedRimMesh {
     w_q: i32,
     h_q: i32,
     r_q: i32,
+    ppp_q: i32,
     mesh: egui::epaint::Mesh,
     fill_poly: Vec<Pos2>,
 }
@@ -632,6 +633,11 @@ pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
     .collect();
     style.interaction.selectable_labels = false;
     ctx.set_style(style);
+    ctx.tessellation_options_mut(|opts| {
+        opts.feathering = true;
+        opts.feathering_size_in_pixels = 1.0;
+        opts.bezier_tolerance = 0.015;
+    });
     apply_theme_visuals(ctx, mode);
 }
 
@@ -753,8 +759,8 @@ fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
 }
 
-fn corner_unit_arcs() -> &'static [[(f32, f32); 17]; 4] {
-    static ARCS: OnceLock<[[(f32, f32); 17]; 4]> = OnceLock::new();
+fn corner_unit_arcs() -> &'static [[(f32, f32); 33]; 4] {
+    static ARCS: OnceLock<[[(f32, f32); 33]; 4]> = OnceLock::new();
     ARCS.get_or_init(|| {
         let ranges = [
             (std::f32::consts::PI, 1.5 * std::f32::consts::PI),
@@ -762,10 +768,10 @@ fn corner_unit_arcs() -> &'static [[(f32, f32); 17]; 4] {
             (0.0, 0.5 * std::f32::consts::PI),
             (0.5 * std::f32::consts::PI, std::f32::consts::PI),
         ];
-        let mut out = [[(0.0_f32, 0.0_f32); 17]; 4];
+        let mut out = [[(0.0_f32, 0.0_f32); 33]; 4];
         for (c_idx, &(a0, a1)) in ranges.iter().enumerate() {
-            for k in 0..=16usize {
-                let theta = a0 + (a1 - a0) * (k as f32 / 16.0);
+            for k in 0..=32usize {
+                let theta = a0 + (a1 - a0) * (k as f32 / 32.0);
                 out[c_idx][k] = (theta.cos(), theta.sin());
             }
         }
@@ -799,24 +805,193 @@ fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec
     }
 }
 
+/// Emits fixed-count (`4 * 33 = 132`) rounded-rect perimeter vertices so concentric rings align 1:1.
+fn sample_rounded_rect_ring(rect: Rect, radius: f32, out: &mut Vec<Pos2>) {
+    out.clear();
+    let r = radius.clamp(0.0, 0.5 * rect.width().min(rect.height()));
+    let centers = [
+        Pos2::new(rect.left() + r, rect.top() + r),
+        Pos2::new(rect.right() - r, rect.top() + r),
+        Pos2::new(rect.right() - r, rect.bottom() - r),
+        Pos2::new(rect.left() + r, rect.bottom() - r),
+    ];
+    let arcs = corner_unit_arcs();
+    for (center, arc) in centers.into_iter().zip(arcs.iter()) {
+        for &(nx, ny) in arc {
+            out.push(center + Vec2::new(nx * r, ny * r));
+        }
+    }
+}
+
+fn stitch_closed_ring_quads(
+    mesh: &mut egui::epaint::Mesh,
+    outer_pts: &[Pos2],
+    outer_col: Color32,
+    inner_pts: &[Pos2],
+    inner_col: Color32,
+) {
+    let n = outer_pts.len();
+    if n < 4 || inner_pts.len() != n {
+        return;
+    }
+    let base = mesh.vertices.len() as u32;
+    mesh.vertices.reserve(n * 2);
+    mesh.indices.reserve(n * 6);
+    for i in 0..n {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: outer_pts[i],
+            uv: egui::epaint::WHITE_UV,
+            color: outer_col,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: inner_pts[i],
+            uv: egui::epaint::WHITE_UV,
+            color: inner_col,
+        });
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let o0 = base + (i * 2) as u32;
+        let i0 = o0 + 1;
+        let o1 = base + (j * 2) as u32;
+        let i1 = o1 + 1;
+        mesh.indices.extend_from_slice(&[o0, o1, i0, i0, o1, i1]);
+    }
+}
+
+fn add_ring_center_fan(
+    mesh: &mut egui::epaint::Mesh,
+    ring_pts: &[Pos2],
+    center: Pos2,
+    col: Color32,
+) {
+    if col == Color32::TRANSPARENT || ring_pts.len() < 4 {
+        return;
+    }
+    let n = ring_pts.len();
+    let c_idx = mesh.vertices.len() as u32;
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: center,
+        uv: egui::epaint::WHITE_UV,
+        color: col,
+    });
+    let ring_base = mesh.vertices.len() as u32;
+    for &p in ring_pts {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: p,
+            uv: egui::epaint::WHITE_UV,
+            color: col,
+        });
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        mesh.indices
+            .extend_from_slice(&[c_idx, ring_base + i as u32, ring_base + j as u32]);
+    }
+}
+
+/// Builds one physical-pixel-feathered rounded rectangle border+fill mesh (`1px` corner AA, crisp straight H/V edges).
+fn build_feathered_rounded_box_mesh(
+    snapped: Rect,
+    rounding: f32,
+    fill: Color32,
+    border_color: Color32,
+    border_px: f32,
+    ppp: f32,
+) -> egui::epaint::Mesh {
+    let mut mesh = egui::epaint::Mesh::default();
+    if snapped.width() <= 0.0 || snapped.height() <= 0.0 {
+        return mesh;
+    }
+    let px = 1.0 / ppp.max(0.5);
+    let half_px = 0.5 * px;
+    let r = rounding.clamp(0.0, 0.5 * snapped.width().min(snapped.height()));
+
+    if border_color == Color32::TRANSPARENT {
+        if fill == Color32::TRANSPARENT {
+            return mesh;
+        }
+        if r <= 0.0 {
+            let mut m = egui::epaint::Mesh::default();
+            m.vertices = vec![
+                egui::epaint::Vertex { pos: snapped.left_top(), uv: egui::epaint::WHITE_UV, color: fill },
+                egui::epaint::Vertex { pos: snapped.right_top(), uv: egui::epaint::WHITE_UV, color: fill },
+                egui::epaint::Vertex { pos: snapped.right_bottom(), uv: egui::epaint::WHITE_UV, color: fill },
+                egui::epaint::Vertex { pos: snapped.left_bottom(), uv: egui::epaint::WHITE_UV, color: fill },
+            ];
+            m.indices = vec![0, 1, 2, 0, 2, 3];
+            return m;
+        }
+        let mut r0_pts = Vec::with_capacity(132);
+        let mut r1_pts = Vec::with_capacity(132);
+        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, &mut r0_pts);
+        let rect1 = if snapped.width() > px && snapped.height() > px {
+            snapped.shrink(half_px)
+        } else {
+            snapped
+        };
+        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), &mut r1_pts);
+        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
+        add_ring_center_fan(&mut mesh, &r1_pts, snapped.center(), fill);
+        return mesh;
+    }
+
+    let bw = (border_px.max(1.0)) * px;
+    let mut r0_pts = Vec::with_capacity(132);
+    let mut r1_pts = Vec::with_capacity(132);
+    let mut r2_pts = Vec::with_capacity(132);
+
+    sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, &mut r0_pts);
+    let rect1 = if snapped.width() > px && snapped.height() > px {
+        snapped.shrink(half_px)
+    } else {
+        snapped
+    };
+    sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), &mut r1_pts);
+    stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
+
+    let r1b_pts = if bw > px * 1.05 {
+        let mut pts = Vec::with_capacity(132);
+        let s1b = (bw - half_px).min(snapped.width().min(snapped.height()) * 0.45);
+        sample_rounded_rect_ring(snapped.shrink(s1b), (r - s1b).max(0.0), &mut pts);
+        stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &pts, border_color);
+        pts
+    } else {
+        r1_pts
+    };
+
+    let inner_shrink = bw + half_px;
+    if snapped.width() > inner_shrink * 2.0 && snapped.height() > inner_shrink * 2.0 {
+        let rect2 = snapped.shrink(inner_shrink);
+        sample_rounded_rect_ring(rect2, (r - inner_shrink).max(0.0), &mut r2_pts);
+        stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
+        add_ring_center_fan(&mut mesh, &r2_pts, rect2.center(), fill);
+    } else {
+        add_ring_center_fan(&mut mesh, &r1b_pts, snapped.center(), border_color);
+    }
+    mesh
+}
+
 fn build_rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<Pos2> {
-    let mut ring = Vec::with_capacity(68);
+    let mut ring = Vec::with_capacity(132);
     push_rounded_rect_perimeter(rect, radius, &mut ring);
     ring.into_iter().map(|(p, _)| p).collect()
 }
 
-/// Builds origin-relative gradient-rim mesh + inner polygon once per `(w, h, rounding)` and translates on scroll frames.
-fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32) -> CachedRimMesh {
+/// Builds origin-relative gradient-rim mesh + inner polygon once per `(w, h, rounding, ppp)` and translates on scroll frames.
+fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32, ppp: f32) -> CachedRimMesh {
+    let px = 1.0 / ppp.max(0.5);
+    let half_px = 0.5 * px;
     let local_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(w.max(1.0), h.max(1.0)));
     let fill_poly = build_rounded_rect_polygon(
-        local_rect.shrink(1.0),
-        (rounding - 1.0).max(0.0),
+        local_rect.shrink(px),
+        (rounding - px).max(0.0),
     );
-    let mut ring = Vec::with_capacity(68);
+    let mut ring = Vec::with_capacity(132);
     push_rounded_rect_perimeter(local_rect, rounding, &mut ring);
     let n = ring.len();
     const BANDS: usize = 5;
-    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.0_f32];
+    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -half_px, half_px];
     let alphas = [0_u8, 52_u8, 255_u8, 255_u8, 0_u8];
 
     let mut mesh = egui::epaint::Mesh::default();
@@ -859,6 +1034,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32) -> CachedRimMesh {
         w_q: (w * 2.0).round() as i32,
         h_q: (h * 2.0).round() as i32,
         r_q: (rounding * 10.0).round() as i32,
+        ppp_q: (ppp * 100.0).round() as i32,
         mesh,
         fill_poly,
     }
@@ -867,6 +1043,7 @@ fn build_cached_rim_geometry(w: f32, h: f32, rounding: f32) -> CachedRimMesh {
 fn translate_cached_rim_for_rect(
     rect: Rect,
     rounding: f32,
+    ppp: f32,
     cache: &mut Option<CachedRimMesh>,
 ) -> (Vec<Pos2>, egui::epaint::Mesh) {
     let w = rect.width().max(1.0);
@@ -874,11 +1051,12 @@ fn translate_cached_rim_for_rect(
     let w_q = (w * 2.0).round() as i32;
     let h_q = (h * 2.0).round() as i32;
     let r_q = (rounding * 10.0).round() as i32;
+    let ppp_q = (ppp * 100.0).round() as i32;
     let hit = cache
         .as_ref()
-        .is_some_and(|c| c.w_q == w_q && c.h_q == h_q && c.r_q == r_q);
+        .is_some_and(|c| c.w_q == w_q && c.h_q == h_q && c.r_q == r_q && c.ppp_q == ppp_q);
     if !hit {
-        *cache = Some(build_cached_rim_geometry(w, h, rounding));
+        *cache = Some(build_cached_rim_geometry(w, h, rounding, ppp));
     }
     let cached = cache.as_ref().unwrap();
     let offset = rect.min.to_vec2();
@@ -890,56 +1068,13 @@ fn translate_cached_rim_for_rect(
     (fill_poly, mesh)
 }
 
-/// Paints an unbroken 1px perimeter ring strictly inside `rect` (safe even when fill is `TRANSPARENT`).
-fn paint_crisp_ring_mesh(
-    painter: &egui::Painter,
-    rect: Rect,
-    inset: f32,
-    rounding: f32,
-    border_color: Color32,
-) {
-    if border_color == Color32::TRANSPARENT || rect.width() <= 2.0 || rect.height() <= 2.0 {
-        return;
-    }
-    let mut ring = Vec::with_capacity(68);
-    push_rounded_rect_perimeter(rect, rounding, &mut ring);
-    let n = ring.len();
-    if n < 8 {
-        return;
-    }
-    let mut mesh = egui::epaint::Mesh::default();
-    mesh.vertices.reserve(n * 2);
-    mesh.indices.reserve(n * 6);
-    for &(p, norm) in &ring {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: p,
-            uv: egui::epaint::WHITE_UV,
-            color: border_color,
-        });
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: p - norm * inset,
-            uv: egui::epaint::WHITE_UV,
-            color: border_color,
-        });
-    }
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let o0 = (i * 2) as u32;
-        let i0 = o0 + 1;
-        let o1 = (j * 2) as u32;
-        let i1 = o1 + 1;
-        mesh.indices.extend_from_slice(&[o0, o1, i0, i0, o1, i1]);
-    }
-    painter.add(egui::Shape::mesh(mesh));
-}
-
 /// Diagonal 6-stop logo-file gradient rim (`WT_RIM_GRADIENT_STOPS`) bounded strictly inside `rect`.
 #[allow(dead_code)]
 fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, rounding: f32) {
     if rect.width() <= 4.0 || rect.height() <= 4.0 {
         return;
     }
-    let mut ring = Vec::with_capacity(68);
+    let mut ring = Vec::with_capacity(132);
     push_rounded_rect_perimeter(rect, rounding, &mut ring);
     let n = ring.len();
     if n < 8 {
@@ -947,7 +1082,7 @@ fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, roundi
     }
 
     const BANDS: usize = 5;
-    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.0_f32];
+    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.4_f32];
     let alphas = [0_u8, 52_u8, 255_u8, 255_u8, 0_u8];
 
     let w = rect.width().max(1.0);
@@ -991,8 +1126,8 @@ fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, roundi
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Paints an unbroken rounded rectangle border & optional fill, safe for `Color32::TRANSPARENT` fills at 96 DPI.
-/// When `border_color == Color32::TRANSPARENT`, skips the perimeter ring mesh completely (quiet row-level `SubtleOutline`).
+/// Paints an unbroken physical-pixel-feathered rounded rectangle border & optional fill, safe at 96 DPI and high DPI.
+/// When `border_color == Color32::TRANSPARENT` and `fill == Color32::TRANSPARENT`, paints nothing (quiet `SubtleOutline`).
 fn paint_crisp_bordered_box(
     painter: &egui::Painter,
     rect: Rect,
@@ -1003,26 +1138,14 @@ fn paint_crisp_bordered_box(
     ppp: f32,
 ) -> Rect {
     let snapped = snap_rect_to_pixels(rect, ppp);
-    if border_color == Color32::TRANSPARENT {
-        if snapped.width() > 0.0 && snapped.height() > 0.0 && fill != Color32::TRANSPARENT {
-            painter.rect_filled(snapped, Rounding::same(rounding.max(0.0)), fill);
-        }
-        return snapped;
+    let mesh = build_feathered_rounded_box_mesh(snapped, rounding, fill, border_color, border_px, ppp);
+    if !mesh.indices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
-    let inset = (border_px / ppp.max(0.5)).max(1.0 / ppp.max(0.5));
-    let inner = snapped.shrink(inset);
-    if inner.width() > 0.0 && inner.height() > 0.0 && fill != Color32::TRANSPARENT {
-        painter.rect_filled(
-            inner,
-            Rounding::same((rounding - inset).max(0.0)),
-            fill,
-        );
-    }
-    paint_crisp_ring_mesh(painter, snapped, inset, rounding, border_color);
     snapped
 }
 
-/// Container frame with a guaranteed continuous 1px outline at 96 DPI and high DPI.
+/// Container frame with a guaranteed continuous anti-aliased 1px outline at 96 DPI and high DPI.
 fn draw_crisp_frame<R>(
     ui: &mut egui::Ui,
     fill: Color32,
@@ -1031,8 +1154,7 @@ fn draw_crisp_frame<R>(
     inner_margin: Margin,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let outer_slot = ui.painter().add(egui::Shape::Noop);
-    let inner_slot = ui.painter().add(egui::Shape::Noop);
+    let frame_slot = ui.painter().add(egui::Shape::Noop);
     let padded = Margin {
         left: inner_margin.left + 1.0,
         right: inner_margin.right + 1.0,
@@ -1047,17 +1169,9 @@ fn draw_crisp_frame<R>(
 
     let ppp = ui.ctx().pixels_per_point();
     let snapped = snap_rect_to_pixels(res.response.rect, ppp);
-    let inset = 1.0 / ppp.max(0.5);
-    ui.painter().set(
-        outer_slot,
-        egui::Shape::rect_filled(snapped, Rounding::same(rounding), border_color),
-    );
-    let inner = snapped.shrink(inset);
-    if inner.width() > 0.0 && inner.height() > 0.0 {
-        ui.painter().set(
-            inner_slot,
-            egui::Shape::rect_filled(inner, Rounding::same((rounding - inset).max(0.0)), fill),
-        );
+    let mesh = build_feathered_rounded_box_mesh(snapped, rounding, fill, border_color, 1.0, ppp);
+    if !mesh.indices.is_empty() {
+        ui.painter().set(frame_slot, egui::Shape::mesh(mesh));
     }
     res
 }
@@ -1092,31 +1206,59 @@ fn optical_galley_pos(
     } else {
         outer_rect.min.x
     };
-    let ink_center_y = if let Some(font_id) = galley
+    let (ink_center_y, baseline_from_top) = if let Some(font_id) = galley
         .job
         .sections
         .first()
         .map(|s| s.format.font_id.clone())
     {
-        let text = galley.job.text.as_str();
-        let has_lower = text.chars().any(|c| c.is_lowercase());
-        let has_upper_or_digit = text.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
-        let probe = if has_lower && !has_upper_or_digit { "x" } else { "Hx" };
-        let ref_g = ui.fonts(|f| f.layout_no_wrap(probe.to_owned(), font_id, Color32::WHITE));
+        let ref_g = ui.fonts(|f| f.layout_no_wrap("Hx".to_owned(), font_id, Color32::WHITE));
         if ref_g.mesh_bounds.is_positive() {
-            ref_g.mesh_bounds.center().y
+            (ref_g.mesh_bounds.center().y, ref_g.mesh_bounds.max.y)
         } else if galley.mesh_bounds.is_positive() {
-            galley.mesh_bounds.center().y
+            (galley.mesh_bounds.center().y, galley.mesh_bounds.max.y)
         } else {
-            galley.size().y * 0.5
+            (galley.size().y * 0.5, galley.size().y * 0.8)
         }
     } else if galley.mesh_bounds.is_positive() {
-        galley.mesh_bounds.center().y
+        (galley.mesh_bounds.center().y, galley.mesh_bounds.max.y)
     } else {
-        galley.size().y * 0.5
+        (galley.size().y * 0.5, galley.size().y * 0.8)
     };
+    let _ = baseline_from_top;
     let y = outer_rect.center().y - ink_center_y;
     Pos2::new(snap_scalar_to_px(x, ppp), snap_scalar_to_px(y, ppp))
+}
+
+fn baseline_aligned_galley_pos(
+    ui: &egui::Ui,
+    outer_rect: Rect,
+    galley: &std::sync::Arc<egui::epaint::Galley>,
+    anchor_font: FontId,
+) -> Pos2 {
+    let ppp = ui.ctx().pixels_per_point();
+    let probe = |fid: FontId| -> (f32, f32) {
+        let g = ui.fonts(|f| f.layout_no_wrap("Hx".to_owned(), fid, Color32::WHITE));
+        if g.mesh_bounds.is_positive() {
+            (g.mesh_bounds.center().y, g.mesh_bounds.max.y)
+        } else {
+            (g.size().y * 0.5, g.size().y * 0.8)
+        }
+    };
+    let (anchor_cy, anchor_base) = probe(anchor_font);
+    let (_, self_base) = if let Some(fid) = galley
+        .job
+        .sections
+        .first()
+        .map(|s| s.format.font_id.clone())
+    {
+        probe(fid)
+    } else {
+        (galley.size().y * 0.5, galley.size().y * 0.8)
+    };
+    let baseline_y = outer_rect.center().y - anchor_cy + anchor_base;
+    let y = baseline_y - self_base;
+    Pos2::new(snap_scalar_to_px(outer_rect.min.x, ppp), snap_scalar_to_px(y, ppp))
 }
 
 fn draw_optical_label_in_rect(
@@ -1295,9 +1437,11 @@ fn resolve_button_colors(
     }
     if hovered {
         return match variant {
-            ButtonVariant::PrimaryOutline
-            | ButtonVariant::PodPrimaryOutline
-            | ButtonVariant::SecondaryOutline => (pal.widget_hover, pal.accent_line, pal.accent_line),
+            ButtonVariant::PrimaryOutline => {
+                (pal.widget_hover, pal.accent_line, pal.accent_line)
+            }
+            ButtonVariant::PodPrimaryOutline => (pal.widget_hover, pal.accent_2, pal.accent_2),
+            ButtonVariant::SecondaryOutline => (pal.widget_hover, pal.accent_line, pal.accent_line),
             ButtonVariant::SubtleOutline => {
                 (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
             }
@@ -1308,7 +1452,7 @@ fn resolve_button_colors(
     }
     match variant {
         ButtonVariant::PrimaryOutline => (pal.pill_blue_fill, pal.accent_line, pal.accent_line),
-        ButtonVariant::PodPrimaryOutline => (Color32::TRANSPARENT, pal.accent_line, pal.accent_line),
+        ButtonVariant::PodPrimaryOutline => (pal.pill_pink_fill, pal.accent_2, pal.accent_2),
         ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
         ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
     }
@@ -1353,9 +1497,9 @@ fn draw_z_button(
     );
 
     let ppp = ui.ctx().pixels_per_point();
-    let snapped = paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
+    paint_crisp_bordered_box(ui.painter(), rect, rounding, fill, border_col, 1.0, ppp);
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
-    let text_pos = optical_galley_pos(ui, snapped, &galley, None, true);
+    let text_pos = optical_galley_pos(ui, rect, &galley, None, true);
     ui.painter().galley(text_pos, galley, text_color);
     resp
 }
@@ -1408,49 +1552,67 @@ fn draw_crisp_text_input(
     inner.inner
 }
 
-/// Crisp 1px-bordered toggle checkbox matching the z-controller palette.
+/// Crisp 1px-bordered toggle checkbox matching the z-controller palette on one shared optical baseline.
 fn draw_crisp_checkbox(
     ui: &mut egui::Ui,
     checked: &mut bool,
     label: &str,
     pal: &ThemePalette,
 ) -> bool {
-    let mut toggled = false;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_8;
-        let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-        let ppp = ui.ctx().pixels_per_point();
-        let fill = if *checked {
-            pal.pill_blue_fill
-        } else if resp.hovered() {
-            pal.widget_hover
-        } else {
-            pal.input_bg
-        };
-        let border_col = if *checked || resp.hovered() {
-            pal.accent_line
-        } else {
-            pal.border
-        };
-        let snapped =
-            paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
-        if *checked {
-            let c = snapped.center();
-            let st = Stroke::new(1.75_f32, pal.accent_line);
-            ui.painter()
-                .line_segment([Pos2::new(c.x - 4.0, c.y + 0.5), Pos2::new(c.x - 1.0, c.y + 3.5)], st);
-            ui.painter()
-                .line_segment([Pos2::new(c.x - 1.0, c.y + 3.5), Pos2::new(c.x + 4.5, c.y - 3.0)], st);
-        }
-        let lbl_resp = ui.add(
-            egui::Label::new(RichText::new(label).size(12.0).color(pal.text)).sense(Sense::click()),
-        );
-        if resp.clicked() || lbl_resp.clicked() {
-            *checked = !*checked;
-            toggled = true;
-        }
-    });
-    toggled
+    let font_id = FontId::new(12.0, FontFamily::Proportional);
+    let text_galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), pal.text));
+    let total_w = (16.0 + SPACE_8 + text_galley.size().x).ceil();
+    let row_h = 22.0_f32.max(text_galley.size().y);
+    let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, row_h), Sense::click());
+    let ppp = ui.ctx().pixels_per_point();
+    let fill = if *checked {
+        pal.pill_blue_fill
+    } else if resp.hovered() {
+        pal.widget_hover
+    } else {
+        pal.input_bg
+    };
+    let border_col = if *checked || resp.hovered() {
+        pal.accent_line
+    } else {
+        pal.border
+    };
+    let box_rect = Rect::from_center_size(
+        Pos2::new(hit_rect.min.x + 8.0, hit_rect.center().y),
+        Vec2::splat(16.0),
+    );
+    let snapped =
+        paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
+    if *checked {
+        let c = snapped.center();
+        let st = Stroke::new(1.75_f32, pal.accent_line);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                Pos2::new(c.x - 4.0, c.y + 0.5),
+                Pos2::new(c.x - 1.0, c.y + 3.5),
+                Pos2::new(c.x + 4.5, c.y - 3.0),
+            ],
+            st,
+        ));
+    }
+    let lbl_col = if resp.hovered() { pal.accent_line } else { pal.text };
+    let lbl_galley = if lbl_col == pal.text {
+        text_galley
+    } else {
+        ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, lbl_col))
+    };
+    let label_rect = Rect::from_min_max(
+        Pos2::new(hit_rect.min.x + 16.0 + SPACE_8, hit_rect.min.y),
+        hit_rect.max,
+    );
+    let text_pos = optical_galley_pos(ui, label_rect, &lbl_galley, None, false);
+    ui.painter().galley(text_pos, lbl_galley, lbl_col);
+    if resp.clicked() {
+        *checked = !*checked;
+        true
+    } else {
+        false
+    }
 }
 
 /// Vertical scroll area styled identically to z-controller, exposing viewport bounds for row virtualization.
@@ -1729,9 +1891,16 @@ fn draw_word_capped_text_cached(
         cache.insert(key, val.clone());
         val
     };
-    let resp = ui.add(
-        egui::Label::new(RichText::new(&display).font(font_id).color(color)).selectable(false),
-    );
+    let row_h = if ui.layout().main_dir().is_horizontal() && ui.max_rect().height() <= 32.0 {
+        ui.max_rect().height()
+    } else {
+        0.0
+    };
+    let galley = ui.fonts(|f| f.layout_no_wrap(display.clone(), font_id, color));
+    let h = row_h.max(galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, h), Sense::hover());
+    let pos = optical_galley_pos(ui, rect, &galley, None, false);
+    ui.painter().galley(pos, galley, color);
     if truncated {
         resp.on_hover_text(text)
     } else {
@@ -1748,9 +1917,16 @@ fn draw_word_capped_text(
     max_w: f32,
 ) -> egui::Response {
     let (display, truncated) = truncate_word_boundary_px(ui, text, &font_id, max_w);
-    let resp = ui.add(
-        egui::Label::new(RichText::new(&display).font(font_id).color(color)).selectable(false),
-    );
+    let row_h = if ui.layout().main_dir().is_horizontal() && ui.max_rect().height() <= 32.0 {
+        ui.max_rect().height()
+    } else {
+        0.0
+    };
+    let galley = ui.fonts(|f| f.layout_no_wrap(display, font_id, color));
+    let h = row_h.max(galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, h), Sense::hover());
+    let pos = optical_galley_pos(ui, rect, &galley, None, false);
+    ui.painter().galley(pos, galley, color);
     if truncated {
         resp.on_hover_text(text)
     } else {
@@ -1758,25 +1934,53 @@ fn draw_word_capped_text(
     }
 }
 
-/// Renders single-line truncated text and automatically shows a full-text tooltip on hover whenever truncated.
+/// Renders single-line truncated text aligned to row optical center and shows a full-text tooltip on hover when truncated.
 fn draw_truncated_text(
     ui: &mut egui::Ui,
     text: &str,
     font_id: FontId,
     color: Color32,
-    strong: bool,
+    _strong: bool,
 ) -> egui::Response {
-    let measured_w = ui.fonts(|f| {
-        f.layout_no_wrap(text.to_owned(), font_id.clone(), color)
-            .size()
-            .x
-    });
-    let mut rt = RichText::new(text).font(font_id).color(color);
-    if strong {
-        rt = rt.strong();
+    let avail_w = ui.available_width().max(8.0);
+    let (display, truncated) = truncate_word_boundary_px(ui, text, &font_id, avail_w);
+    let row_h = if ui.layout().main_dir().is_horizontal() && ui.max_rect().height() <= 32.0 {
+        ui.max_rect().height()
+    } else {
+        0.0
+    };
+    let galley = ui.fonts(|f| f.layout_no_wrap(display, font_id, color));
+    let h = row_h.max(galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, h), Sense::hover());
+    let pos = optical_galley_pos(ui, rect, &galley, None, false);
+    ui.painter().galley(pos, galley, color);
+    if truncated {
+        resp.on_hover_text(text)
+    } else {
+        resp
     }
-    let resp = ui.add(egui::Label::new(rt).truncate().selectable(false));
-    if measured_w > resp.rect.width() + 0.5 {
+}
+
+fn draw_baseline_paired_text(
+    ui: &mut egui::Ui,
+    text: &str,
+    font_id: FontId,
+    color: Color32,
+    anchor_font: FontId,
+) -> egui::Response {
+    let avail_w = ui.available_width().max(8.0);
+    let (display, truncated) = truncate_word_boundary_px(ui, text, &font_id, avail_w);
+    let row_h = if ui.layout().main_dir().is_horizontal() && ui.max_rect().height() <= 32.0 {
+        ui.max_rect().height()
+    } else {
+        0.0
+    };
+    let galley = ui.fonts(|f| f.layout_no_wrap(display, font_id, color));
+    let h = row_h.max(galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, h), Sense::hover());
+    let pos = baseline_aligned_galley_pos(ui, rect, &galley, anchor_font);
+    ui.painter().galley(pos, galley, color);
+    if truncated {
         resp.on_hover_text(text)
     } else {
         resp
@@ -1838,11 +2042,17 @@ fn draw_right_aligned_size(
     strong: bool,
 ) {
     let font_id = mono_font_for(ui, size_px, strong);
-    let rt = RichText::new(format_size_2dec(bytes))
-        .font(font_id)
-        .color(color);
-    ui.add(egui::Label::new(rt).selectable(false))
-        .on_hover_text(format_exact_bytes(bytes));
+    let txt = format_size_2dec(bytes);
+    let galley = ui.fonts(|f| f.layout_no_wrap(txt, font_id, color));
+    let row_h = if ui.layout().main_dir().is_horizontal() && ui.max_rect().height() <= 32.0 {
+        ui.max_rect().height().max(galley.size().y)
+    } else {
+        galley.size().y
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, row_h), Sense::hover());
+    let pos = optical_galley_pos(ui, rect, &galley, Some(rect.max.x), false);
+    ui.painter().galley(pos, galley, color);
+    let _ = resp.on_hover_text(format_exact_bytes(bytes));
 }
 
 fn get_or_load_app_icon_tex(
@@ -2796,56 +3006,72 @@ fn draw_compact_pod_checkbox(
     ui: &mut egui::Ui,
     checked: &mut bool,
     label: &str,
+    font_size: f32,
+    row_h: f32,
     muted_look: bool,
     hover_tip: &str,
     pal: &ThemePalette,
 ) -> bool {
-    let mut toggled = false;
-    let row_resp = ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_4;
-        let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
-        let ppp = ui.ctx().pixels_per_point();
-        let fill = if *checked {
-            pal.pill_blue_fill
-        } else if resp.hovered() {
-            pal.widget_hover
-        } else {
-            pal.input_bg
-        };
-        let border_col = if *checked || resp.hovered() {
-            pal.accent_line
-        } else {
-            pal.border
-        };
-        let snapped =
-            paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
-        if *checked {
-            let c = snapped.center();
-            let st = Stroke::new(1.6_f32, pal.accent_line);
-            ui.painter()
-                .line_segment([Pos2::new(c.x - 3.5, c.y + 0.5), Pos2::new(c.x - 0.8, c.y + 3.0)], st);
-            ui.painter()
-                .line_segment([Pos2::new(c.x - 0.8, c.y + 3.0), Pos2::new(c.x + 3.8, c.y - 2.6)], st);
-        }
-        let lbl_col = if resp.hovered() {
-            pal.accent_line
-        } else if muted_look {
-            pal.muted
-        } else {
-            pal.text
-        };
-        let lbl_resp = ui.add(
-            egui::Label::new(RichText::new(label).size(10.5).color(lbl_col)).sense(Sense::click()),
-        );
-        if resp.clicked() || lbl_resp.clicked() {
-            *checked = !*checked;
-            toggled = true;
-        }
-    });
-    if !hover_tip.is_empty() {
-        let _ = row_resp.response.on_hover_text(hover_tip);
+    let font_id = FontId::new(font_size, FontFamily::Proportional);
+    let measure_galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), pal.text));
+    let total_w = (14.0 + SPACE_4 + measure_galley.size().x).ceil();
+    let alloc_h = row_h.max(16.0);
+    let (hit_rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, alloc_h), Sense::click());
+    let ppp = ui.ctx().pixels_per_point();
+    let fill = if *checked {
+        pal.pill_blue_fill
+    } else if resp.hovered() {
+        pal.widget_hover
+    } else {
+        pal.input_bg
+    };
+    let border_col = if *checked || resp.hovered() {
+        pal.accent_line
+    } else {
+        pal.border
+    };
+    let box_rect = Rect::from_center_size(
+        Pos2::new(hit_rect.min.x + 7.0, hit_rect.center().y),
+        Vec2::splat(14.0),
+    );
+    let snapped =
+        paint_crisp_bordered_box(ui.painter(), box_rect, RADIUS_PILL, fill, border_col, 1.0, ppp);
+    if *checked {
+        let c = snapped.center();
+        let st = Stroke::new(1.6_f32, pal.accent_line);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                Pos2::new(c.x - 3.5, c.y + 0.5),
+                Pos2::new(c.x - 0.8, c.y + 3.0),
+                Pos2::new(c.x + 3.8, c.y - 2.6),
+            ],
+            st,
+        ));
     }
-    toggled
+    let lbl_col = if resp.hovered() {
+        pal.accent_line
+    } else if muted_look {
+        pal.muted
+    } else {
+        pal.text
+    };
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, lbl_col));
+    let label_rect = Rect::from_min_max(
+        Pos2::new(hit_rect.min.x + 14.0 + SPACE_4, hit_rect.min.y),
+        hit_rect.max,
+    );
+    let text_pos = optical_galley_pos(ui, label_rect, &galley, None, false);
+    ui.painter().galley(text_pos, galley, lbl_col);
+    let clicked = resp.clicked();
+    if !hover_tip.is_empty() {
+        let _ = resp.on_hover_text(hover_tip);
+    }
+    if clicked {
+        *checked = !*checked;
+        true
+    } else {
+        false
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3140,6 +3366,7 @@ fn draw_drive_pods_grid(
                                 lc_ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { SPACE_4 };
 
                                 let was_excluded = !included;
+                                let ctrl_font_sz = if compact { 10.5 } else { 11.0 };
                                 let include_tip = if included {
                                     format!(
                                         "Include {dl}:\\ in scan scope. Excluded drives are not walked or sized at all (including registered InstallLocation folders), and apps solely on excluded drives are omitted."
@@ -3153,6 +3380,8 @@ fn draw_drive_pods_grid(
                                     &mut lc_ui,
                                     &mut included,
                                     "Include",
+                                    ctrl_font_sz,
+                                    24.0,
                                     was_excluded,
                                     &include_tip,
                                     pal,
@@ -3178,7 +3407,7 @@ fn draw_drive_pods_grid(
                                     &mut lc_ui,
                                     &excl_lbl,
                                     Vec2::new(0.0, 20.0),
-                                    10.5,
+                                    ctrl_font_sz,
                                     RADIUS_PILL,
                                     true,
                                     is_excl_open,
@@ -4019,7 +4248,10 @@ pub fn draw_app_ui_with_drive_busy(
                             Vec2::new(ui.available_width(), HEADER_CONTROL_H),
                             Layout::left_to_right(Align::Center),
                             |ui| {
-                                ui.label(RichText::new("Filter:").size(12.0).color(pal.muted));
+                                ui.add(
+                                    egui::Label::new(RichText::new("Filter:").size(12.0).color(pal.muted))
+                                        .selectable(false),
+                                );
                                 let prev_q = ui_state.search_query.clone();
                                 draw_crisp_text_input(
                                     ui,
@@ -4038,7 +4270,7 @@ pub fn draw_app_ui_with_drive_busy(
                                         ui,
                                         "Clear",
                                         Vec2::new(56.0, HEADER_CONTROL_H),
-                                        11.5,
+                                        12.0,
                                         6.0,
                                         true,
                                         false,
@@ -4055,7 +4287,7 @@ pub fn draw_app_ui_with_drive_busy(
                                         ui,
                                         "Reset filters",
                                         Vec2::new(88.0, HEADER_CONTROL_H),
-                                        11.5,
+                                        12.0,
                                         RADIUS_CONTROL,
                                         true,
                                         false,
@@ -4511,7 +4743,6 @@ fn draw_main_app_list(
     let inset = 1.0 / ppp.max(0.5);
 
     let outer_border_slot = ui.painter().add(egui::Shape::Noop);
-    let inner_fill_slot = ui.painter().add(egui::Shape::Noop);
     let header_bg_slot = ui.painter().add(egui::Shape::Noop);
 
     let panel_top_y = ui.cursor().min.y;
@@ -5140,10 +5371,12 @@ fn draw_main_app_list(
                                     Layout::left_to_right(Align::Center),
                                 );
                                 cat_ui.spacing_mut().item_spacing.x = SPACE_8;
-                                cat_ui.label(
-                                    RichText::new("Category")
-                                        .size(11.0)
-                                        .color(pal.muted),
+                                draw_truncated_text(
+                                    &mut cat_ui,
+                                    "Category",
+                                    FontId::new(10.5, FontFamily::Proportional),
+                                    pal.muted,
+                                    false,
                                 );
                                 paint_chip(
                                     &mut cat_ui,
@@ -5283,10 +5516,12 @@ fn draw_main_app_list(
                                         1 => "Used by 1 app".to_string(),
                                         n => format!("Used by {n} apps"),
                                     };
-                                    rev_ui.label(
-                                        RichText::new(&summary_lbl)
-                                            .size(12.0)
-                                            .color(if rev_cnt > 0 { pal.text } else { pal.muted }),
+                                    draw_truncated_text(
+                                        &mut rev_ui,
+                                        &summary_lbl,
+                                        FontId::new(11.5, FontFamily::Proportional),
+                                        if rev_cnt > 0 { pal.text } else { pal.muted },
+                                        false,
                                     );
                                     if rev_cnt > 0 {
                                         if let Some(rev_id) = opt_rev_id {
@@ -5296,7 +5531,7 @@ fn draw_main_app_list(
                                                 &mut rev_ui,
                                                 "Inspect consumers >",
                                                 Vec2::new(0.0, 20.0),
-                                                11.0,
+                                                11.5,
                                                 RADIUS_PILL,
                                                 true,
                                                 is_open,
@@ -5928,7 +6163,7 @@ fn draw_main_app_list(
                 if expanded {
                     let drawer_rect = inner_row_rect.shrink2(Vec2::new(2.0, 1.0));
                     let (fill_poly, rim_mesh) =
-                        translate_cached_rim_for_rect(drawer_rect, RADIUS_PANEL, cached_rim);
+                        translate_cached_rim_for_rect(drawer_rect, RADIUS_PANEL, ppp, cached_rim);
                     ui.painter().set(
                         row_slot,
                         egui::Shape::convex_polygon(fill_poly, pal.panel_alt, Stroke::NONE),
@@ -5969,17 +6204,14 @@ fn draw_main_app_list(
         Pos2::new(panel_left + panel_w, panel_bot_y),
     );
     let snapped_panel = snap_rect_to_pixels(raw_panel_rect, ppp);
-    ui.painter().set(
-        outer_border_slot,
-        egui::Shape::rect_filled(snapped_panel, Rounding::same(RADIUS_PANEL), pal.border),
-    );
+    let panel_mesh =
+        build_feathered_rounded_box_mesh(snapped_panel, RADIUS_PANEL, pal.panel, pal.border, 1.0, ppp);
+    if !panel_mesh.indices.is_empty() {
+        ui.painter().set(outer_border_slot, egui::Shape::mesh(panel_mesh));
+    }
     let inner_panel = snapped_panel.shrink(inset);
     if inner_panel.width() > 0.0 && inner_panel.height() > 0.0 {
         let inner_r = (RADIUS_PANEL - inset).max(0.0);
-        ui.painter().set(
-            inner_fill_slot,
-            egui::Shape::rect_filled(inner_panel, Rounding::same(inner_r), pal.panel),
-        );
         let hdr_fill_rect = Rect::from_min_max(
             inner_panel.min,
             Pos2::new(inner_panel.max.x, hdr_y1.min(inner_panel.max.y)),
@@ -6276,15 +6508,17 @@ fn draw_pinned_bottom_groups(
             |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_8;
                 draw_chevron(ui, false, pal.muted);
-                ui.label(
-                    RichText::new("Pinned storage ledger")
-                        .size(11.0)
-                        .color(pal.text),
+                draw_truncated_text(
+                    ui,
+                    "Pinned storage ledger",
+                    FontId::new(11.0, FontFamily::Proportional),
+                    pal.text,
+                    false,
                 );
                 draw_truncated_text(
                     ui,
                     &collapsed_summary,
-                    FontId::new(10.5, FontFamily::Proportional),
+                    FontId::new(11.0, FontFamily::Proportional),
                     pal.muted,
                     false,
                 );
@@ -6293,17 +6527,16 @@ fn draw_pinned_bottom_groups(
                 if let Some((exact, diff)) = &first_reconcile {
                     if *diff == 0 {
                         ui.add_space(SPACE_8);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new("diff 0 B")
-                                    .font(FontId::new(11.0, FontFamily::Monospace))
-                                    .color(pal.status_green),
-                            )
-                            .selectable(false),
-                        )
-                        .on_hover_text(exact);
                         let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                         ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
+                        draw_truncated_text(
+                            ui,
+                            "diff 0 B",
+                            FontId::new(11.0, FontFamily::Monospace),
+                            pal.status_green,
+                            false,
+                        )
+                        .on_hover_text(exact);
                     } else {
                         paint_chip(
                             ui,
@@ -6790,7 +7023,7 @@ fn draw_pinned_bottom_groups(
                         let resp = draw_truncated_text(
                             ui,
                             summary,
-                            FontId::new(10.5, FontFamily::Proportional),
+                            FontId::new(11.0, FontFamily::Proportional),
                             pal.subtle_text,
                             false,
                         );
@@ -6799,16 +7032,15 @@ fn draw_pinned_bottom_groups(
                     |ui| {
                         if diff == 0 {
                             ui.add_space(SPACE_8);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new("diff 0 B")
-                                        .font(FontId::new(11.0, FontFamily::Monospace))
-                                        .color(pal.status_green),
-                                )
-                                .selectable(false),
-                            );
                             let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             ui.painter().circle_filled(dot_r.center(), 4.0, STATUS_GREEN);
+                            let _ = draw_truncated_text(
+                                ui,
+                                "diff 0 B",
+                                FontId::new(11.0, FontFamily::Monospace),
+                                pal.status_green,
+                                false,
+                            );
                         } else {
                             paint_chip(
                                 ui,
@@ -6859,13 +7091,14 @@ fn draw_pinned_group_card(
                     let snapped_tick = snap_rect_to_pixels(tick_r, ui.ctx().pixels_per_point());
                     paint_solid_px_rect(ui.painter(), snapped_tick, accent);
                     draw_chevron(ui, *expanded, if *expanded { accent } else { pal.muted });
-                    ui.label(RichText::new(title).size(12.0).color(pal.text));
-                    draw_truncated_text(
+                    let title_font = FontId::new(12.0, FontFamily::Proportional);
+                    draw_truncated_text(ui, title, title_font.clone(), pal.text, false);
+                    draw_baseline_paired_text(
                         ui,
                         subtitle,
                         FontId::new(11.0, FontFamily::Proportional),
                         pal.subtle_text,
-                        false,
+                        title_font,
                     );
                 },
                 |ui| {
@@ -7341,10 +7574,13 @@ fn draw_settings_view(
                                     Sense::hover(),
                                     |ui| {
                                         ui.spacing_mut().item_spacing.x = SPACE_8;
-                                        ui.label(
-                                            RichText::new(format!("Drive {}:\\", target.letter))
-                                                .size(13.0)
-                                                .color(pal.text),
+                                        let drv_hdr_font = FontId::new(13.0, FontFamily::Proportional);
+                                        draw_truncated_text(
+                                            ui,
+                                            &format!("Drive {}:\\", target.letter),
+                                            drv_hdr_font.clone(),
+                                            pal.text,
+                                            false,
                                         );
                                         let stats_str = if let Some(di) = drv_info {
                                             if is_sys {
@@ -7366,10 +7602,12 @@ fn draw_settings_view(
                                             String::new()
                                         };
                                         if !stats_str.is_empty() {
-                                            let resp = ui.label(
-                                                RichText::new(stats_str)
-                                                    .size(11.0)
-                                                    .color(pal.muted),
+                                            let resp = draw_baseline_paired_text(
+                                                ui,
+                                                &stats_str,
+                                                FontId::new(11.0, FontFamily::Proportional),
+                                                pal.muted,
+                                                drv_hdr_font,
                                             );
                                             if let Some(di) = drv_info {
                                                 let _ = resp.on_hover_text(format!(
@@ -7396,43 +7634,49 @@ fn draw_settings_view(
                                 let mut remove_idx: Option<usize> = None;
                                 for (idx, ex) in target.exclusions.iter().enumerate() {
                                     let is_locked_win = is_sys && normalize_path_key(ex) == sys_win_key;
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_8;
-                                        draw_truncated_text(
-                                            ui,
-                                            ex,
-                                            FontId::new(11.0, FontFamily::Monospace),
-                                            pal.text,
-                                            false,
-                                        );
-                                        if is_locked_win {
-                                            paint_chip(
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(inner_card_w, 20.0),
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                                            draw_truncated_text(
                                                 ui,
-                                                "LOCKED",
-                                                no_touch_chip_style(pal),
-                                                pal.panel,
+                                                ex,
+                                                FontId::new(11.0, FontFamily::Monospace),
+                                                pal.text,
+                                                false,
                                             );
-                                            ui.label(
-                                                RichText::new("Always excluded")
-                                                    .size(10.5)
-                                                    .color(pal.subtle_text),
-                                            );
-                                        } else if draw_z_button(
-                                            ui,
-                                            "Remove",
-                                            Vec2::new(56.0, 20.0),
-                                            10.5,
-                                            RADIUS_CONTROL,
-                                            true,
-                                            false,
-                                            ButtonVariant::SubtleOutline,
-                                            pal,
-                                        )
-                                        .clicked()
-                                        {
-                                            remove_idx = Some(idx);
-                                        }
-                                    });
+                                            if is_locked_win {
+                                                paint_chip(
+                                                    ui,
+                                                    "LOCKED",
+                                                    no_touch_chip_style(pal),
+                                                    pal.panel,
+                                                );
+                                                draw_truncated_text(
+                                                    ui,
+                                                    "Always excluded",
+                                                    FontId::new(10.5, FontFamily::Proportional),
+                                                    pal.subtle_text,
+                                                    false,
+                                                );
+                                            } else if draw_z_button(
+                                                ui,
+                                                "Remove",
+                                                Vec2::new(56.0, 20.0),
+                                                11.0,
+                                                RADIUS_CONTROL,
+                                                true,
+                                                false,
+                                                ButtonVariant::SubtleOutline,
+                                                pal,
+                                            )
+                                            .clicked()
+                                            {
+                                                remove_idx = Some(idx);
+                                            }
+                                        },
+                                    );
                                 }
                                 if let Some(idx) = remove_idx {
                                     target.exclusions.remove(idx);
@@ -7627,29 +7871,34 @@ fn draw_settings_view(
                                         RADIUS_CONTROL,
                                         Margin::symmetric(SPACE_8, 1.0),
                                         |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                ui.label(
-                                                    RichText::new(&name)
-                                                        .font(name_font.clone())
-                                                        .color(pal.text),
-                                                );
-                                                if draw_z_button(
-                                                    ui,
-                                                    "Remove",
-                                                    Vec2::new(48.0, 20.0),
-                                                    10.5,
-                                                    RADIUS_PILL,
-                                                    true,
-                                                    false,
-                                                    ButtonVariant::SubtleOutline,
-                                                    pal,
-                                                )
-                                                .clicked()
-                                                {
-                                                    remove_name_idx = Some(idx);
-                                                }
-                                            });
+                                            ui.with_layout(
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    ui.spacing_mut().item_spacing.x = SPACE_4;
+                                                    draw_truncated_text(
+                                                        ui,
+                                                        &name,
+                                                        name_font.clone(),
+                                                        pal.text,
+                                                        false,
+                                                    );
+                                                    if draw_z_button(
+                                                        ui,
+                                                        "Remove",
+                                                        Vec2::new(48.0, 20.0),
+                                                        11.0,
+                                                        RADIUS_PILL,
+                                                        true,
+                                                        false,
+                                                        ButtonVariant::SubtleOutline,
+                                                        pal,
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        remove_name_idx = Some(idx);
+                                                    }
+                                                },
+                                            );
                                         },
                                     );
                                 }
@@ -7744,29 +7993,34 @@ fn draw_settings_view(
                                     RADIUS_CONTROL,
                                     Margin::symmetric(SPACE_8, 1.0),
                                     |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_4;
-                                            ui.label(
-                                                RichText::new(&path)
-                                                    .font(name_font.clone())
-                                                    .color(pal.text),
-                                            );
-                                            if draw_z_button(
-                                                ui,
-                                                "Remove",
-                                                Vec2::new(48.0, 20.0),
-                                                10.5,
-                                                RADIUS_PILL,
-                                                true,
-                                                false,
-                                                ButtonVariant::SubtleOutline,
-                                                pal,
-                                            )
-                                            .clicked()
-                                            {
-                                                remove_path_idx = Some(idx);
-                                            }
-                                        });
+                                        ui.with_layout(
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = SPACE_4;
+                                                draw_truncated_text(
+                                                    ui,
+                                                    &path,
+                                                    name_font.clone(),
+                                                    pal.text,
+                                                    false,
+                                                );
+                                                if draw_z_button(
+                                                    ui,
+                                                    "Remove",
+                                                    Vec2::new(48.0, 20.0),
+                                                    11.0,
+                                                    RADIUS_PILL,
+                                                    true,
+                                                    false,
+                                                    ButtonVariant::SubtleOutline,
+                                                    pal,
+                                                )
+                                                .clicked()
+                                                {
+                                                    remove_path_idx = Some(idx);
+                                                }
+                                            },
+                                        );
                                     },
                                 );
                             }
@@ -7836,39 +8090,44 @@ fn draw_settings_view(
                     });
                 } else {
                     let mut remove_pin_idx: Option<usize> = None;
+                    let pin_row_w = ui.available_width().max(200.0);
                     for (idx, pin) in draft.zones.pins.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = SPACE_8;
-                            ui.add_space(SPACE_8);
-                            draw_truncated_text(
-                                ui,
-                                &pin.path,
-                                FontId::new(11.0, FontFamily::Monospace),
-                                pal.text,
-                                false,
-                            );
-                            paint_chip(
-                                ui,
-                                pin.kind.label(),
-                                neutral_pin_style,
-                                pal.panel,
-                            );
-                            if draw_z_button(
-                                ui,
-                                "Remove",
-                                Vec2::new(56.0, 20.0),
-                                10.5,
-                                RADIUS_PILL,
-                                true,
-                                false,
-                                ButtonVariant::SubtleOutline,
-                                pal,
-                            )
-                            .clicked()
-                            {
-                                remove_pin_idx = Some(idx);
-                            }
-                        });
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(pin_row_w, 20.0),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add_space(SPACE_8);
+                                draw_truncated_text(
+                                    ui,
+                                    &pin.path,
+                                    FontId::new(11.0, FontFamily::Monospace),
+                                    pal.text,
+                                    false,
+                                );
+                                paint_chip(
+                                    ui,
+                                    pin.kind.label(),
+                                    neutral_pin_style,
+                                    pal.panel,
+                                );
+                                if draw_z_button(
+                                    ui,
+                                    "Remove",
+                                    Vec2::new(56.0, 20.0),
+                                    11.0,
+                                    RADIUS_PILL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                )
+                                .clicked()
+                                {
+                                    remove_pin_idx = Some(idx);
+                                }
+                            },
+                        );
                     }
                     if let Some(idx) = remove_pin_idx {
                         if draft.zones.remove_pin(idx) {
@@ -8481,7 +8740,7 @@ mod tests {
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
             let pal = ThemePalette::for_mode(mode);
 
-            // 1. PrimaryOutline (single view CTA): accent at rest + accent on hover
+            // 1. PrimaryOutline (single global CTA): accent_1 blue at rest + on hover
             assert_eq!(
                 resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, false, false, &pal),
                 (pal.pill_blue_fill, pal.accent_line, pal.accent_line)
@@ -8489,6 +8748,16 @@ mod tests {
             assert_eq!(
                 resolve_button_colors(ButtonVariant::PrimaryOutline, true, false, true, false, &pal),
                 (pal.widget_hover, pal.accent_line, pal.accent_line)
+            );
+
+            // 1b. PodPrimaryOutline (repeated local pod CTA): accent_2 pink at rest + on hover
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::PodPrimaryOutline, true, false, false, false, &pal),
+                (pal.pill_pink_fill, pal.accent_2, pal.accent_2)
+            );
+            assert_eq!(
+                resolve_button_colors(ButtonVariant::PodPrimaryOutline, true, false, true, false, &pal),
+                (pal.widget_hover, pal.accent_2, pal.accent_2)
             );
 
             // 2. SecondaryOutline (Settings, ThemeToggle, All, Close, Add exclusion): neutral at rest, accent on hover
@@ -9093,9 +9362,9 @@ mod tests {
             false,
             &dark,
         );
-        assert_eq!(pod_colors.0, Color32::TRANSPARENT);
-        assert_eq!(pod_colors.1, dark.accent_line);
-        assert_eq!(pod_colors.2, dark.accent_line);
+        assert_eq!(pod_colors.0, dark.pill_pink_fill);
+        assert_eq!(pod_colors.1, dark.accent_2);
+        assert_eq!(pod_colors.2, dark.accent_2);
 
         let dep_ctx = egui::Context::default();
         configure_fonts_and_theme(&dep_ctx, ThemeMode::Dark);
@@ -9227,5 +9496,142 @@ mod tests {
         assert_eq!(q.text, dark.pill_pink_text);
         assert_eq!(dark.bg, Color32::from_rgb(10, 10, 16));
         assert_eq!(light.bg, Color32::from_rgb(238, 244, 250));
+    }
+
+    #[test]
+    fn rounded_corners_emit_antialiased_intermediate_coverage_across_dpi_scales() {
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        for ppp in [1.0_f32, 1.25, 1.5] {
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let w = (220.0 * ppp).round() as usize;
+            let h = (140.0 * ppp).round() as usize;
+            let mut raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(220.0, 140.0))),
+                ..Default::default()
+            };
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(ppp);
+            let mut box_rect_out = Rect::NOTHING;
+            let out = ctx.run(raw, |c| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(pal.bg))
+                    .show(c, |ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                        box_rect_out = paint_crisp_bordered_box(
+                            ui.painter(),
+                            r,
+                            RADIUS_PILL,
+                            pal.pill_blue_fill,
+                            pal.accent_line,
+                            1.0,
+                            c.pixels_per_point(),
+                        );
+                    });
+            });
+            let mut painter = crate::sw_painter::SoftwarePainter::new();
+            painter.apply_textures(&out.textures_delta);
+            let clipped = ctx.tessellate(out.shapes, out.pixels_per_point);
+            painter.paint_and_blit(
+                std::ptr::null_mut(),
+                w,
+                h,
+                out.pixels_per_point,
+                &clipped,
+                0x000A_0A10,
+                None,
+            );
+            let fb = painter.backbuffer_pixels();
+            let px0 = (box_rect_out.min.x * ppp).round() as usize;
+            let py0 = (box_rect_out.min.y * ppp).round() as usize;
+            let corner_sz = (RADIUS_PILL * ppp).ceil() as usize + 2;
+            let mut intermediate_corner_px = 0usize;
+            for py in py0..(py0 + corner_sz).min(h) {
+                for px in px0..(px0 + corner_sz).min(w) {
+                    let b = fb[py * w + px] & 0xFF;
+                    if b > pal.pill_blue_fill.b() as u32 && b < pal.accent_line.b() as u32 {
+                        intermediate_corner_px += 1;
+                    }
+                }
+            }
+            assert!(
+                intermediate_corner_px > 0,
+                "expected anti-aliased intermediate coverage in corner at ppp={ppp}"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_control_row_include_and_exclusions_share_font_size_and_baseline() {
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let cfg = AppConfig::for_detected_drives(&[DriveInfo {
+            letter: 'C',
+            root: "C:\\".into(),
+            total_bytes: 500_000_000,
+            free_bytes: 250_000_000,
+            used_bytes: 250_000_000,
+            is_system_drive: true,
+            full_walk_enabled: true,
+            exclusions: vec!["C:\\Windows".into()],
+            last_scanned_unix: None,
+            last_scanned_display: None,
+        }], r"C:\Windows");
+        for ppp in [1.0_f32, 1.25, 1.5] {
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let mut raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(260.0, 60.0))),
+                ..Default::default()
+            };
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(ppp);
+            let mut inc_y = 0.0_f32;
+            let mut exc_y = 0.0_f32;
+            let mut inc_sz = 0.0_f32;
+            let mut exc_sz = 0.0_f32;
+            let _ = cfg.is_drive_enabled('C');
+            let _ = ctx.run(raw, |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    let (ctrl_rect, _) = ui.allocate_exact_size(Vec2::new(220.0, 24.0), Sense::hover());
+                    let mut lc_ui = table_cell_ui(
+                        ui,
+                        ctrl_rect,
+                        Layout::left_to_right(Align::Center),
+                    );
+                    let mut checked = true;
+                    draw_compact_pod_checkbox(&mut lc_ui, &mut checked, "Include", 11.0, 24.0, false, "", &pal);
+                    draw_z_button(
+                        &mut lc_ui,
+                        "Exclusions (1)",
+                        Vec2::new(0.0, 20.0),
+                        11.0,
+                        RADIUS_PILL,
+                        true,
+                        false,
+                        ButtonVariant::SubtleOutline,
+                        &pal,
+                    );
+                    let f = FontId::new(11.0, FontFamily::Proportional);
+                    let gi = lc_ui.fonts(|fnt| fnt.layout_no_wrap("Include".into(), f.clone(), pal.text));
+                    let ge = lc_ui.fonts(|fnt| fnt.layout_no_wrap("Exclusions (1)".into(), f.clone(), pal.muted));
+                    let p_inc = optical_galley_pos(&lc_ui, ctrl_rect, &gi, None, false);
+                    let btn_rect = Rect::from_center_size(Pos2::new(100.0, ctrl_rect.center().y), Vec2::new(80.0, 20.0));
+                    let p_exc = optical_galley_pos(&lc_ui, btn_rect, &ge, None, true);
+                    inc_y = p_inc.y;
+                    exc_y = p_exc.y;
+                    inc_sz = gi.job.sections[0].format.font_id.size;
+                    exc_sz = ge.job.sections[0].format.font_id.size;
+                });
+            });
+            assert_eq!(inc_sz, exc_sz);
+            assert!(
+                ((inc_y - exc_y) * ppp).abs() <= 0.5,
+                "baseline drift too large at ppp={ppp}: inc_y={inc_y}, exc_y={exc_y}"
+            );
+        }
     }
 }
