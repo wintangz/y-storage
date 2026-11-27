@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use egui::{Pos2, RawInput, Rect, Vec2, ViewportId};
 use serde::Serialize;
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
-use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SortDirection, ThemeMode};
+use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SizeBandFilter, SortDirection, ThemeMode};
 use y_core::history::ScanHistory;
 use y_core::model::ScanReport;
 use y_platform_windows::paths::{enumerate_fixed_drives, get_windows_directory};
@@ -62,6 +62,9 @@ fn main() {
     let mut screenshot_search = String::new();
     let mut screenshot_ledger_collapsed: Option<bool> = None;
     let mut screenshot_ledger_height: Option<f32> = None;
+    let mut screenshot_facet_publisher: Option<String> = None;
+    let mut screenshot_facet_size = SizeBandFilter::All;
+    let mut screenshot_unattrib_search = String::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -168,6 +171,31 @@ fn main() {
                     i += 1;
                 }
             }
+            "--facet-publisher" => {
+                if i + 1 < args.len() {
+                    screenshot_facet_publisher = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--facet-size" => {
+                if i + 1 < args.len() {
+                    screenshot_facet_size = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "ge-10gb" | ">=10gb" => SizeBandFilter::Ge10Gb,
+                        "1-10gb" | "1gb-10gb" => SizeBandFilter::Between1And10Gb,
+                        "ge-1gb" | ">=1gb" => SizeBandFilter::Ge1Gb,
+                        "100mb-1gb" => SizeBandFilter::Between100MbAnd1Gb,
+                        "lt-100mb" | "<100mb" => SizeBandFilter::Lt100Mb,
+                        _ => SizeBandFilter::All,
+                    };
+                    i += 1;
+                }
+            }
+            "--unattrib-search" => {
+                if i + 1 < args.len() {
+                    screenshot_unattrib_search = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -191,6 +219,9 @@ fn main() {
             &screenshot_search,
             screenshot_ledger_collapsed,
             screenshot_ledger_height,
+            screenshot_facet_publisher.as_deref(),
+            screenshot_facet_size,
+            &screenshot_unattrib_search,
         ) {
             eprintln!("render screenshot failed: {err}");
             std::process::exit(1);
@@ -279,6 +310,7 @@ fn run_cli_scan(out_path: &PathBuf, ephemeral: bool) {
     std::fs::write(out_path, json).expect("write CLI scan JSON");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_screenshot_frame(
     report: &y_core::model::ScanReport,
     config: &AppConfig,
@@ -292,7 +324,10 @@ fn render_screenshot_frame(
     search_query: &str,
     ledger_collapsed: Option<bool>,
     ledger_height_px: Option<f32>,
-) -> (usize, usize, Vec<u32>) {
+    facet_publisher: Option<&str>,
+    facet_size: SizeBandFilter,
+    unattrib_search: &str,
+) -> (usize, usize, Vec<u32>, Option<Rect>) {
     let mut cfg = config.clone();
     cfg.theme_mode = theme;
 
@@ -301,6 +336,9 @@ fn render_screenshot_frame(
     ui_state.sort_direction = sort_direction;
     ui_state.filter_chip = filter_chip;
     ui_state.search_query = search_query.to_string();
+    ui_state.facets.publisher = facet_publisher.map(str::to_string);
+    ui_state.facets.size_band = facet_size;
+    ui_state.unattrib_search_query = unattrib_search.to_string();
     if let Some(c) = ledger_collapsed {
         ui_state.ledger_collapsed = c;
     }
@@ -312,13 +350,35 @@ fn render_screenshot_frame(
     let hover_web_search_tooltip = view == "unattributed-hover-query";
     let hover_web_search_btn = view == "unattributed-hover-btn";
     let hover_web_search_mode = hover_web_search_tooltip || hover_web_search_btn;
-    let hover_mode = hover_size_mode || hover_web_search_mode;
+    let hover_unattrib_row = view == "unattributed-row-hover";
+    let hover_mode = hover_size_mode || hover_web_search_mode || hover_unattrib_row;
     match view {
         "unattributed-expanded" | "unattributed-hover-query" | "unattributed-hover-btn" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;
             ui_state.expand_unattributed = true;
             ui_state.ledger_height_px = Some(300.0);
+        }
+        "unattributed-row-hover" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(340.0);
+        }
+        "ledger-max-height" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(2000.0);
+        }
+        "unattributed-filter" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = false;
+            ui_state.expand_unattributed = true;
+            ui_state.ledger_height_px = Some(340.0);
+            if ui_state.unattrib_search_query.is_empty() {
+                ui_state.unattrib_search_query = "microsoft".to_string();
+            }
         }
         "expanded-fifa23" | "expanded" => {
             ui_state.active_view = ActiveView::Main;
@@ -413,10 +473,22 @@ fn render_screenshot_frame(
 
     let steps = if hover_size_mode || hover_web_search_tooltip {
         4
-    } else if hover_web_search_btn {
+    } else if hover_web_search_btn || hover_unattrib_row {
         3
     } else {
         3
+    };
+    let target_pos_for_state = |st: &StorageUiState| -> Option<Pos2> {
+        if hover_size_mode {
+            st.first_row_size_rect.map(|r| r.center())
+        } else if hover_web_search_mode {
+            st.first_unattrib_web_search_rect.map(|r| r.center())
+        } else if hover_unattrib_row {
+            st.unattrib_mid_row_rect
+                .map(|r| Pos2::new((r.min.x + 180.0).min(r.center().x), r.center().y))
+        } else {
+            None
+        }
     };
     for step in 0..steps {
         let mut events = Vec::new();
@@ -430,16 +502,9 @@ fn render_screenshot_frame(
         } else {
             step as f64 * 0.05
         };
-        let target_hover_rect = if hover_size_mode {
-            ui_state.first_row_size_rect
-        } else if hover_web_search_mode {
-            ui_state.first_unattrib_web_search_rect
-        } else {
-            None
-        };
         if hover_mode && step >= 1 {
-            if let Some(target_r) = target_hover_rect {
-                events.push(egui::Event::PointerMoved(target_r.center()));
+            if let Some(hp) = target_pos_for_state(&ui_state) {
+                events.push(egui::Event::PointerMoved(hp));
             }
         }
         let mut raw = RawInput {
@@ -467,16 +532,8 @@ fn render_screenshot_frame(
                 sys_win,
                 &mut |_| {},
             );
-            let final_hover_rect = if hover_size_mode {
-                ui_state.first_row_size_rect
-            } else if hover_web_search_mode {
-                ui_state.first_unattrib_web_search_rect
-            } else {
-                None
-            };
             if hover_mode && step + 1 == steps {
-                if let Some(target_r) = final_hover_rect {
-                    let hp = target_r.center();
+                if let Some(hp) = target_pos_for_state(&ui_state) {
                     let p = c.layer_painter(egui::LayerId::new(
                         egui::Order::Tooltip,
                         egui::Id::new("hover_cursor_indicator"),
@@ -509,7 +566,12 @@ fn render_screenshot_frame(
             );
         }
     }
-    (phys_w, phys_h, painter.backbuffer_pixels().to_vec())
+    (
+        phys_w,
+        phys_h,
+        painter.backbuffer_pixels().to_vec(),
+        ui_state.first_drive_pod_rect,
+    )
 }
 
 fn upscale_crop_nn(
@@ -548,6 +610,9 @@ fn render_screenshot(
     search_query: &str,
     ledger_collapsed: Option<bool>,
     ledger_height_px: Option<f32>,
+    facet_publisher: Option<&str>,
+    facet_size: SizeBandFilter,
+    unattrib_search: &str,
 ) -> Result<(), String> {
     let drives = enumerate_fixed_drives();
     let sys_win = get_windows_directory();
@@ -567,7 +632,7 @@ fn render_screenshot(
 
     if view == "centering-zoom-200" {
         // Composite 200% zoomed optical centering proof: 100% Dark + 125% Light header buttons & badge rows.
-        let (dw, _dh, d_px) = render_screenshot_frame(
+        let (dw, _dh, d_px, _) = render_screenshot_frame(
             &report,
             &config,
             &sys_win,
@@ -580,8 +645,11 @@ fn render_screenshot(
             "",
             Some(false),
             None,
+            None,
+            SizeBandFilter::All,
+            "",
         );
-        let (lw, _lh, l_px) = render_screenshot_frame(
+        let (lw, _lh, l_px, _) = render_screenshot_frame(
             &report,
             &config,
             &sys_win,
@@ -594,6 +662,9 @@ fn render_screenshot(
             "",
             Some(false),
             None,
+            None,
+            SizeBandFilter::All,
+            "",
         );
 
         // Extract top-right header buttons & expanded badge row (Dependencies proven/shared/used-by strip).
@@ -634,7 +705,7 @@ fn render_screenshot(
     }
 
     let ppp = dpi_to_ppp(dpi);
-    let (phys_w, phys_h, fb) = render_screenshot_frame(
+    let (phys_w, phys_h, fb, first_pod_rect) = render_screenshot_frame(
         &report,
         &config,
         &sys_win,
@@ -647,7 +718,24 @@ fn render_screenshot(
         search_query,
         ledger_collapsed,
         ledger_height_px,
+        facet_publisher,
+        facet_size,
+        unattrib_search,
     );
+
+    if view == "drive-pod-crop-200" {
+        if let Some(pod_r) = first_pod_rect {
+            let pad = 6.0_f32;
+            let cx0 = ((pod_r.min.x - pad).max(0.0) * ppp).floor() as usize;
+            let cy0 = ((pod_r.min.y - pad).max(0.0) * ppp).floor() as usize;
+            let cx1 = (((pod_r.max.x + pad) * ppp).ceil() as usize).min(phys_w);
+            let cy1 = (((pod_r.max.y + pad) * ppp).ceil() as usize).min(phys_h);
+            let cw = cx1.saturating_sub(cx0).max(1);
+            let ch = cy1.saturating_sub(cy0).max(1);
+            let (out_w, out_h, zoomed) = upscale_crop_nn(&fb, phys_w, cx0, cy0, cw, ch, 2);
+            return save_bgra_u32_as_png(out_path, out_w, out_h, &zoomed);
+        }
+    }
 
     if view == "header-buttons-zoom" {
         let crop_x0 = (756.0 * ppp).round() as usize;

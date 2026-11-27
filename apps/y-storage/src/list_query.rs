@@ -1,7 +1,98 @@
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use y_core::config::{AppFilterChip, AppSortMode, SortDirection};
-use y_core::model::{AttributedApp, AttributionBasis, GrowthDelta};
+use y_core::config::{
+    AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
+    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, SortDirection,
+};
+#[cfg(test)]
+use y_core::config::SizeBandFilter;
+use y_core::model::{
+    AppCategory, AttributedApp, AttributionBasis, GrowthDelta, ScanReport, UnattributedItem,
+    ZoneKind,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnattributedSortMode {
+    #[default]
+    SizeDesc,
+    SizeAsc,
+    NameAsc,
+    NameDesc,
+}
+
+impl UnattributedSortMode {
+    pub const ALL_OPTIONS: [Self; 4] = [
+        Self::SizeDesc,
+        Self::SizeAsc,
+        Self::NameAsc,
+        Self::NameDesc,
+    ];
+
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::SizeDesc => "Size ↓",
+            Self::SizeAsc => "Size ↑",
+            Self::NameAsc => "Name A→Z",
+            Self::NameDesc => "Name Z→A",
+        }
+    }
+}
+
+fn unattrib_leaf_lower(path: &str) -> String {
+    let trimmed = path.trim_end_matches('\\');
+    trimmed
+        .rsplit('\\')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase()
+}
+
+/// View-only substring filter & sort over `ScanReport.unattributed` without modifying report items or totals.
+#[must_use]
+pub fn filter_and_sort_unattributed<'a>(
+    items: &'a [UnattributedItem],
+    query: &str,
+    sort: UnattributedSortMode,
+) -> (Vec<(usize, &'a UnattributedItem)>, u64) {
+    let q = query.trim().to_ascii_lowercase();
+    let mut out: Vec<(usize, &'a UnattributedItem)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| q.is_empty() || it.path.to_ascii_lowercase().contains(&q))
+        .collect();
+    match sort {
+        UnattributedSortMode::SizeDesc => {
+            // Preserve exact report ordering (bytes desc, path tie-break).
+        }
+        UnattributedSortMode::SizeAsc => {
+            out.sort_by(|(_, a), (_, b)| {
+                a.bytes
+                    .cmp(&b.bytes)
+                    .then_with(|| a.path.to_ascii_lowercase().cmp(&b.path.to_ascii_lowercase()))
+            });
+        }
+        UnattributedSortMode::NameAsc => {
+            out.sort_by(|(_, a), (_, b)| {
+                unattrib_leaf_lower(&a.path)
+                    .cmp(&unattrib_leaf_lower(&b.path))
+                    .then_with(|| a.path.to_ascii_lowercase().cmp(&b.path.to_ascii_lowercase()))
+                    .then_with(|| b.bytes.cmp(&a.bytes))
+            });
+        }
+        UnattributedSortMode::NameDesc => {
+            out.sort_by(|(_, a), (_, b)| {
+                unattrib_leaf_lower(&b.path)
+                    .cmp(&unattrib_leaf_lower(&a.path))
+                    .then_with(|| b.path.to_ascii_lowercase().cmp(&a.path.to_ascii_lowercase()))
+                    .then_with(|| b.bytes.cmp(&a.bytes))
+            });
+        }
+    }
+    let subtotal = out.iter().map(|(_, it)| it.bytes).sum();
+    (out, subtotal)
+}
 
 /// Extracts the signed growth delta vs the previous scan, returning `None` for apps with no prior baseline (`NoBaseline` or `New`).
 #[must_use]
@@ -39,7 +130,7 @@ pub fn app_matches_chip(
     }
 }
 
-/// Pure predicate checking whether an app matches the case-insensitive search query on name, publisher, or path.
+/// Pure predicate checking whether an app matches the case-insensitive search query on name, publisher, category, or path.
 #[must_use]
 pub fn app_matches_search(app: &AttributedApp, search_query: &str) -> bool {
     let q = search_query.trim().to_ascii_lowercase();
@@ -48,6 +139,9 @@ pub fn app_matches_search(app: &AttributedApp, search_query: &str) -> bool {
     }
     let name_hit = app.display_name.to_ascii_lowercase().contains(&q);
     if name_hit {
+        return true;
+    }
+    if app.publishers.is_empty() && "(no publisher)".contains(&q) {
         return true;
     }
     let pub_hit = app
@@ -65,7 +159,266 @@ pub fn app_matches_search(app: &AttributedApp, search_query: &str) -> bool {
         .any(|it| it.path.to_ascii_lowercase().contains(&q))
 }
 
+#[must_use]
+pub fn has_growth_baseline(report: &ScanReport) -> bool {
+    report
+        .apps
+        .iter()
+        .any(|a| !matches!(a.growth, GrowthDelta::NoBaseline))
+}
+
+/// Drops persisted facet selections that no longer exist in `report` so launches never land on empty stale filters.
+pub fn sanitize_facets_for_report(facets: &mut FacetFilters, report: &ScanReport) {
+    if let Some(ref pub_key) = facets.publisher {
+        let exists = if pub_key == NO_PUBLISHER_FACET_KEY {
+            report.apps.iter().any(|a| a.publishers.is_empty())
+        } else {
+            report.apps.iter().any(|a| {
+                a.publishers
+                    .iter()
+                    .any(|p| p.trim().eq_ignore_ascii_case(pub_key))
+            })
+        };
+        if !exists {
+            facets.publisher = None;
+        }
+    }
+    if let Some(dl) = facets.drive {
+        let dl_u = dl.to_ascii_uppercase();
+        let has_drive = report
+            .drives
+            .iter()
+            .any(|d| d.letter.to_ascii_uppercase() == dl_u)
+            || report.apps.iter().any(|a| {
+                a.items
+                    .iter()
+                    .any(|it| it.drive_letter.to_ascii_uppercase() == dl_u)
+            });
+        if !has_drive {
+            facets.drive = None;
+        }
+    }
+    if facets.growth != GrowthFacetFilter::All && !has_growth_baseline(report) {
+        facets.growth = GrowthFacetFilter::All;
+    }
+}
+
+/// Builds `(facet_key, display_label, app_count, total_bytes)` ordered by summed bytes descending,
+/// grouping apps without a publisher under `"(no publisher)"`.
+#[must_use]
+pub fn publisher_facet_options(apps: &[AttributedApp]) -> Vec<(String, String, usize, u64)> {
+    let mut map: HashMap<String, (String, usize, u64)> = HashMap::new();
+    for app in apps {
+        if app.publishers.is_empty() {
+            let e = map
+                .entry(NO_PUBLISHER_FACET_KEY.to_string())
+                .or_insert_with(|| ("(no publisher)".to_string(), 0, 0));
+            e.1 += 1;
+            e.2 = e.2.saturating_add(app.total_bytes);
+        } else {
+            let mut seen_app_pubs = HashSet::new();
+            for p in &app.publishers {
+                let pt = p.trim();
+                if pt.is_empty() {
+                    continue;
+                }
+                let kl = pt.to_ascii_lowercase();
+                if seen_app_pubs.insert(kl) {
+                    let e = map
+                        .entry(pt.to_string())
+                        .or_insert_with(|| (pt.to_string(), 0, 0));
+                    e.1 += 1;
+                    e.2 = e.2.saturating_add(app.total_bytes);
+                }
+            }
+        }
+    }
+    let mut out: Vec<(String, String, usize, u64)> = map
+        .into_iter()
+        .map(|(k, (lbl, cnt, bytes))| (k, lbl, cnt, bytes))
+        .collect();
+    out.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then_with(|| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()))
+    });
+    out
+}
+
+#[must_use]
+pub fn category_facet_options(apps: &[AttributedApp]) -> Vec<(AppCategory, usize)> {
+    let all_cats = [
+        AppCategory::Games,
+        AppCategory::PlatformsAndLaunchers,
+        AppCategory::Browsers,
+        AppCategory::Communication,
+        AppCategory::Development,
+        AppCategory::MediaAndCreative,
+        AppCategory::Productivity,
+        AppCategory::Utilities,
+        AppCategory::SystemAndRuntimes,
+        AppCategory::Uncategorized,
+    ];
+    let mut counts: BTreeMap<AppCategory, usize> = BTreeMap::new();
+    for a in apps {
+        *counts.entry(a.category).or_default() += 1;
+    }
+    all_cats
+        .into_iter()
+        .map(|c| (c, counts.get(&c).copied().unwrap_or(0)))
+        .collect()
+}
+
+fn app_occupies_zone_facet(app: &AttributedApp, zf: FootprintZoneFilter) -> bool {
+    match zf {
+        FootprintZoneFilter::All => true,
+        FootprintZoneFilter::InstallFolder => {
+            app.bases.contains(&AttributionBasis::InstallLocation)
+                || app.items.iter().any(|it| {
+                    it.zone == Some(ZoneKind::Body)
+                        || it.basis == Some(AttributionBasis::InstallLocation)
+                })
+        }
+        FootprintZoneFilter::AppData => app.items.iter().any(|it| {
+            let pl = it.path.to_ascii_lowercase();
+            pl.contains("\\appdata\\local\\")
+                || pl.contains("\\appdata\\roaming\\")
+                || pl.contains("\\appdata\\locallow\\")
+        }),
+        FootprintZoneFilter::ProgramData => app
+            .items
+            .iter()
+            .any(|it| it.path.to_ascii_lowercase().contains("\\programdata\\")),
+        FootprintZoneFilter::ProfileOrDotFolder => {
+            app.bases.contains(&AttributionBasis::StandaloneFolder)
+                || app.id.starts_with("dot:")
+                || app.items.iter().any(|it| {
+                    if it.basis == Some(AttributionBasis::StandaloneFolder) {
+                        return true;
+                    }
+                    let pl = it.path.trim_end_matches('\\').to_ascii_lowercase();
+                    let parts: Vec<&str> = pl.split('\\').collect();
+                    parts.len() == 4
+                        && parts[1] == "users"
+                        && parts[3] != "appdata"
+                })
+        }
+    }
+}
+
+#[must_use]
+pub fn app_matches_facets(
+    app: &AttributedApp,
+    facets: &FacetFilters,
+    shared_app_ids: &HashSet<String>,
+) -> bool {
+    if let Some(ref pub_key) = facets.publisher {
+        let hit = if pub_key == NO_PUBLISHER_FACET_KEY {
+            app.publishers.is_empty()
+        } else {
+            app.publishers
+                .iter()
+                .any(|p| p.trim().eq_ignore_ascii_case(pub_key))
+        };
+        if !hit {
+            return false;
+        }
+    }
+    if let Some(cat) = facets.category {
+        if app.category != cat {
+            return false;
+        }
+    }
+    if let Some(drv) = facets.drive {
+        let dl = drv.to_ascii_uppercase();
+        let on_drv = app
+            .items
+            .iter()
+            .any(|it| it.drive_letter.to_ascii_uppercase() == dl)
+            || app.install_location.as_deref().is_some_and(|il| {
+                il.as_bytes()
+                    .first()
+                    .is_some_and(|b| (*b as char).to_ascii_uppercase() == dl)
+                    && il.as_bytes().get(1) == Some(&b':')
+            });
+        if !on_drv {
+            return false;
+        }
+    }
+    if !facets.size_band.matches_bytes(app.total_bytes) {
+        return false;
+    }
+    match facets.dep_state {
+        DepStateFilter::All => {}
+        DepStateFilter::HasDependencies => {
+            if app.dependencies.is_empty() {
+                return false;
+            }
+        }
+        DepStateFilter::NoKnownDependencies => {
+            if !app.dependencies.is_empty() {
+                return false;
+            }
+        }
+        DepStateFilter::SharedUsedByOthers => {
+            if !shared_app_ids.contains(&app.id) {
+                return false;
+            }
+        }
+    }
+    if !app_occupies_zone_facet(app, facets.footprint_zone) {
+        return false;
+    }
+    match facets.growth {
+        GrowthFacetFilter::All => {}
+        GrowthFacetFilter::Grew => {
+            if !matches!(app.growth, GrowthDelta::Changed(d) if d > 0)
+                && !matches!(app.growth, GrowthDelta::New(_))
+            {
+                return false;
+            }
+        }
+        GrowthFacetFilter::Shrank => {
+            if !matches!(app.growth, GrowthDelta::Changed(d) if d < 0) {
+                return false;
+            }
+        }
+        GrowthFacetFilter::Unchanged => {
+            if !matches!(app.growth, GrowthDelta::Changed(0)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Combines the active filter chip, search text, and general facets using logical AND.
+#[must_use]
+pub fn filter_and_sort_apps_with_facets<'a>(
+    apps: &'a [AttributedApp],
+    mode: AppSortMode,
+    dir: SortDirection,
+    chip: AppFilterChip,
+    search_query: &str,
+    facets: &FacetFilters,
+    shared_app_ids: &HashSet<String>,
+    system_drive_letter: char,
+) -> Vec<&'a AttributedApp> {
+    let mut out: Vec<&'a AttributedApp> = apps
+        .iter()
+        .filter(|app| {
+            app_matches_chip(app, chip, system_drive_letter)
+                && app_matches_search(app, search_query)
+                && app_matches_facets(app, facets, shared_app_ids)
+        })
+        .collect();
+    if (mode, dir) != (AppSortMode::Size, SortDirection::Desc) {
+        out.sort_by(|a, b| compare_apps(a, b, mode, dir));
+    }
+    out
+}
+
 /// Combines the active filter chip and search text using logical AND.
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn app_matches_filter(
     app: &AttributedApp,
@@ -175,6 +528,7 @@ pub fn compare_apps(
 }
 
 /// Filters and sorts the app list without mutating report totals or original report ordering.
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn filter_and_sort_apps<'a>(
     apps: &'a [AttributedApp],
@@ -666,5 +1020,188 @@ mod tests {
             .map(|x| x.id.as_str())
             .collect();
         assert_eq!(filtered, vec!["reg:edge", "reg:chrome"]);
+    }
+
+    #[test]
+    fn unattributed_filter_and_sort_preserves_totals_and_matches_substrings() {
+        let items = vec![
+            UnattributedItem {
+                path: r"C:\Users\Win\AppData\Local\AlphaTool".into(),
+                bytes: 5_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\ProgramData\Microsoft\Shared".into(),
+                bytes: 9_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+            UnattributedItem {
+                path: r"C:\Users\Win\AppData\Roaming\zeta_cache".into(),
+                bytes: 1_000,
+                drive_letter: 'C',
+                zone_hint: Some(ZoneKind::Red),
+            },
+        ];
+
+        // Default SizeDesc with empty query preserves order and sums full total
+        let (all, total) = filter_and_sort_unattributed(&items, "", UnattributedSortMode::SizeDesc);
+        assert_eq!(all.len(), 3);
+        assert_eq!(total, 15_000);
+
+        // Name ascending puts AlphaTool first
+        let (name_asc, _) = filter_and_sort_unattributed(&items, "", UnattributedSortMode::NameAsc);
+        assert_eq!(name_asc[0].1.path, r"C:\Users\Win\AppData\Local\AlphaTool");
+        assert_eq!(name_asc[2].1.path, r"C:\Users\Win\AppData\Roaming\zeta_cache");
+
+        // Substring query matches parent path segments case-insensitively
+        let (appdata, sub_bytes) =
+            filter_and_sort_unattributed(&items, "appdata", UnattributedSortMode::SizeAsc);
+        assert_eq!(appdata.len(), 2);
+        assert_eq!(sub_bytes, 6_000);
+        assert_eq!(appdata[0].1.bytes, 1_000);
+        assert_eq!(appdata[1].1.bytes, 5_000);
+    }
+
+    #[test]
+    fn facet_filters_combine_with_and_and_fallback_cleanly_on_missing_values() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let mut ms_big = make_app(
+            "reg:xbox",
+            "Xbox Service",
+            "Microsoft Corporation",
+            7 * GIB,
+            GrowthDelta::Changed(500),
+            None,
+            vec![AttributionBasis::InstallLocation],
+            &['C'],
+        );
+        ms_big.category = AppCategory::Games;
+        ms_big.dependencies.push(y_core::model::DependencyRecord {
+            target_id: "directx-runtime".into(),
+            target_name: "DirectX Runtime".into(),
+            kind: y_core::model::DependencyKind::SharedRuntime,
+            present: true,
+            own_size_bytes: None,
+            shared: true,
+            basis: "PE import".into(),
+            confidence: y_core::model::DependencyConfidence::Proven,
+            imported_by_binary: true,
+        });
+
+        let mut ms_small = make_app(
+            "reg:sdk",
+            "Windows SDK",
+            "Microsoft Corporation",
+            200 * 1024 * 1024,
+            GrowthDelta::Changed(-100),
+            None,
+            vec![AttributionBasis::Token],
+            &['D'],
+        );
+        ms_small.items[0].zone = Some(ZoneKind::Green);
+        ms_small.items[0].path = r"D:\ProgramData\Package Cache\SDK".into();
+        ms_small.category = AppCategory::Development;
+
+        let mut ea_huge = make_app(
+            "reg:fifa",
+            "FIFA 23",
+            "EA Canada",
+            48 * GIB,
+            GrowthDelta::Changed(0),
+            None,
+            vec![AttributionBasis::InstallLocation],
+            &['C', 'D'],
+        );
+        ea_huge.category = AppCategory::Games;
+
+        let apps = vec![ms_big, ms_small, ea_huge];
+        let mut shared_ids = HashSet::new();
+        shared_ids.insert("reg:sdk".to_string());
+
+        let facets = FacetFilters {
+            publisher: Some("Microsoft Corporation".into()),
+            size_band: SizeBandFilter::Ge1Gb,
+            drive: Some('C'),
+            ..FacetFilters::default()
+        };
+        let matched = filter_and_sort_apps_with_facets(
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            &facets,
+            &shared_ids,
+            'C',
+        );
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, "reg:xbox");
+
+        // ProgramData + Shared dependency matches reg:sdk only
+        let f2 = FacetFilters {
+            footprint_zone: FootprintZoneFilter::ProgramData,
+            dep_state: DepStateFilter::SharedUsedByOthers,
+            growth: GrowthFacetFilter::Shrank,
+            ..FacetFilters::default()
+        };
+        let m2 = filter_and_sort_apps_with_facets(
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "",
+            &f2,
+            &shared_ids,
+            'C',
+        );
+        assert_eq!(m2.len(), 1);
+        assert_eq!(m2[0].id, "reg:sdk");
+
+        // Stale persisted publisher/drive resets to None instead of yielding empty list
+        let rep = ScanReport {
+            scan_timestamp_unix: 1,
+            scan_timestamp_display: "now".into(),
+            duration_ms: 1,
+            drives: vec![y_core::model::DriveInfo {
+                letter: 'C',
+                root: "C:\\".into(),
+                total_bytes: 100,
+                free_bytes: 50,
+                used_bytes: 50,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+            }],
+            registry_stats: y_core::model::RegistryDiscoveryStats {
+                raw_display_name_entries: 3,
+                raw_with_install_location: 2,
+                canonical_apps: 3,
+                canonical_with_direct_install_location: 2,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps,
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system: vec![],
+            windows_system_total_bytes: 0,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            catalog_source: String::new(),
+            warnings: vec![],
+        };
+        let mut stale = FacetFilters {
+            publisher: Some("Vanished Publisher".into()),
+            drive: Some('Z'),
+            ..FacetFilters::default()
+        };
+        sanitize_facets_for_report(&mut stale, &rep);
+        assert_eq!(stale.publisher, None);
+        assert_eq!(stale.drive, None);
     }
 }

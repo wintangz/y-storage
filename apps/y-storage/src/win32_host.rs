@@ -26,14 +26,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon,
     DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HICON, ICON_BIG, ICON_SMALL, ICONINFO,
-    IDC_ARROW, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, PM_REMOVE,
-    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON,
-    SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_SHOW, SW_SHOWMAXIMIZED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOWPLACEMENT,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETICON, WM_SIZE,
-    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadCursorW,
+    LoadImageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYSMICON, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SW_SHOWMAXIMIZED, SWP_NOACTIVATE, SWP_NOZORDER,
+    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use y_core::cache::{FolderSizeCache, default_last_scan_path, load_last_scan, save_last_scan_atomic};
 use y_core::config::{AppConfig, ThemeMode, WindowPlacementConfig};
@@ -178,6 +178,7 @@ struct WindowHostState {
     window_focused: bool,
     last_mouse_px: Option<(i32, i32)>,
     tracking_mouse_leave: bool,
+    hover_cursor_icon: egui::CursorIcon,
     repaint_timer_active: bool,
     smoke_mode: bool,
     start_time: Instant,
@@ -529,6 +530,7 @@ pub fn run_gui_app(
         window_focused: true,
         last_mouse_px: None,
         tracking_mouse_leave: false,
+        hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         smoke_mode: smoke_ms.is_some(),
         start_time: Instant::now(),
@@ -620,6 +622,14 @@ pub fn run_gui_app(
 
     // `WM_DESTROY` drops `WindowHostState` (including its `small_icon`/`large_icon` handles).
     Ok(())
+}
+
+fn cursor_res_for_egui(icon: egui::CursorIcon) -> *const u16 {
+    match icon {
+        egui::CursorIcon::Text => IDC_IBEAM,
+        egui::CursorIcon::ResizeVertical => IDC_SIZENS,
+        _ => IDC_ARROW,
+    }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -815,6 +825,13 @@ unsafe extern "system" fn wnd_proc(
                     );
                 });
                 let egui_run_ms = t_egui_start.elapsed().as_secs_f64() * 1000.0;
+                let next_cursor = full_out.platform_output.cursor_icon;
+                if next_cursor != st.hover_cursor_icon {
+                    st.hover_cursor_icon = next_cursor;
+                    if st.tracking_mouse_leave {
+                        unsafe { SetCursor(LoadCursorW(null_mut(), cursor_res_for_egui(next_cursor))) };
+                    }
+                }
 
                 let clear_bg = match config_snap.theme_mode {
                     ThemeMode::Dark => CLEAR_BG_DARK_RGB,
@@ -892,12 +909,14 @@ unsafe extern "system" fn wnd_proc(
                             sort_direction,
                             filter_chip,
                             search_query,
+                            facets,
                         } => {
                             let mut g = st.controller.lock().unwrap();
                             g.config.sort_mode = sort_mode;
                             g.config.sort_direction = sort_direction;
                             g.config.filter_chip = filter_chip;
                             g.config.search_query = search_query;
+                            g.config.facets = facets;
                             if !st.smoke_mode {
                                 let _ = g.config.save_atomic(&g.config_path);
                             }
@@ -925,6 +944,7 @@ unsafe extern "system" fn wnd_proc(
                             new_cfg.sort_direction = g.config.sort_direction;
                             new_cfg.filter_chip = g.config.filter_chip;
                             new_cfg.search_query = g.config.search_query.clone();
+                            new_cfg.facets = g.config.facets.clone();
                             new_cfg.ledger_collapsed = g.config.ledger_collapsed;
                             new_cfg.ledger_height_px = g.config.ledger_height_px;
                             g.config = new_cfg;
@@ -966,9 +986,19 @@ unsafe extern "system" fn wnd_proc(
             unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
+        WM_SETCURSOR => {
+            let hit_code = (lparam & 0xFFFF) as u16;
+            if hit_code == 1 {
+                let st = unsafe { &*state_ptr };
+                unsafe { SetCursor(LoadCursorW(null_mut(), cursor_res_for_egui(st.hover_cursor_icon))) };
+                return 1;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_MOUSELEAVE_MSG => {
             let st = unsafe { &mut *state_ptr };
             st.tracking_mouse_leave = false;
+            st.hover_cursor_icon = egui::CursorIcon::Default;
             st.last_mouse_px = None;
             st.events.push(Event::PointerGone);
             st.needs_redraw = true;
@@ -1350,6 +1380,7 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
         window_focused: true,
         last_mouse_px: None,
         tracking_mouse_leave: false,
+        hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         smoke_mode: true,
         start_time: Instant::now(),
@@ -1772,6 +1803,7 @@ pub fn run_titlebar_capture(
         window_focused: true,
         last_mouse_px: None,
         tracking_mouse_leave: false,
+        hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         smoke_mode: true,
         start_time: Instant::now(),

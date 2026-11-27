@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::normalize_path_key;
-use crate::model::DriveInfo;
+use crate::model::{AppCategory, DriveInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemeMode {
@@ -73,6 +73,174 @@ pub enum AppFilterChip {
     HasSystemDriveFootprint,
 }
 
+pub const NO_PUBLISHER_FACET_KEY: &str = "__no_publisher__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SizeBandFilter {
+    #[default]
+    All,
+    Ge10Gb,
+    Between1And10Gb,
+    Ge1Gb,
+    Between100MbAnd1Gb,
+    Lt100Mb,
+}
+
+impl SizeBandFilter {
+    pub const ALL_OPTIONS: [Self; 6] = [
+        Self::All,
+        Self::Ge10Gb,
+        Self::Between1And10Gb,
+        Self::Ge1Gb,
+        Self::Between100MbAnd1Gb,
+        Self::Lt100Mb,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All sizes",
+            Self::Ge10Gb => "≥ 10 GB",
+            Self::Between1And10Gb => "1–10 GB",
+            Self::Ge1Gb => "≥ 1 GB",
+            Self::Between100MbAnd1Gb => "100 MB – 1 GB",
+            Self::Lt100Mb => "< 100 MB",
+        }
+    }
+
+    #[must_use]
+    pub const fn matches_bytes(self, total_bytes: u64) -> bool {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        match self {
+            Self::All => true,
+            Self::Ge10Gb => total_bytes >= 10 * GIB,
+            Self::Between1And10Gb => total_bytes >= GIB && total_bytes < 10 * GIB,
+            Self::Ge1Gb => total_bytes >= GIB,
+            Self::Between100MbAnd1Gb => total_bytes >= 100 * MIB && total_bytes < GIB,
+            Self::Lt100Mb => total_bytes < 100 * MIB,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DepStateFilter {
+    #[default]
+    All,
+    HasDependencies,
+    NoKnownDependencies,
+    SharedUsedByOthers,
+}
+
+impl DepStateFilter {
+    pub const ALL_OPTIONS: [Self; 4] = [
+        Self::All,
+        Self::HasDependencies,
+        Self::NoKnownDependencies,
+        Self::SharedUsedByOthers,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All dependency states",
+            Self::HasDependencies => "Has dependencies",
+            Self::NoKnownDependencies => "No known dependencies",
+            Self::SharedUsedByOthers => "Shared — used by other apps",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FootprintZoneFilter {
+    #[default]
+    All,
+    InstallFolder,
+    AppData,
+    ProgramData,
+    ProfileOrDotFolder,
+}
+
+impl FootprintZoneFilter {
+    pub const ALL_OPTIONS: [Self; 5] = [
+        Self::All,
+        Self::InstallFolder,
+        Self::AppData,
+        Self::ProgramData,
+        Self::ProfileOrDotFolder,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All zones",
+            Self::InstallFolder => "Install folder",
+            Self::AppData => "AppData",
+            Self::ProgramData => "ProgramData",
+            Self::ProfileOrDotFolder => "Profile / dot-folder",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GrowthFacetFilter {
+    #[default]
+    All,
+    Grew,
+    Shrank,
+    Unchanged,
+}
+
+impl GrowthFacetFilter {
+    pub const ALL_OPTIONS: [Self; 4] = [
+        Self::All,
+        Self::Grew,
+        Self::Shrank,
+        Self::Unchanged,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All growth",
+            Self::Grew => "Grew",
+            Self::Shrank => "Shrank",
+            Self::Unchanged => "Unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FacetFilters {
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub category: Option<AppCategory>,
+    #[serde(default)]
+    pub drive: Option<char>,
+    #[serde(default)]
+    pub size_band: SizeBandFilter,
+    #[serde(default)]
+    pub dep_state: DepStateFilter,
+    #[serde(default)]
+    pub footprint_zone: FootprintZoneFilter,
+    #[serde(default)]
+    pub growth: GrowthFacetFilter,
+}
+
+impl FacetFilters {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.publisher.is_none()
+            && self.category.is_none()
+            && self.drive.is_none()
+            && self.size_band == SizeBandFilter::All
+            && self.dep_state == DepStateFilter::All
+            && self.footprint_zone == FootprintZoneFilter::All
+            && self.growth == GrowthFacetFilter::All
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveScanTarget {
     pub letter: char,
@@ -105,6 +273,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub search_query: String,
     #[serde(default)]
+    pub facets: FacetFilters,
+    #[serde(default)]
     pub ledger_collapsed: bool,
     #[serde(default)]
     pub ledger_height_px: Option<f32>,
@@ -121,6 +291,7 @@ impl Default for AppConfig {
             sort_direction: SortDirection::Desc,
             filter_chip: AppFilterChip::All,
             search_query: String::new(),
+            facets: FacetFilters::default(),
             ledger_collapsed: false,
             ledger_height_px: None,
             targets: vec![DriveScanTarget {
@@ -172,6 +343,7 @@ impl AppConfig {
             sort_direction: SortDirection::Desc,
             filter_chip: AppFilterChip::All,
             search_query: String::new(),
+            facets: FacetFilters::default(),
             ledger_collapsed: false,
             ledger_height_px: None,
             targets,

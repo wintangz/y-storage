@@ -7,7 +7,10 @@ use egui::{
     Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, Layout, Margin,
     Order, Pos2, Rect, RichText, Rounding, Sense, Stroke, TextStyle, UiBuilder, Vec2,
 };
-use y_core::config::{AppConfig, AppFilterChip, AppSortMode, SortDirection, ThemeMode};
+use y_core::config::{
+    AppConfig, AppFilterChip, AppSortMode, DepStateFilter, FacetFilters, FootprintZoneFilter,
+    GrowthFacetFilter, NO_PUBLISHER_FACET_KEY, SizeBandFilter, SortDirection, ThemeMode,
+};
 use y_core::discovery::{normalize_app_token, normalize_path_key};
 use y_core::model::{
     DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
@@ -15,7 +18,11 @@ use y_core::model::{
 };
 use y_platform_windows::scanner::ScanProgressSnapshot;
 
-use crate::list_query::filter_and_sort_apps;
+use crate::list_query::{
+    UnattributedSortMode, category_facet_options, filter_and_sort_apps_with_facets,
+    filter_and_sort_unattributed, has_growth_baseline, publisher_facet_options,
+    sanitize_facets_for_report,
+};
 
 // Pastel and semantic constants synced directly with z-controller (DESIGN.md §2.1).
 pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
@@ -84,6 +91,7 @@ pub enum UiAction {
         sort_direction: SortDirection,
         filter_chip: AppFilterChip,
         search_query: String,
+        facets: FacetFilters,
     },
     UpdateLedgerLayout {
         collapsed: bool,
@@ -215,6 +223,8 @@ struct CachedReportData {
     rev_counts: HashMap<String, usize>,
     rev_by_app_token: HashMap<String, (String, usize)>,
     rev_by_app_id: HashMap<String, (Option<String>, usize)>,
+    shared_app_ids: HashSet<String>,
+    has_growth_baseline: bool,
     sys_reconcile: Vec<(char, String, String, i128)>,
 }
 
@@ -224,6 +234,7 @@ struct CachedFilteredList {
     sort_direction: SortDirection,
     filter_chip: AppFilterChip,
     search_query: String,
+    facets: FacetFilters,
     sys_drive: char,
     visible_indices: Vec<usize>,
 }
@@ -242,6 +253,10 @@ pub struct StorageUiState {
     pub sort_direction: SortDirection,
     pub filter_chip: AppFilterChip,
     pub search_query: String,
+    pub facets: FacetFilters,
+    pub open_facet_popup: Option<&'static str>,
+    pub unattrib_search_query: String,
+    pub unattrib_sort: UnattributedSortMode,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
     pub expanded_deps: HashSet<String>,
@@ -260,6 +275,8 @@ pub struct StorageUiState {
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
     pub first_unattrib_web_search_rect: Option<Rect>,
+    pub unattrib_mid_row_rect: Option<Rect>,
+    pub first_drive_pod_rect: Option<Rect>,
     wt_logo_tex: Option<(u32, egui::TextureHandle)>,
     unattrib_exists_cache: HashMap<String, bool>,
     cached_report: Option<CachedReportData>,
@@ -278,6 +295,10 @@ impl Default for StorageUiState {
             sort_direction: SortDirection::Desc,
             filter_chip: AppFilterChip::All,
             search_query: String::new(),
+            facets: FacetFilters::default(),
+            open_facet_popup: None,
+            unattrib_search_query: String::new(),
+            unattrib_sort: UnattributedSortMode::SizeDesc,
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
             expanded_deps: HashSet::new(),
@@ -296,6 +317,8 @@ impl Default for StorageUiState {
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
             first_unattrib_web_search_rect: None,
+            unattrib_mid_row_rect: None,
+            first_drive_pod_rect: None,
             wt_logo_tex: None,
             unattrib_exists_cache: HashMap::new(),
             cached_report: None,
@@ -316,6 +339,7 @@ impl StorageUiState {
             sort_direction: cfg.sort_direction,
             filter_chip: cfg.filter_chip,
             search_query: cfg.search_query.clone(),
+            facets: cfg.facets.clone(),
             ledger_collapsed: cfg.ledger_collapsed,
             ledger_height_px: cfg.ledger_height_px,
             ..Self::default()
@@ -500,6 +524,7 @@ pub fn configure_fonts_and_theme(ctx: &egui::Context, mode: ThemeMode) {
     ]
     .into_iter()
     .collect();
+    style.interaction.selectable_labels = false;
     ctx.set_style(style);
     apply_theme_visuals(ctx, mode);
 }
@@ -570,6 +595,7 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
     visuals.widgets.open.rounding = Rounding::same(6.0);
 
     style.visuals = visuals;
+    style.interaction.selectable_labels = false;
     style.animation_time = 0.0;
     style.spacing.item_spacing = Vec2::new(SPACE_8, SPACE_4);
     style.spacing.button_padding = Vec2::new(SPACE_12, SPACE_4);
@@ -1268,6 +1294,12 @@ fn draw_crisp_text_input(
             )
         },
     );
+    if ui.rect_contains_pointer(inner.response.rect) || inner.inner.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        if inner.response.clicked() && !inner.inner.has_focus() {
+            ui.ctx().memory_mut(|m| m.request_focus(edit_id));
+        }
+    }
     inner.inner
 }
 
@@ -1637,7 +1669,7 @@ fn draw_truncated_text(
     if strong {
         rt = rt.strong();
     }
-    let resp = ui.add(egui::Label::new(rt).truncate());
+    let resp = ui.add(egui::Label::new(rt).truncate().selectable(false));
     if measured_w > resp.rect.width() + 0.5 {
         resp.on_hover_text(text)
     } else {
@@ -2053,6 +2085,274 @@ fn draw_static_col_header(
     ui.painter().galley(text_pos, galley, fg);
 }
 
+/// Facet filter dropdown trigger: strictly neutral (`SecondaryOutline`) at rest, accent ONLY when open, active, or hovered.
+fn draw_facet_selector_button(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    is_open: bool,
+    is_non_default: bool,
+    pal: &ThemePalette,
+) -> egui::Response {
+    const BTN_H: f32 = 24.0;
+    let font_id = FontId::new(11.5, FontFamily::Proportional);
+    let measure_galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), pal.text));
+    let chevron_w = 10.0;
+    let desired_w = (measure_galley.size().x + SPACE_8 * 2.0 + 4.0 + chevron_w).round();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(desired_w, BTN_H), Sense::hover());
+    let resp = ui.interact(rect, ui.make_persistent_id(("facet_trigger", id_salt)), Sense::click());
+    let (fill, border_col, text_color) = resolve_button_colors(
+        ButtonVariant::SecondaryOutline,
+        true,
+        resp.is_pointer_button_down_on(),
+        resp.hovered(),
+        is_open || is_non_default,
+        pal,
+    );
+    let ppp = ui.ctx().pixels_per_point();
+    let snapped =
+        paint_crisp_bordered_box(ui.painter(), rect, RADIUS_CONTROL, fill, border_col, 1.0, ppp);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
+    let label_box = Rect::from_min_max(
+        Pos2::new(snapped.min.x + SPACE_8, snapped.min.y),
+        Pos2::new((snapped.max.x - chevron_w - SPACE_8).max(snapped.min.x + SPACE_8), snapped.max.y),
+    );
+    let text_pos = optical_galley_pos(ui, label_box, &galley, None, false);
+    ui.painter().galley(text_pos, galley, text_color);
+
+    let cx = snap_scalar_to_px(snapped.max.x - SPACE_8 - 3.5, ppp);
+    let cy = snap_scalar_to_px(snapped.center().y, ppp);
+    let st = Stroke::new(1.3_f32, text_color);
+    ui.painter()
+        .line_segment([Pos2::new(cx - 3.0, cy - 1.5), Pos2::new(cx, cy + 2.0)], st);
+    ui.painter()
+        .line_segment([Pos2::new(cx, cy + 2.0), Pos2::new(cx + 3.0, cy - 1.5)], st);
+    resp
+}
+
+fn draw_facet_popup_row(
+    ui: &mut egui::Ui,
+    row_w: f32,
+    left_label: &str,
+    right_meta: Option<&str>,
+    selected: bool,
+    pal: &ThemePalette,
+) -> bool {
+    const ROW_H: f32 = 24.0;
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, ROW_H), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter()
+            .set(slot, egui::Shape::rect_filled(rect, Rounding::same(RADIUS_PILL), pal.widget_hover));
+    } else if selected {
+        ui.painter()
+            .set(slot, egui::Shape::rect_filled(rect, Rounding::same(RADIUS_PILL), pal.pill_blue_fill));
+    }
+
+    let fg = if selected {
+        pal.accent_line
+    } else if hovered {
+        pal.text
+    } else {
+        pal.text
+    };
+    let ppp = ui.ctx().pixels_per_point();
+    let pad_rect = Rect::from_min_max(
+        Pos2::new(rect.min.x + SPACE_8, rect.min.y),
+        Pos2::new((rect.max.x - SPACE_8).max(rect.min.x + SPACE_8), rect.max.y),
+    );
+    let meta_w = if let Some(meta) = right_meta {
+        let mg = ui.fonts(|f| {
+            f.layout_no_wrap(
+                meta.to_owned(),
+                FontId::new(10.5, FontFamily::Monospace),
+                pal.muted,
+            )
+        });
+        let mp = optical_galley_pos(ui, pad_rect, &mg, Some(pad_rect.max.x), false);
+        let w = mg.size().x + SPACE_8;
+        ui.painter().galley(mp, mg, pal.muted);
+        w
+    } else {
+        0.0
+    };
+
+    let avail_lbl_w = (pad_rect.width() - meta_w).max(40.0);
+    let lbl_font = FontId::new(11.5, FontFamily::Proportional);
+    let (display_lbl, _) = truncate_word_boundary_px(ui, left_label, &lbl_font, avail_lbl_w);
+    let lg = ui.fonts(|f| f.layout_no_wrap(display_lbl, lbl_font, fg));
+    let lp = optical_galley_pos(ui, pad_rect, &lg, None, false);
+    ui.painter().galley(lp, lg, fg);
+    let _ = snap_scalar_to_px(rect.min.y, ppp);
+    resp.clicked()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_facet_popup_overlay(
+    ctx: &egui::Context,
+    ui_state: &mut StorageUiState,
+    rep: &ScanReport,
+    facet_key: &'static str,
+    trigger_rect: Rect,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    let screen = ctx.screen_rect();
+    let popup_w = match facet_key {
+        "publisher" => 360.0_f32,
+        "category" => 260.0_f32,
+        "deps" | "zone" => 256.0_f32,
+        _ => 220.0_f32,
+    };
+    let pos_x = trigger_rect
+        .left()
+        .clamp(screen.left() + SPACE_16, (screen.right() - SPACE_16 - popup_w).max(screen.left() + SPACE_16));
+    let pos_y = (trigger_rect.bottom() + SPACE_4).min((screen.bottom() - 120.0).max(screen.top() + SPACE_16));
+
+    let area_resp = egui::Area::new(egui::Id::new(("facet_popup_overlay", facet_key)))
+        .order(Order::Foreground)
+        .fixed_pos(Pos2::new(pos_x, pos_y))
+        .show(ctx, |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.accent_line,
+                RADIUS_PANEL,
+                Margin::same(SPACE_8),
+                |ui| {
+                    let inner_w = popup_w - SPACE_16 - 2.0;
+                    ui.set_width(inner_w);
+                    let mut picked = false;
+                    draw_synced_scroll_area(
+                        ui,
+                        ("facet_popup_scroll", facet_key),
+                        Some(260.0),
+                        [false, true],
+                        pal,
+                        pal.panel,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            let row_w = ui.available_width().max(120.0);
+                            match facet_key {
+                                "publisher" => {
+                                    let is_all = ui_state.facets.publisher.is_none();
+                                    if draw_facet_popup_row(ui, row_w, "All publishers", None, is_all, pal) {
+                                        ui_state.facets.publisher = None;
+                                        picked = true;
+                                    }
+                                    for (key, lbl, cnt, bytes) in publisher_facet_options(&rep.apps) {
+                                        let sel = ui_state
+                                            .facets
+                                            .publisher
+                                            .as_deref()
+                                            .is_some_and(|p| p.eq_ignore_ascii_case(&key));
+                                        let meta = format!("{cnt} · {}", format_size_2dec(bytes));
+                                        if draw_facet_popup_row(ui, row_w, &lbl, Some(&meta), sel, pal) {
+                                            ui_state.facets.publisher = Some(key);
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "category" => {
+                                    let is_all = ui_state.facets.category.is_none();
+                                    if draw_facet_popup_row(ui, row_w, "All categories", None, is_all, pal) {
+                                        ui_state.facets.category = None;
+                                        picked = true;
+                                    }
+                                    for (cat, cnt) in category_facet_options(&rep.apps) {
+                                        let sel = ui_state.facets.category == Some(cat);
+                                        let meta = format!("{cnt}");
+                                        if draw_facet_popup_row(ui, row_w, cat.label(), Some(&meta), sel, pal) {
+                                            ui_state.facets.category = Some(cat);
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "drive" => {
+                                    let is_all = ui_state.facets.drive.is_none();
+                                    if draw_facet_popup_row(ui, row_w, "All drives", None, is_all, pal) {
+                                        ui_state.facets.drive = None;
+                                        picked = true;
+                                    }
+                                    for drv in &rep.drives {
+                                        let dl = drv.letter.to_ascii_uppercase();
+                                        let sel = ui_state
+                                            .facets
+                                            .drive
+                                            .is_some_and(|d| d.to_ascii_uppercase() == dl);
+                                        let lbl = format!("{dl}:\\");
+                                        let meta = format_size_2dec(drv.used_bytes);
+                                        if draw_facet_popup_row(ui, row_w, &lbl, Some(&meta), sel, pal) {
+                                            ui_state.facets.drive = Some(dl);
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "size" => {
+                                    for band in SizeBandFilter::ALL_OPTIONS {
+                                        let sel = ui_state.facets.size_band == band;
+                                        if draw_facet_popup_row(ui, row_w, band.label(), None, sel, pal) {
+                                            ui_state.facets.size_band = band;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "deps" => {
+                                    for ds in DepStateFilter::ALL_OPTIONS {
+                                        let sel = ui_state.facets.dep_state == ds;
+                                        if draw_facet_popup_row(ui, row_w, ds.label(), None, sel, pal) {
+                                            ui_state.facets.dep_state = ds;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "zone" => {
+                                    for fz in FootprintZoneFilter::ALL_OPTIONS {
+                                        let sel = ui_state.facets.footprint_zone == fz;
+                                        if draw_facet_popup_row(ui, row_w, fz.label(), None, sel, pal) {
+                                            ui_state.facets.footprint_zone = fz;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                "growth" => {
+                                    for gf in GrowthFacetFilter::ALL_OPTIONS {
+                                        let sel = ui_state.facets.growth == gf;
+                                        if draw_facet_popup_row(ui, row_w, gf.label(), None, sel, pal) {
+                                            ui_state.facets.growth = gf;
+                                            picked = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        },
+                    );
+                    picked
+                },
+            )
+            .inner
+        });
+
+    if area_resp.inner {
+        ui_state.open_facet_popup = None;
+        emit(UiAction::UpdateListView {
+            sort_mode: ui_state.sort_mode,
+            sort_direction: ui_state.sort_direction,
+            filter_chip: ui_state.filter_chip,
+            search_query: ui_state.search_query.clone(),
+            facets: ui_state.facets.clone(),
+        });
+    } else if ctx.input(|i| i.pointer.primary_clicked()) {
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if !area_resp.response.rect.contains(pos) && !trigger_rect.contains(pos) {
+                ui_state.open_facet_popup = None;
+            }
+        }
+    }
+}
+
 fn draw_filter_radio_chip(
     ui: &mut egui::Ui,
     label: &str,
@@ -2189,6 +2489,12 @@ fn ensure_report_and_filter_caches(
                 rev_by_app_id.insert(app.id.clone(), (None, 0));
             }
         }
+        let shared_app_ids: HashSet<String> = rev_by_app_id
+            .iter()
+            .filter(|(_, (_, cnt))| *cnt > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let has_growth = has_growth_baseline(rep);
         let sys_reconcile = rep
             .windows_system
             .iter()
@@ -2242,9 +2548,13 @@ fn ensure_report_and_filter_caches(
             rev_counts,
             rev_by_app_token,
             rev_by_app_id,
+            shared_app_ids,
+            has_growth_baseline: has_growth,
             sys_reconcile,
         });
     }
+
+    sanitize_facets_for_report(&mut ui_state.facets, rep);
 
     let filter_stale = ui_state.cached_filtered.as_ref().is_none_or(|f| {
         f.scan_ts != rep.scan_timestamp_unix
@@ -2252,18 +2562,22 @@ fn ensure_report_and_filter_caches(
             || f.sort_direction != ui_state.sort_direction
             || f.filter_chip != ui_state.filter_chip
             || f.search_query != ui_state.search_query
+            || f.facets != ui_state.facets
             || f.sys_drive != sys_drive_letter
     });
     if filter_stale {
-        let filtered = filter_and_sort_apps(
+        let cr = ui_state.cached_report.as_ref().unwrap();
+        let filtered = filter_and_sort_apps_with_facets(
             &rep.apps,
             ui_state.sort_mode,
             ui_state.sort_direction,
             ui_state.filter_chip,
             &ui_state.search_query,
+            &ui_state.facets,
+            &cr.shared_app_ids,
             sys_drive_letter,
         );
-        let idx_map = &ui_state.cached_report.as_ref().unwrap().app_idx_by_id;
+        let idx_map = &cr.app_idx_by_id;
         let visible_indices = filtered
             .into_iter()
             .filter_map(|a| idx_map.get(&a.id).copied())
@@ -2274,6 +2588,7 @@ fn ensure_report_and_filter_caches(
             sort_direction: ui_state.sort_direction,
             filter_chip: ui_state.filter_chip,
             search_query: ui_state.search_query.clone(),
+            facets: ui_state.facets.clone(),
             sys_drive: sys_drive_letter,
             visible_indices,
         });
@@ -2345,6 +2660,8 @@ pub fn draw_app_ui(
     });
     let pal = ThemePalette::for_mode(mode);
     ui_state.first_unattrib_web_search_rect = None;
+    ui_state.unattrib_mid_row_rect = None;
+    ui_state.first_drive_pod_rect = None;
 
     let sys_drive_letter = report
         .and_then(|r| {
@@ -2365,9 +2682,11 @@ pub fn draw_app_ui(
         );
     }
 
-    if ui_state.open_reverse_dep_id.is_some() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
         ui_state.open_reverse_dep_id = None;
+        ui_state.open_facet_popup = None;
     }
+    let mut active_facet_anchor: Option<(&'static str, Rect)> = None;
 
     // Top Header (no divider line beneath header)
     egui::TopBottomPanel::top("header_panel")
@@ -2474,7 +2793,7 @@ pub fn draw_app_ui(
                 },
             );
 
-            // Row 2: Signature Drive Instrument Header — 16pt headline free space + 2px proportional bar (used / total)
+            // Row 2: Drive Instrument Pods (single tabular-mono hierarchy + flush 2px WT gradient bar)
             if let Some(rep) = report {
                 if !rep.drives.is_empty() {
                     ui.add_space(SPACE_8);
@@ -2484,129 +2803,147 @@ pub fn draw_app_ui(
                     let ppp = ctx.pixels_per_point();
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_8;
-                        for drv in &rep.drives {
+                        for (drv_idx, drv) in rep.drives.iter().enumerate() {
                             let ratio = if drv.total_bytes > 0 {
                                 (drv.used_bytes as f64 / drv.total_bytes as f64).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
-                            draw_crisp_frame(
+                            let pod_frame = draw_crisp_frame(
                                 ui,
                                 pal.panel,
                                 pal.border,
                                 RADIUS_PANEL,
-                                Margin::symmetric(SPACE_8, SPACE_4),
+                                Margin::symmetric(SPACE_12, SPACE_8),
                                 |ui| {
-                                    let inner_w = (tile_w - SPACE_16 - 2.0).max(112.0);
+                                    let inner_w = (tile_w - SPACE_12 * 2.0 - 2.0).max(112.0);
                                     ui.set_width(inner_w);
                                     ui.vertical(|ui| {
-                                        ui.spacing_mut().item_spacing.y = SPACE_4;
-                                        // Line 1: Drive letter + monospace used on left, headline 14.5pt monospace free space on right
-                                        draw_split_row(
-                                            ui,
-                                            20.0,
-                                            104.0,
-                                            Sense::hover(),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                ui.label(
-                                                    RichText::new(format!("{}:\\", drv.letter))
-                                                        .size(12.0)
-                                                        .color(pal.text),
-                                                );
-                                                let used_font = mono_font_for(ui, 10.5, false);
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(format!(
-                                                            "{} used",
-                                                            format_size_2dec(drv.used_bytes)
-                                                        ))
-                                                        .font(used_font)
-                                                        .color(pal.subtle_text),
-                                                    )
-                                                    .selectable(false),
-                                                )
-                                                .on_hover_text(format!(
-                                                    "Used: {} / Total: {}",
-                                                    format_exact_bytes(drv.used_bytes),
-                                                    format_exact_bytes(drv.total_bytes)
-                                                ));
-                                            },
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new("free")
-                                                            .size(10.5)
-                                                            .color(pal.muted),
-                                                    )
-                                                    .selectable(false),
-                                                );
-                                                let free_font = mono_font_for(ui, 14.5, false);
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(format_size_2dec(drv.free_bytes))
-                                                            .font(free_font)
-                                                            .color(pal.text),
-                                                    )
-                                                    .selectable(false),
-                                                )
-                                                .on_hover_text(format!(
-                                                    "Free: {} / Total: {}",
-                                                    format_exact_bytes(drv.free_bytes),
-                                                    format_exact_bytes(drv.total_bytes)
-                                                ));
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+
+                                        // Row 1: Drive identity ("C:\") on left, "<used> of <total>" (11pt Consolas Regular) on right
+                                        let (row1_rect, row1_resp) =
+                                            ui.allocate_exact_size(Vec2::new(inner_w, 18.0), Sense::hover());
+                                        let (drv_font, _drv_fallback_strong) =
+                                            prop_strong_font(ui_state.has_prop_strong, 13.0);
+                                        let drv_galley = ui.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                format!("{}:\\", drv.letter),
+                                                drv_font,
+                                                pal.text,
+                                            )
+                                        });
+                                        let drv_pos =
+                                            optical_galley_pos(ui, row1_rect, &drv_galley, None, false);
+                                        ui.painter().galley(drv_pos, drv_galley, pal.text);
+
+                                        let mono_pod = mono_font_for(ui, 11.0, false);
+                                        let mut cap_job = egui::text::LayoutJob::default();
+                                        cap_job.append(
+                                            &format_size_2dec(drv.used_bytes),
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: mono_pod.clone(),
+                                                color: pal.text,
+                                                ..Default::default()
                                             },
                                         );
+                                        cap_job.append(
+                                            " of ",
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: mono_pod.clone(),
+                                                color: pal.muted,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        cap_job.append(
+                                            &format_size_2dec(drv.total_bytes),
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: mono_pod.clone(),
+                                                color: pal.text,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        let cap_galley = ui.fonts(|f| f.layout_job(cap_job));
+                                        let cap_pos = optical_galley_pos(
+                                            ui,
+                                            row1_rect,
+                                            &cap_galley,
+                                            Some(row1_rect.max.x),
+                                            false,
+                                        );
+                                        ui.painter().galley(cap_pos, cap_galley, pal.text);
+                                        let _ = row1_resp.on_hover_text(format!(
+                                            "Used: {} / Total: {}",
+                                            format_exact_bytes(drv.used_bytes),
+                                            format_exact_bytes(drv.total_bytes)
+                                        ));
 
-                                        // Line 2: Chunky 7px rounded capacity bar in signature 3-stop WT horizontal gradient (red only if drive unreachable/0 total)
+                                        ui.add_space(SPACE_4);
+
+                                        // Row 2: "<free> free" in the same 11pt Consolas Regular scale (muted companion)
+                                        let (row2_rect, row2_resp) =
+                                            ui.allocate_exact_size(Vec2::new(inner_w, 16.0), Sense::hover());
+                                        let free_lbl = format!("{} free", format_size_2dec(drv.free_bytes));
+                                        let free_galley =
+                                            ui.fonts(|f| f.layout_no_wrap(free_lbl, mono_pod, pal.muted));
+                                        let free_pos = optical_galley_pos(
+                                            ui,
+                                            row2_rect,
+                                            &free_galley,
+                                            Some(row2_rect.max.x),
+                                            false,
+                                        );
+                                        ui.painter().galley(free_pos, free_galley, pal.muted);
+                                        let _ = row2_resp.on_hover_text(format!(
+                                            "Free: {} ({:.1}% free)",
+                                            format_exact_bytes(drv.free_bytes),
+                                            (1.0 - ratio) * 100.0
+                                        ));
+
+                                        ui.add_space(SPACE_8);
+
+                                        // Row 3: Slim 2px flush proportional bar in WT horizontal gradient (red only if total == 0)
                                         let bar_w = inner_w.floor().max(80.0);
                                         let (bar_rect, bar_resp) = ui.allocate_exact_size(
-                                            Vec2::new(bar_w, 7.0),
+                                            Vec2::new(bar_w, PROP_BAR_H),
                                             Sense::hover(),
                                         );
-                                        let snapped_bar = paint_crisp_bordered_box(
-                                            ui.painter(),
-                                            bar_rect,
-                                            3.5,
-                                            pal.bg,
-                                            pal.border,
-                                            1.0,
-                                            ppp,
-                                        );
-                                        let inset = 1.0 / ppp.max(0.5);
-                                        let inner_track = snapped_bar.shrink(inset);
-                                        let inner_px = (inner_track.width() * ppp).round();
+                                        let snapped_track = snap_rect_to_pixels(bar_rect, ppp);
+                                        let track_col = lerp_color(pal.panel, pal.border, 0.65);
+                                        ui.painter()
+                                            .rect_filled(snapped_track, Rounding::same(1.0), track_col);
+                                        let track_px = (snapped_track.width() * ppp).round();
                                         let fill_px = if drv.total_bytes == 0 || drv.used_bytes == 0 {
                                             0.0
                                         } else {
-                                            ((inner_px as f64) * ratio)
+                                            ((track_px as f64) * ratio)
                                                 .round()
-                                                .clamp(3.0, inner_px as f64) as f32
+                                                .clamp(2.0, track_px as f64) as f32
                                         };
-                                        if drv.total_bytes == 0 && inner_track.width() > 4.0 {
+                                        if drv.total_bytes == 0 && snapped_track.width() > 2.0 {
                                             ui.painter().rect_filled(
-                                                inner_track,
-                                                Rounding::same(2.5),
+                                                snapped_track,
+                                                Rounding::same(1.0),
                                                 STATUS_RED,
                                             );
-                                        } else if fill_px > 0.0 && inner_track.height() > 0.0 {
+                                        } else if fill_px > 0.0 && snapped_track.height() > 0.0 {
                                             let fill_rect = Rect::from_min_size(
-                                                inner_track.min,
-                                                Vec2::new(fill_px / ppp.max(0.5), inner_track.height()),
+                                                snapped_track.min,
+                                                Vec2::new(fill_px / ppp.max(0.5), snapped_track.height()),
                                             );
                                             paint_horizontal_wt_gradient_bar(
                                                 ui.painter(),
-                                                inner_track,
+                                                snapped_track,
                                                 fill_rect,
-                                                2.5,
+                                                1.0,
                                             );
                                         }
                                         let _ = bar_resp.on_hover_text(format!(
-                                            "{:.2}% used ({:.0} / {:.0} px · {})",
+                                            "{:.2}% used · {}",
                                             ratio * 100.0,
-                                            fill_px,
-                                            inner_px,
                                             if drv.full_walk_enabled {
                                                 "Full walk"
                                             } else {
@@ -2616,6 +2953,9 @@ pub fn draw_app_ui(
                                     });
                                 },
                             );
+                            if drv_idx == 0 {
+                                ui_state.first_drive_pod_rect = Some(pod_frame.response.rect);
+                            }
                         }
                     });
                 }
@@ -2630,8 +2970,11 @@ pub fn draw_app_ui(
                 let mut list_view_dirty = false;
 
                 ui.add_space(SPACE_8);
-                // Row 3: Search input (column headers handle sorting)
+                // Row 3: Search input + Clear + Reset filters
                 let mut search_dirty = false;
+                let any_filter_non_default = !ui_state.search_query.trim().is_empty()
+                    || ui_state.filter_chip != AppFilterChip::All
+                    || !ui_state.facets.is_default();
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), HEADER_CONTROL_H),
                     Layout::left_to_right(Align::Center),
@@ -2667,6 +3010,26 @@ pub fn draw_app_ui(
                             ui_state.search_query.clear();
                             search_dirty = true;
                         }
+                        if any_filter_non_default
+                            && draw_z_button(
+                                ui,
+                                "Reset filters",
+                                Vec2::new(88.0, HEADER_CONTROL_H),
+                                11.5,
+                                RADIUS_CONTROL,
+                                true,
+                                false,
+                                ButtonVariant::SubtleOutline,
+                                &pal,
+                            )
+                            .clicked()
+                        {
+                            ui_state.search_query.clear();
+                            ui_state.filter_chip = AppFilterChip::All;
+                            ui_state.facets = FacetFilters::default();
+                            ui_state.open_facet_popup = None;
+                            list_view_dirty = true;
+                        }
                     },
                 );
                 if search_dirty {
@@ -2674,7 +3037,7 @@ pub fn draw_app_ui(
                 }
 
                 ui.add_space(SPACE_4);
-                // Row 4: Single-select filter chip row + live "N of 262 apps" count (left) + invariant attributed total (right)
+                // Row 4: Single-select filter chip row + live "N of M apps" count (left) + invariant attributed total (right)
                 let has_c_label = format!("Has {sys_drive_letter}: footprint");
                 let chips = [
                     (AppFilterChip::All, "All"),
@@ -2699,7 +3062,8 @@ pub fn draw_app_ui(
                         }
                         if report.is_some() {
                             let filtered_active = ui_state.filter_chip != AppFilterChip::All
-                                || !ui_state.search_query.trim().is_empty();
+                                || !ui_state.search_query.trim().is_empty()
+                                || !ui_state.facets.is_default();
                             let count_txt = format!("{shown_count} of {total_apps_count} apps");
                             let count_rt = RichText::new(count_txt)
                                 .size(11.5)
@@ -2723,12 +3087,185 @@ pub fn draw_app_ui(
                     },
                 );
 
+                // Row 5: Facet dropdown selectors (wrapped cleanly, neutral at rest, AND-combined with chips + search)
+                if report.is_some() {
+                    ui.add_space(SPACE_4);
+                    let has_growth = ui_state
+                        .cached_report
+                        .as_ref()
+                        .is_some_and(|cr| cr.has_growth_baseline);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+
+                        let pub_lbl = match ui_state.facets.publisher.as_deref() {
+                            None => "Publisher: All".to_string(),
+                            Some(k) if k == NO_PUBLISHER_FACET_KEY => {
+                                "Publisher: (no publisher)".to_string()
+                            }
+                            Some(k) => {
+                                let short: String = k.chars().take(24).collect();
+                                if k.chars().count() > 24 {
+                                    format!("Publisher: {short}…")
+                                } else {
+                                    format!("Publisher: {k}")
+                                }
+                            }
+                        };
+                        let pub_open = ui_state.open_facet_popup == Some("publisher");
+                        let pub_resp = draw_facet_selector_button(
+                            ui,
+                            "publisher",
+                            &pub_lbl,
+                            pub_open,
+                            ui_state.facets.publisher.is_some(),
+                            &pal,
+                        );
+                        if pub_resp.clicked() {
+                            ui_state.open_facet_popup =
+                                if pub_open { None } else { Some("publisher") };
+                        }
+                        if ui_state.open_facet_popup == Some("publisher") {
+                            active_facet_anchor = Some(("publisher", pub_resp.rect));
+                        }
+
+                        let cat_lbl = match ui_state.facets.category {
+                            None => "Category: All".to_string(),
+                            Some(c) => format!("Category: {}", c.label()),
+                        };
+                        let cat_open = ui_state.open_facet_popup == Some("category");
+                        let cat_resp = draw_facet_selector_button(
+                            ui,
+                            "category",
+                            &cat_lbl,
+                            cat_open,
+                            ui_state.facets.category.is_some(),
+                            &pal,
+                        );
+                        if cat_resp.clicked() {
+                            ui_state.open_facet_popup =
+                                if cat_open { None } else { Some("category") };
+                        }
+                        if ui_state.open_facet_popup == Some("category") {
+                            active_facet_anchor = Some(("category", cat_resp.rect));
+                        }
+
+                        let drv_lbl = match ui_state.facets.drive {
+                            None => "Drive: All".to_string(),
+                            Some(d) => format!("Drive: {}:\\", d.to_ascii_uppercase()),
+                        };
+                        let drv_open = ui_state.open_facet_popup == Some("drive");
+                        let drv_resp = draw_facet_selector_button(
+                            ui,
+                            "drive",
+                            &drv_lbl,
+                            drv_open,
+                            ui_state.facets.drive.is_some(),
+                            &pal,
+                        );
+                        if drv_resp.clicked() {
+                            ui_state.open_facet_popup = if drv_open { None } else { Some("drive") };
+                        }
+                        if ui_state.open_facet_popup == Some("drive") {
+                            active_facet_anchor = Some(("drive", drv_resp.rect));
+                        }
+
+                        let size_lbl = if ui_state.facets.size_band == SizeBandFilter::All {
+                            "Size: All".to_string()
+                        } else {
+                            format!("Size: {}", ui_state.facets.size_band.label())
+                        };
+                        let size_open = ui_state.open_facet_popup == Some("size");
+                        let size_resp = draw_facet_selector_button(
+                            ui,
+                            "size",
+                            &size_lbl,
+                            size_open,
+                            ui_state.facets.size_band != SizeBandFilter::All,
+                            &pal,
+                        );
+                        if size_resp.clicked() {
+                            ui_state.open_facet_popup = if size_open { None } else { Some("size") };
+                        }
+                        if ui_state.open_facet_popup == Some("size") {
+                            active_facet_anchor = Some(("size", size_resp.rect));
+                        }
+
+                        let dep_lbl = if ui_state.facets.dep_state == DepStateFilter::All {
+                            "Deps: All".to_string()
+                        } else {
+                            format!("Deps: {}", ui_state.facets.dep_state.label())
+                        };
+                        let dep_open = ui_state.open_facet_popup == Some("deps");
+                        let dep_resp = draw_facet_selector_button(
+                            ui,
+                            "deps",
+                            &dep_lbl,
+                            dep_open,
+                            ui_state.facets.dep_state != DepStateFilter::All,
+                            &pal,
+                        );
+                        if dep_resp.clicked() {
+                            ui_state.open_facet_popup = if dep_open { None } else { Some("deps") };
+                        }
+                        if ui_state.open_facet_popup == Some("deps") {
+                            active_facet_anchor = Some(("deps", dep_resp.rect));
+                        }
+
+                        let zone_lbl = if ui_state.facets.footprint_zone == FootprintZoneFilter::All
+                        {
+                            "Zone: All".to_string()
+                        } else {
+                            format!("Zone: {}", ui_state.facets.footprint_zone.label())
+                        };
+                        let zone_open = ui_state.open_facet_popup == Some("zone");
+                        let zone_resp = draw_facet_selector_button(
+                            ui,
+                            "zone",
+                            &zone_lbl,
+                            zone_open,
+                            ui_state.facets.footprint_zone != FootprintZoneFilter::All,
+                            &pal,
+                        );
+                        if zone_resp.clicked() {
+                            ui_state.open_facet_popup = if zone_open { None } else { Some("zone") };
+                        }
+                        if ui_state.open_facet_popup == Some("zone") {
+                            active_facet_anchor = Some(("zone", zone_resp.rect));
+                        }
+
+                        if has_growth {
+                            let gr_lbl = if ui_state.facets.growth == GrowthFacetFilter::All {
+                                "Growth: All".to_string()
+                            } else {
+                                format!("Growth: {}", ui_state.facets.growth.label())
+                            };
+                            let gr_open = ui_state.open_facet_popup == Some("growth");
+                            let gr_resp = draw_facet_selector_button(
+                                ui,
+                                "growth",
+                                &gr_lbl,
+                                gr_open,
+                                ui_state.facets.growth != GrowthFacetFilter::All,
+                                &pal,
+                            );
+                            if gr_resp.clicked() {
+                                ui_state.open_facet_popup =
+                                    if gr_open { None } else { Some("growth") };
+                            }
+                            if ui_state.open_facet_popup == Some("growth") {
+                                active_facet_anchor = Some(("growth", gr_resp.rect));
+                            }
+                        }
+                    });
+                }
+
                 if list_view_dirty {
                     emit(UiAction::UpdateListView {
                         sort_mode: ui_state.sort_mode,
                         sort_direction: ui_state.sort_direction,
                         filter_chip: ui_state.filter_chip,
                         search_query: ui_state.search_query.clone(),
+                        facets: ui_state.facets.clone(),
                     });
                 }
             }
@@ -2752,7 +3289,10 @@ pub fn draw_app_ui(
             // Collapsible & drag-resizable Pinned Bottom Panel rendered BEFORE CentralPanel so only CentralPanel scrolls.
             if let Some(rep) = report {
                 const LEDGER_MIN_H: f32 = 156.0;
-                let max_ledger_h = (ctx.screen_rect().height() * 0.50).max(LEDGER_MIN_H + 24.0);
+                let max_ledger_h = (ctx.available_rect().height() - 4.0).max(LEDGER_MIN_H);
+                if let Some(h) = ui_state.ledger_height_px {
+                    ui_state.ledger_height_px = Some(h.clamp(LEDGER_MIN_H, max_ledger_h));
+                }
                 let mut panel = egui::TopBottomPanel::bottom("pinned_groups_panel")
                     .show_separator_line(false)
                     .resizable(false)
@@ -2840,18 +3380,31 @@ pub fn draw_app_ui(
                 });
             }
 
+            let rem_h = ctx.available_rect().height();
+            let v_pad = if rem_h < TABLE_HEADER_H + SPACE_16 + 8.0 {
+                0.0
+            } else {
+                SPACE_8
+            };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
                         .fill(pal.bg)
-                        .inner_margin(Margin::symmetric(SPACE_16, SPACE_8)),
+                        .inner_margin(Margin::symmetric(SPACE_16, v_pad)),
                 )
                 .show(ctx, |ui| {
-                    draw_main_app_list(ui, ui_state, report, &pal, emit);
+                    if ui.available_height() >= TABLE_HEADER_H + 6.0 {
+                        draw_main_app_list(ui, ui_state, report, &pal, emit);
+                    }
                 });
 
             if let (Some(rep), Some(target_id)) = (report, ui_state.open_reverse_dep_id.clone()) {
                 draw_reverse_dependency_overlay(ctx, ui_state, rep, &target_id, &pal);
+            }
+            if let (Some(rep), Some((facet_key, trigger_rect))) = (report, active_facet_anchor) {
+                draw_facet_popup_overlay(ctx, ui_state, rep, facet_key, trigger_rect, &pal, emit);
+            } else {
+                ui_state.open_facet_popup = None;
             }
         }
         ActiveView::Dependencies => {
@@ -2923,6 +3476,10 @@ fn draw_main_app_list(
 
     let avail_w = ui.available_width();
     let avail_h = ui.available_height();
+    if avail_h < TABLE_HEADER_H + 6.0 {
+        ui_state.cached_report = cached_report;
+        return;
+    }
     let panel_left = ui.cursor().min.x;
     let panel_w = (avail_w - SCROLL_GUTTER_W).max(320.0);
     let ppp = ui.ctx().pixels_per_point();
@@ -3020,6 +3577,7 @@ fn draw_main_app_list(
             sort_direction: ui_state.sort_direction,
             filter_chip: ui_state.filter_chip,
             search_query: ui_state.search_query.clone(),
+            facets: ui_state.facets.clone(),
         });
     }
 
@@ -3050,7 +3608,7 @@ fn draw_main_app_list(
     }
     let total_virtual_h = row_tops.last().copied().unwrap_or(0.0);
 
-    let body_max_h = (avail_h - (TABLE_HEADER_H + 1.0 + inset * 2.0 + 2.0)).max(80.0);
+    let body_max_h = (avail_h - (TABLE_HEADER_H + 1.0 + inset * 2.0 + 2.0)).max(0.0);
     let expanded_apps = &mut ui_state.expanded_apps;
     let expanded_row_heights = &mut ui_state.expanded_row_heights;
     let icon_textures = &mut ui_state.icon_textures;
@@ -3060,7 +3618,8 @@ fn draw_main_app_list(
     let first_row_size_rect = &mut ui_state.first_row_size_rect;
     let mut show_bottom_fade = false;
 
-    draw_synced_scroll_area_viewport(
+    if body_max_h >= 6.0 {
+        draw_synced_scroll_area_viewport(
         ui,
         "main_app_scroll",
         Some(body_max_h),
@@ -4182,6 +4741,7 @@ fn draw_main_app_list(
             }
         },
     );
+    }
     ui_state.cached_report = cached_report;
 
     ui.add_space(inset + 2.0);
@@ -4585,12 +5145,16 @@ fn draw_pinned_bottom_groups(
         || ui_state.expand_unattributed;
     let unattrib_tick = lerp_color(pal.border, pal.muted, 0.55);
 
+    let was_unattrib_expanded = ui_state.expand_unattributed;
     let expand_windows_system = &mut ui_state.expand_windows_system;
     let expand_your_files = &mut ui_state.expand_your_files;
     let expand_shared_caches = &mut ui_state.expand_shared_caches;
     let expand_unattributed = &mut ui_state.expand_unattributed;
     let unattrib_exists_cache = &mut ui_state.unattrib_exists_cache;
     let first_unattrib_web_search_rect = &mut ui_state.first_unattrib_web_search_rect;
+    let unattrib_mid_row_rect = &mut ui_state.unattrib_mid_row_rect;
+    let unattrib_search_query = &mut ui_state.unattrib_search_query;
+    let unattrib_sort = &mut ui_state.unattrib_sort;
 
     let mut draw_cards = |ui: &mut egui::Ui, frame_w: f32| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -4677,17 +5241,92 @@ fn draw_pinned_bottom_groups(
                     false,
                     pal,
                     |ui| {
-                        for (idx, item) in rep.unattributed.iter().enumerate() {
-                            draw_unattributed_item_row(
+                        let (filtered_unattrib, filtered_sub_bytes) = filter_and_sort_unattributed(
+                            &rep.unattributed,
+                            unattrib_search_query,
+                            *unattrib_sort,
+                        );
+                        ui.add_space(2.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                            ui.add_space(SPACE_16);
+                            draw_crisp_text_input(
                                 ui,
-                                idx,
-                                &item.path,
-                                item.bytes,
+                                "unattrib_filter_input",
+                                unattrib_search_query,
+                                220.0,
+                                "Filter folder name or path...",
+                                pal.input_bg,
                                 pal,
-                                unattrib_exists_cache,
-                                first_unattrib_web_search_rect,
-                                emit,
                             );
+                            if !unattrib_search_query.is_empty()
+                                && draw_z_button(
+                                    ui,
+                                    "Clear",
+                                    Vec2::new(48.0, 24.0),
+                                    11.0,
+                                    RADIUS_CONTROL,
+                                    true,
+                                    false,
+                                    ButtonVariant::SubtleOutline,
+                                    pal,
+                                )
+                                .clicked()
+                            {
+                                unattrib_search_query.clear();
+                            }
+                            for sort_opt in UnattributedSortMode::ALL_OPTIONS {
+                                let selected = *unattrib_sort == sort_opt;
+                                if draw_filter_radio_chip(ui, sort_opt.short_label(), selected, pal)
+                                    && !selected
+                                {
+                                    *unattrib_sort = sort_opt;
+                                }
+                            }
+                            let is_filtered = !unattrib_search_query.trim().is_empty();
+                            let stats_txt = format!(
+                                "{} of {} folders · {}",
+                                filtered_unattrib.len(),
+                                rep.unattributed.len(),
+                                format_size_2dec(filtered_sub_bytes),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(stats_txt)
+                                        .size(11.0)
+                                        .color(if is_filtered { pal.text } else { pal.muted }),
+                                )
+                                .selectable(false),
+                            );
+                        });
+                        ui.add_space(2.0);
+
+                        if filtered_unattrib.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(SPACE_16);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new("No unattributed folders match the current filter.")
+                                            .size(11.5)
+                                            .color(pal.muted),
+                                    )
+                                    .selectable(false),
+                                );
+                            });
+                        } else {
+                            for (vis_idx, (_, item)) in filtered_unattrib.iter().enumerate() {
+                                draw_unattributed_item_row(
+                                    ui,
+                                    vis_idx,
+                                    &item.path,
+                                    item.bytes,
+                                    pal,
+                                    unattrib_exists_cache,
+                                    first_unattrib_web_search_rect,
+                                    unattrib_mid_row_rect,
+                                    emit,
+                                );
+                            }
                         }
                     },
                 );
@@ -4710,6 +5349,10 @@ fn draw_pinned_bottom_groups(
         );
     } else {
         draw_cards(ui, aligned_w);
+    }
+    if was_unattrib_expanded && !ui_state.expand_unattributed {
+        ui_state.unattrib_search_query.clear();
+        ui_state.unattrib_sort = UnattributedSortMode::SizeDesc;
     }
 
     // Quiet exact reconciliation ledger line (green status dot + tabular Regular diff 0 B; alert chip only if diff != 0).
@@ -4853,7 +5496,8 @@ fn draw_simple_item_row(
     chip: Option<(&str, ChipStyle)>,
     pal: &ThemePalette,
 ) {
-    draw_split_row(
+    let hover_slot = ui.painter().add(egui::Shape::Noop);
+    let row_resp = draw_split_row(
         ui,
         18.0,
         SIZE_COL_W,
@@ -4875,6 +5519,16 @@ fn draw_simple_item_row(
             draw_right_aligned_size(ui, bytes, 11.5, pal.muted, false);
         },
     );
+    let full_hover_rect = Rect::from_min_max(
+        Pos2::new(row_resp.rect.min.x - SPACE_12, row_resp.rect.min.y),
+        Pos2::new(row_resp.rect.max.x + SPACE_12, row_resp.rect.max.y),
+    );
+    if ui.rect_contains_pointer(full_hover_rect) {
+        ui.painter().set(
+            hover_slot,
+            egui::Shape::rect_filled(full_hover_rect, Rounding::ZERO, pal.widget_hover),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4886,14 +5540,30 @@ fn draw_unattributed_item_row(
     pal: &ThemePalette,
     exists_cache: &mut HashMap<String, bool>,
     first_web_search_rect: &mut Option<Rect>,
+    mid_row_rect: &mut Option<Rect>,
     emit: &mut dyn FnMut(UiAction),
 ) {
     const ROW_H: f32 = 22.0;
     const RIGHT_CLUSTER_W: f32 = SIZE_COL_W + SPACE_8 + 148.0;
     let avail_w = ui.available_width().max(RIGHT_CLUSTER_W + 60.0);
+    let hover_slot = ui.painter().add(egui::Shape::Noop);
     let (row_rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, ROW_H), Sense::hover());
     if !ui.clip_rect().expand2(Vec2::new(0.0, 24.0)).intersects(row_rect) {
         return;
+    }
+
+    let full_hover_rect = Rect::from_min_max(
+        Pos2::new(row_rect.min.x - SPACE_12, row_rect.min.y),
+        Pos2::new(row_rect.max.x + SPACE_12, row_rect.max.y),
+    );
+    if ui.rect_contains_pointer(full_hover_rect) {
+        ui.painter().set(
+            hover_slot,
+            egui::Shape::rect_filled(full_hover_rect, Rounding::ZERO, pal.widget_hover),
+        );
+    }
+    if row_idx == 3 {
+        *mid_row_rect = Some(row_rect);
     }
 
     let right_rect = Rect::from_min_max(
@@ -5962,5 +6632,165 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn ledger_full_height_resize_clamps_and_degrades_cleanly_at_default_and_min_window() {
+        let report = ScanReport {
+            scan_timestamp_unix: 4000,
+            scan_timestamp_display: "2026-11-27 16:00:00".into(),
+            duration_ms: 500,
+            drives: vec![DriveInfo {
+                letter: 'C',
+                root: "C:\\".into(),
+                total_bytes: 500_000_000,
+                free_bytes: 250_000_000,
+                used_bytes: 250_000_000,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+            }],
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: 1,
+                raw_with_install_location: 1,
+                canonical_apps: 1,
+                canonical_with_direct_install_location: 1,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps: vec![AttributedApp {
+                id: "reg:sample".into(),
+                display_name: "Sample".into(),
+                publishers: vec!["Pub".into()],
+                install_location: Some("C:\\Sample".into()),
+                total_bytes: 100_000,
+                previous_bytes: None,
+                growth: GrowthDelta::NoBaseline,
+                no_touch: None,
+                bases: vec![AttributionBasis::InstallLocation],
+                items: vec![BreakdownItem {
+                    path: "C:\\Sample".into(),
+                    bytes: 100_000,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::InstallLocation),
+                    no_touch: None,
+                    drive_letter: 'C',
+                }],
+                dependencies: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: y_core::model::AppCategory::default(),
+                category_basis: String::new(),
+            }],
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system: vec![SystemDriveBreakdown {
+                drive_letter: 'C',
+                root_files: vec![],
+                remainder_bytes: 249_900_000,
+                total_bytes: 249_900_000,
+                scanned_non_system_bytes: 100_000,
+                drive_used_bytes: 250_000_000,
+                drive_free_bytes: 250_000_000,
+                drive_total_bytes: 500_000_000,
+            }],
+            windows_system_total_bytes: 249_900_000,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            catalog_source: "embedded".into(),
+            warnings: vec![],
+        };
+
+        let cfg = AppConfig::default();
+        for (w, h) in [(1020.0_f32, 720.0_f32), (760.0_f32, 520.0_f32)] {
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let mut state = StorageUiState::default();
+            state.ledger_height_px = Some(2000.0);
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut state,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        "C:\\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            assert!(!out.shapes.is_empty());
+            let clamped = state.ledger_height_px.expect("ledger height retained");
+            assert!(
+                clamped >= 156.0 && clamped < h,
+                "expected clamped ledger height in [156, {h}), got {clamped}"
+            );
+            if w > 900.0 {
+                assert!(
+                    clamped > h * 0.50,
+                    "expected default 1020x720 ledger max > 50% ({}), got {clamped}",
+                    h * 0.50
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_input_sets_ibeam_cursor_while_buttons_do_not() {
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let cfg = AppConfig::default();
+        let mut state = StorageUiState::default();
+
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(c, &mut state, &cfg, None, false, None, "C:\\Windows", &mut |_| {});
+            },
+        );
+
+        let filter_rect = ctx
+            .memory(|m| m.area_rect(egui::Id::new("header_panel")))
+            .map(|_| Pos2::new(120.0, 72.0))
+            .unwrap_or(Pos2::new(120.0, 72.0));
+        let over_input = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                events: vec![egui::Event::PointerMoved(filter_rect)],
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(c, &mut state, &cfg, None, false, None, "C:\\Windows", &mut |_| {});
+            },
+        );
+        assert_eq!(over_input.platform_output.cursor_icon, egui::CursorIcon::Text);
+
+        let over_static_or_btn = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                events: vec![egui::Event::PointerMoved(Pos2::new(880.0, 26.0))],
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(c, &mut state, &cfg, None, false, None, "C:\\Windows", &mut |_| {});
+            },
+        );
+        assert_ne!(
+            over_static_or_btn.platform_output.cursor_icon,
+            egui::CursorIcon::Text
+        );
     }
 }
