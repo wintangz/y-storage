@@ -13,11 +13,12 @@ use y_core::config::{
     ThemePresetChoice, UnattributedFacetFilters, UnattributedLocationZone, ZoneRuleKind,
     ZoneRulebook, default_custom_theme_rgb,
 };
-use y_core::discovery::{normalize_app_token, normalize_path_key};
+use y_core::discovery::{normalize_app_token, normalize_path_key, path_drive_letter};
 use y_core::model::{
     AttributionBasis, DependencyConfidence, DependencyKind, GrowthDelta, LocationQualifier,
     NO_KNOWN_DEPENDENCIES_LABEL, ReverseDependencyEntry, ScanReport, ZoneKind,
 };
+use y_core::zones::{BUILTIN_WINDOWS_DEFAULT_LOCATIONS, BuiltinWindowsDefaultLocation};
 use y_platform_windows::scanner::ScanProgressSnapshot;
 
 use crate::family::{AppFamily, LedgerEntry, derive_app_families};
@@ -9423,14 +9424,60 @@ fn draw_rulebook_removable_chip(
     remove_clicked
 }
 
+fn draw_rulebook_builtin_chip(
+    ui: &mut egui::Ui,
+    loc: BuiltinWindowsDefaultLocation,
+    sys_drive: char,
+    name_font: &FontId,
+    pal: &ThemePalette,
+) {
+    let galley = ui.fonts(|f| f.layout_no_wrap(loc.name.to_owned(), name_font.clone(), pal.text));
+    let lock_w = 10.0_f32;
+    let inner_w = (lock_w + SPACE_4 + galley.size().x).ceil();
+    let chip_inner_h = 20.0_f32;
+    draw_crisp_frame(
+        ui,
+        pal.accent_soft_fill,
+        pal.accent_border,
+        RADIUS_CONTROL,
+        Margin::symmetric(SPACE_8, SPACE_4),
+        |ui| {
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(inner_w, chip_inner_h), Sense::hover());
+            let ppp = ui.ctx().pixels_per_point();
+            let cx = snap_scalar_to_px(rect.min.x + lock_w * 0.5, ppp);
+            let cy = snap_scalar_to_px(rect.center().y, ppp);
+            let shackle_rect = Rect::from_center_size(Pos2::new(cx, cy - 2.0), Vec2::new(5.0, 5.0));
+            ui.painter().rect_stroke(
+                shackle_rect,
+                Rounding::same(2.5),
+                Stroke::new(1.25_f32, pal.accent_line),
+            );
+            let body_rect = Rect::from_center_size(Pos2::new(cx, cy + 2.0), Vec2::new(7.5, 5.5));
+            ui.painter()
+                .rect_filled(body_rect, Rounding::same(1.5), pal.accent_line);
+
+            let label_box = Rect::from_min_max(
+                Pos2::new(rect.min.x + lock_w + SPACE_4, rect.min.y),
+                rect.max,
+            );
+            let text_pos = optical_galley_pos(ui, label_box, &galley, None, false);
+            ui.painter().galley(text_pos, galley, pal.text);
+            let _ = resp.on_hover_text(loc.resolved_path(sys_drive));
+        },
+    );
+}
+
 fn draw_rulebook_section(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
     draft: &mut AppConfig,
+    system_windows_dir: &str,
     pane_inner_w: f32,
     pal: &ThemePalette,
     changed: &mut bool,
 ) -> Rect {
+    let sys_drive = path_drive_letter(system_windows_dir).unwrap_or('C');
     let neutral_pin_style = ChipStyle {
         fill: Color32::TRANSPARENT,
         stroke: pal.border,
@@ -9492,6 +9539,19 @@ fn draw_rulebook_section(
 
             let name_font = FontId::new(11.5, FontFamily::Monospace);
             let mut remove_name_idx: Option<usize> = None;
+
+            ui.label(
+                RichText::new("Windows defaults")
+                    .size(11.5)
+                    .color(pal.muted),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                for &loc in BUILTIN_WINDOWS_DEFAULT_LOCATIONS {
+                    draw_rulebook_builtin_chip(ui, loc, sys_drive, &name_font, pal);
+                }
+            });
+            ui.add_space(SPACE_8);
 
             let mut draw_chip_group =
                 |ui: &mut egui::Ui, kind: ZoneRuleKind, col_w: f32| {
@@ -9918,6 +9978,7 @@ fn draw_settings_view(
                         ui,
                         ui_state,
                         &mut draft,
+                        system_windows_dir,
                         pane_inner_w,
                         pal,
                         &mut changed,
@@ -11951,6 +12012,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn settings_rulebook_windows_defaults_group_renders_without_remove_affordances() {
+        fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(ts) => out.push(ts.galley.text().to_owned()),
+                egui::Shape::Vec(vec) => {
+                    for s in vec {
+                        collect_texts(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (report, mut cfg) = make_synthetic_report_for_drives(2);
+        cfg.zones = ZoneRulebook {
+            root_zones: Vec::new(),
+            explicit_zones: Vec::new(),
+            pins: Vec::new(),
+        };
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        st.settings_section = SettingsSection::Rulebook;
+
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        let mut texts = Vec::new();
+        for cs in &out.shapes {
+            collect_texts(&cs.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|t| t == "Windows defaults"));
+        for loc in BUILTIN_WINDOWS_DEFAULT_LOCATIONS {
+            assert!(
+                texts.iter().any(|t| t == loc.name),
+                "missing built-in default {}",
+                loc.name
+            );
+        }
+        assert!(
+            !texts.iter().any(|t| t == "Remove"),
+            "Windows defaults must render with zero Remove affordances: {texts:?}"
+        );
+
+        // User rule with the same name as a built-in default must not be deduplicated.
+        assert!(cfg.zones.add_root_zone("Users", ZoneRuleKind::PersonalFiles));
+        let out_dup = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        let mut texts_dup = Vec::new();
+        for cs in &out_dup.shapes {
+            collect_texts(&cs.shape, &mut texts_dup);
+        }
+        let users_count = texts_dup.iter().filter(|t| t.as_str() == "Users").count();
+        assert_eq!(
+            users_count, 2,
+            "expected Users in both Windows defaults and user group, got {users_count}"
+        );
     }
 
     #[test]

@@ -1,6 +1,53 @@
 use crate::discovery::normalize_path_key;
 use crate::model::{LocationQualifier, ZoneKind};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinWindowsDefaultLocation {
+    pub name: &'static str,
+    pub relative_path: &'static str,
+}
+
+impl BuiltinWindowsDefaultLocation {
+    #[must_use]
+    pub fn resolved_path(self, system_drive_letter: char) -> String {
+        format!(
+            "{}:\\{}",
+            system_drive_letter.to_ascii_uppercase(),
+            self.relative_path
+        )
+    }
+}
+
+pub const BUILTIN_WINDOWS_DEFAULT_LOCATIONS: &[BuiltinWindowsDefaultLocation] = &[
+    BuiltinWindowsDefaultLocation {
+        name: "Program Files",
+        relative_path: "Program Files",
+    },
+    BuiltinWindowsDefaultLocation {
+        name: "Program Files (x86)",
+        relative_path: "Program Files (x86)",
+    },
+    BuiltinWindowsDefaultLocation {
+        name: "ProgramData",
+        relative_path: "ProgramData",
+    },
+    BuiltinWindowsDefaultLocation {
+        name: "Users",
+        relative_path: "Users",
+    },
+    BuiltinWindowsDefaultLocation {
+        name: "WindowsApps",
+        relative_path: r"Program Files\WindowsApps",
+    },
+];
+
+#[must_use]
+pub fn is_builtin_windows_default_name(seg_lower: &str) -> bool {
+    BUILTIN_WINDOWS_DEFAULT_LOCATIONS
+        .iter()
+        .any(|loc| loc.name.eq_ignore_ascii_case(seg_lower))
+}
+
 #[must_use]
 pub fn classify_zone(
     path: &str,

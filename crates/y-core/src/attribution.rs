@@ -1728,21 +1728,18 @@ fn is_generic_container_path_for_loose(path_lower: &str, zones: &ZoneRulebook) -
     {
         return true;
     }
-    matches!(
-        pk.split('\\').last().unwrap_or(""),
-        "users"
-            | "appdata"
-            | "local"
-            | "roaming"
-            | "locallow"
-            | "programs"
-            | "packages"
-            | "windowsapps"
-            | "program files"
-            | "program files (x86)"
-            | "common files"
-            | "programdata"
-    ) || pk.ends_with("\\common files\\steam")
+    let last_seg = pk.split('\\').last().unwrap_or("");
+    crate::zones::is_builtin_windows_default_name(last_seg)
+        || matches!(
+            last_seg,
+            "appdata"
+                | "local"
+                | "roaming"
+                | "locallow"
+                | "programs"
+                | "packages"
+                | "common files"
+        ) || pk.ends_with("\\common files\\steam")
         || pk.ends_with("\\appdata\\local\\steam")
         || pk.ends_with("\\appdata\\roaming\\inkscape")
         || pk.ends_with("\\microsoft\\edge")
@@ -2865,20 +2862,16 @@ enum TwoSegmentMatch {
 
 fn is_structural_two_segment_parent(p_lower: &str) -> bool {
     (p_lower.len() == 2 && p_lower.ends_with(':'))
+        || crate::zones::is_builtin_windows_default_name(p_lower)
         || matches!(
             p_lower,
-            "users"
-                | "appdata"
+            "appdata"
                 | "local"
                 | "roaming"
                 | "locallow"
-                | "programdata"
-                | "program files"
-                | "program files (x86)"
                 | "common files"
                 | "programs"
                 | "packages"
-                | "windowsapps"
         )
 }
 
