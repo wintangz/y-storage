@@ -66,10 +66,9 @@ const SUB_LINE2_H: f32 = 16.0;
 const COLLAPSED_ROW_OUTER_H: f32 = APP_ROW_H + SPACE_4 * 2.0;
 const SETTINGS_WIDE_MIN_W: f32 = 760.0;
 const SETTINGS_NAV_W: f32 = 216.0;
-const SETTINGS_CONTENT_MAX_W: f32 = 860.0;
 const SETTINGS_TWO_COL_MIN_W: f32 = 560.0;
+const SETTINGS_POD_MIN_W: f32 = 320.0;
 const FORM_GRID_ACTION_W: f32 = 112.0;
-const FORM_GRID_SELECTOR_W: f32 = 228.0;
 const FORM_GRID_ROW_H: f32 = 26.0;
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 const SEGOE_UI_SEMIBOLD_PATH: &str = r"C:\Windows\Fonts\seguisb.ttf";
@@ -8686,15 +8685,27 @@ struct SettingsFormGridLayout {
     stacked: bool,
 }
 
-fn compute_settings_form_grid(avail_w: f32, has_selector: bool) -> SettingsFormGridLayout {
+fn measure_filter_radio_group_w(ui: &egui::Ui, labels: &[&str], pal: &ThemePalette) -> f32 {
+    let font_id = FontId::new(11.5, FontFamily::Proportional);
+    let chips_w: f32 = labels
+        .iter()
+        .map(|lbl| {
+            let galley = ui.fonts(|f| f.layout_no_wrap((*lbl).to_owned(), font_id.clone(), pal.text));
+            (galley.size().x + SPACE_16).round()
+        })
+        .sum();
+    let gaps_w = SPACE_4 * (labels.len().saturating_sub(1) as f32);
+    (chips_w + gaps_w).ceil()
+}
+
+fn compute_settings_form_grid(avail_w: f32, selector_w: Option<f32>) -> SettingsFormGridLayout {
     let action_w = FORM_GRID_ACTION_W;
-    if has_selector {
-        let selector_w = FORM_GRID_SELECTOR_W;
-        let single_row_input_w = avail_w - selector_w - action_w - SPACE_8 * 2.0;
+    if let Some(sel_w) = selector_w {
+        let single_row_input_w = avail_w - sel_w - action_w - SPACE_8 * 2.0;
         if single_row_input_w >= 150.0 {
             SettingsFormGridLayout {
                 input_w: single_row_input_w,
-                selector_w,
+                selector_w: sel_w,
                 action_w,
                 stacked: false,
             }
@@ -8717,19 +8728,20 @@ fn compute_settings_form_grid(avail_w: f32, has_selector: bool) -> SettingsFormG
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_settings_form_grid_row(
+fn draw_settings_form_grid_row_with_rect(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
     text: &mut String,
     hint: &str,
     action_label: &str,
     avail_w: f32,
-    has_selector: bool,
+    selector_w: Option<f32>,
     pal: &ThemePalette,
     mut selector_fn: impl FnMut(&mut egui::Ui),
-) -> bool {
-    let grid = compute_settings_form_grid(avail_w, has_selector);
+) -> (bool, Rect) {
+    let grid = compute_settings_form_grid(avail_w, selector_w);
     let mut clicked = false;
+    let mut action_rect = Rect::NOTHING;
     if grid.stacked {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
@@ -8744,7 +8756,7 @@ fn draw_settings_form_grid_row(
                     selector_fn(ui);
                 },
                 |ui| {
-                    if draw_z_button(
+                    let resp = draw_z_button(
                         ui,
                         action_label,
                         Vec2::new(grid.action_w, FORM_GRID_ROW_H),
@@ -8754,64 +8766,116 @@ fn draw_settings_form_grid_row(
                         false,
                         ButtonVariant::SecondaryOutline,
                         pal,
-                    )
-                    .clicked()
-                    {
+                    );
+                    action_rect = resp.rect;
+                    if resp.clicked() {
                         clicked = true;
                     }
                 },
             );
         });
     } else {
-        ui.allocate_ui_with_layout(
-            Vec2::new(avail_w, FORM_GRID_ROW_H),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.spacing_mut().item_spacing.x = SPACE_8;
-                ui.allocate_ui_with_layout(
-                    Vec2::new(grid.input_w, FORM_GRID_ROW_H),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        draw_crisp_text_input(
-                            ui,
-                            id_salt,
-                            text,
-                            grid.input_w,
-                            hint,
-                            pal.input_bg,
-                            pal,
-                        );
-                    },
-                );
-                if has_selector {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(grid.selector_w, FORM_GRID_ROW_H),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = SPACE_4;
-                            selector_fn(ui);
-                        },
-                    );
-                }
-                if draw_z_button(
-                    ui,
-                    action_label,
-                    Vec2::new(grid.action_w, FORM_GRID_ROW_H),
-                    11.5,
-                    RADIUS_CONTROL,
-                    true,
-                    false,
-                    ButtonVariant::SecondaryOutline,
-                    pal,
-                )
-                .clicked()
-                {
-                    clicked = true;
-                }
-            },
+        let (row_rect, _) =
+            ui.allocate_exact_size(Vec2::new(avail_w, FORM_GRID_ROW_H), Sense::hover());
+        let input_rect = Rect::from_min_max(
+            row_rect.min,
+            Pos2::new(
+                (row_rect.min.x + grid.input_w).min(row_rect.max.x),
+                row_rect.max.y,
+            ),
         );
+        let mut input_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(input_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        draw_crisp_text_input(
+            &mut input_ui,
+            id_salt,
+            text,
+            grid.input_w,
+            hint,
+            pal.input_bg,
+            pal,
+        );
+
+        if selector_w.is_some() {
+            let sel_min_x = (input_rect.max.x + SPACE_8).min(row_rect.max.x);
+            let selector_rect = Rect::from_min_max(
+                Pos2::new(sel_min_x, row_rect.min.y),
+                Pos2::new((sel_min_x + grid.selector_w).min(row_rect.max.x), row_rect.max.y),
+            );
+            let mut sel_ui = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(selector_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            sel_ui.set_clip_rect(selector_rect.expand2(Vec2::splat(1.0)).intersect(ui.clip_rect()));
+            sel_ui.spacing_mut().item_spacing.x = SPACE_4;
+            selector_fn(&mut sel_ui);
+        }
+
+        let btn_rect = Rect::from_min_max(
+            Pos2::new((row_rect.max.x - grid.action_w).max(row_rect.min.x), row_rect.min.y),
+            row_rect.max,
+        );
+        let mut action_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(btn_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let resp = draw_z_button(
+            &mut action_ui,
+            action_label,
+            Vec2::new(grid.action_w, FORM_GRID_ROW_H),
+            11.5,
+            RADIUS_CONTROL,
+            true,
+            false,
+            ButtonVariant::SecondaryOutline,
+            pal,
+        );
+        action_rect = resp.rect;
+        if resp.clicked() {
+            clicked = true;
+        }
     }
-    clicked
+    (clicked, action_rect)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_settings_form_grid_row(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    text: &mut String,
+    hint: &str,
+    action_label: &str,
+    avail_w: f32,
+    selector_w: Option<f32>,
+    pal: &ThemePalette,
+    selector_fn: impl FnMut(&mut egui::Ui),
+) -> bool {
+    draw_settings_form_grid_row_with_rect(
+        ui,
+        id_salt,
+        text,
+        hint,
+        action_label,
+        avail_w,
+        selector_w,
+        pal,
+        selector_fn,
+    )
+    .0
+}
+
+fn settings_drive_pod_cols(target_count: usize, pane_inner_w: f32) -> usize {
+    if target_count <= 1 {
+        1
+    } else {
+        (((pane_inner_w + SPACE_8) / (SETTINGS_POD_MIN_W + SPACE_8)).floor() as usize)
+            .clamp(1, target_count)
+    }
 }
 
 fn drive_pod_natural_inner_h(non_locked_exclusions: usize, has_stats: bool) -> f32 {
@@ -9063,9 +9127,11 @@ fn draw_scan_scope_section(
     );
     ui.add_space(SPACE_4);
 
-    let use_two_cols = draft.targets.len() >= 2 && pane_inner_w >= SETTINGS_TWO_COL_MIN_W;
-    let card_w = if use_two_cols {
-        ((pane_inner_w - SPACE_8) * 0.5).floor().max(260.0)
+    let cols = settings_drive_pod_cols(draft.targets.len(), pane_inner_w);
+    let card_w = if cols > 1 {
+        ((pane_inner_w - SPACE_8 * (cols - 1) as f32) / cols as f32)
+            .floor()
+            .max(240.0)
     } else {
         pane_inner_w.max(240.0)
     };
@@ -9257,7 +9323,7 @@ fn draw_scan_scope_section(
                                 &format!("{}:\\FolderToExclude", target.letter),
                                 "Add exclusion",
                                 inner_card_w,
-                                false,
+                                None,
                                 pal,
                                 |_| {},
                             ) {
@@ -9279,27 +9345,24 @@ fn draw_scan_scope_section(
             );
         };
 
-    if use_two_cols {
+    if cols > 1 {
         let mut idx = 0;
         while idx < draft.targets.len() {
             if idx > 0 {
                 ui.add_space(SPACE_4);
             }
-            let left_h = target_meta(&draft.targets[idx]);
-            let right_h = if idx + 1 < draft.targets.len() {
-                target_meta(&draft.targets[idx + 1])
-            } else {
-                0.0
-            };
-            let row_min_h = left_h.max(right_h);
+            let end = (idx + cols).min(draft.targets.len());
+            let row_min_h = draft.targets[idx..end]
+                .iter()
+                .map(target_meta)
+                .fold(0.0_f32, f32::max);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_8;
-                draw_drive_target_card(ui, &mut draft.targets[idx], card_w, row_min_h);
-                if idx + 1 < draft.targets.len() {
-                    draw_drive_target_card(ui, &mut draft.targets[idx + 1], card_w, row_min_h);
+                for target in &mut draft.targets[idx..end] {
+                    draw_drive_target_card(ui, target, card_w, row_min_h);
                 }
             });
-            idx += 2;
+            idx = end;
         }
     } else {
         for (idx, target) in draft.targets.iter_mut().enumerate() {
@@ -9643,6 +9706,25 @@ fn draw_rulebook_section(
 
             ui.add_space(SPACE_8);
             ui.label(RichText::new("Add").size(11.5).color(pal.muted));
+            let zone_sel_w = measure_filter_radio_group_w(
+                ui,
+                &[
+                    ZoneRuleKind::AppContainer.label(),
+                    ZoneRuleKind::PersonalFiles.label(),
+                ],
+                pal,
+            );
+            let pin_sel_w = measure_filter_radio_group_w(
+                ui,
+                &[
+                    PinKind::App.short_label(),
+                    PinKind::Group.short_label(),
+                    PinKind::Personal.short_label(),
+                    PinKind::Ignore.short_label(),
+                ],
+                pal,
+            );
+            let shared_selector_w = zone_sel_w.max(pin_sel_w);
             if draw_settings_form_grid_row(
                 ui,
                 "zone_name_input",
@@ -9650,7 +9732,7 @@ fn draw_rulebook_section(
                 "Folder name (e.g. Tools, Media)...",
                 "Add root zone",
                 inner_w,
-                true,
+                Some(shared_selector_w),
                 pal,
                 |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
@@ -9678,7 +9760,7 @@ fn draw_rulebook_section(
                 r"D:\Media or D:\Work\PortableTools",
                 "Add path zone",
                 inner_w,
-                true,
+                Some(shared_selector_w),
                 pal,
                 |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
@@ -9706,7 +9788,7 @@ fn draw_rulebook_section(
                 r"D:\Apps\CustomSuite or D:\Games\Orphan",
                 "Pin folder",
                 inner_w,
-                true,
+                Some(shared_selector_w),
                 pal,
                 |ui| {
                     for pk in [
@@ -9860,9 +9942,7 @@ fn draw_settings_view(
     let is_wide = total_w >= SETTINGS_WIDE_MIN_W;
 
     if is_wide {
-        let content_w = (total_w - SETTINGS_NAV_W - SPACE_16)
-            .min(SETTINGS_CONTENT_MAX_W)
-            .max(320.0);
+        let content_w = (total_w - SETTINGS_NAV_W - SPACE_16).max(320.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_16;
             draw_settings_nav_rail(ui, ui_state, pal);
@@ -9923,7 +10003,7 @@ fn draw_settings_view(
             );
         });
     } else {
-        let content_w = total_w.min(SETTINGS_CONTENT_MAX_W).max(240.0);
+        let content_w = total_w.max(240.0);
         let pane_inner_w = (content_w - SCROLL_GUTTER_W).max(240.0);
         draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
@@ -11717,10 +11797,11 @@ mod tests {
 
     #[test]
     fn settings_form_grid_and_drive_pod_row_heights_align() {
-        for avail_w in [560.0_f32, 700.0, 820.0] {
-            let with_sel = compute_settings_form_grid(avail_w, true);
+        for avail_w in [600.0_f32, 820.0, 1200.0] {
+            let with_sel = compute_settings_form_grid(avail_w, Some(268.0));
             assert!(!with_sel.stacked);
             assert_eq!(with_sel.action_w, FORM_GRID_ACTION_W);
+            assert_eq!(with_sel.selector_w, 268.0);
             assert!(
                 (with_sel.input_w + SPACE_8 + with_sel.selector_w + SPACE_8 + with_sel.action_w
                     - avail_w)
@@ -11728,21 +11809,190 @@ mod tests {
                     < 0.01
             );
 
-            let no_sel = compute_settings_form_grid(avail_w, false);
+            let no_sel = compute_settings_form_grid(avail_w, None);
             assert!(!no_sel.stacked);
             assert_eq!(no_sel.action_w, FORM_GRID_ACTION_W);
             assert!((no_sel.input_w + SPACE_8 + no_sel.action_w - avail_w).abs() < 0.01);
         }
 
-        let narrow = compute_settings_form_grid(420.0, true);
+        let narrow = compute_settings_form_grid(420.0, Some(268.0));
         assert!(narrow.stacked);
         assert_eq!(narrow.action_w, FORM_GRID_ACTION_W);
+
+        assert_eq!(settings_drive_pod_cols(4, 500.0), 1);
+        assert_eq!(settings_drive_pod_cols(4, 660.0), 2);
+        assert_eq!(settings_drive_pod_cols(4, 1000.0), 3);
+        assert_eq!(settings_drive_pod_cols(4, 1340.0), 4);
 
         let h0 = drive_pod_natural_inner_h(0, true);
         let h1 = drive_pod_natural_inner_h(1, true);
         let h2 = drive_pod_natural_inner_h(2, true);
         assert!(h0 < h1 && h1 < h2);
         assert!(drive_pod_natural_inner_h(0, false) < h0);
+    }
+
+    #[test]
+    fn settings_rulebook_add_buttons_share_axis_and_wide_pane_is_fluid() {
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let mut s1 = String::new();
+        let mut s2 = String::new();
+        let mut s3 = String::new();
+        let mut rects = [Rect::NOTHING; 3];
+
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    let avail_w = 900.0;
+                    let zone_sel_w = measure_filter_radio_group_w(
+                        ui,
+                        &[
+                            ZoneRuleKind::AppContainer.label(),
+                            ZoneRuleKind::PersonalFiles.label(),
+                        ],
+                        &pal,
+                    );
+                    let pin_sel_w = measure_filter_radio_group_w(
+                        ui,
+                        &[
+                            PinKind::App.short_label(),
+                            PinKind::Group.short_label(),
+                            PinKind::Personal.short_label(),
+                            PinKind::Ignore.short_label(),
+                        ],
+                        &pal,
+                    );
+                    let shared_sel_w = zone_sel_w.max(pin_sel_w);
+                    assert!(
+                        pin_sel_w > zone_sel_w,
+                        "4-option pin selector ({pin_sel_w}) should govern shared column width ({zone_sel_w})"
+                    );
+
+                    rects[0] = draw_settings_form_grid_row_with_rect(
+                        ui,
+                        "test_r1",
+                        &mut s1,
+                        "hint1",
+                        "Add root zone",
+                        avail_w,
+                        Some(shared_sel_w),
+                        &pal,
+                        |ui| {
+                            let _ = draw_filter_radio_chip(
+                                ui,
+                                ZoneRuleKind::AppContainer.label(),
+                                true,
+                                &pal,
+                            );
+                            let _ = draw_filter_radio_chip(
+                                ui,
+                                ZoneRuleKind::PersonalFiles.label(),
+                                false,
+                                &pal,
+                            );
+                        },
+                    )
+                    .1;
+                    rects[1] = draw_settings_form_grid_row_with_rect(
+                        ui,
+                        "test_r2",
+                        &mut s2,
+                        "hint2",
+                        "Add path zone",
+                        avail_w,
+                        Some(shared_sel_w),
+                        &pal,
+                        |ui| {
+                            let _ = draw_filter_radio_chip(
+                                ui,
+                                ZoneRuleKind::AppContainer.label(),
+                                false,
+                                &pal,
+                            );
+                            let _ = draw_filter_radio_chip(
+                                ui,
+                                ZoneRuleKind::PersonalFiles.label(),
+                                true,
+                                &pal,
+                            );
+                        },
+                    )
+                    .1;
+                    rects[2] = draw_settings_form_grid_row_with_rect(
+                        ui,
+                        "test_r3",
+                        &mut s3,
+                        "hint3",
+                        "Pin folder",
+                        avail_w,
+                        Some(shared_sel_w),
+                        &pal,
+                        |ui| {
+                            for pk in [
+                                PinKind::App,
+                                PinKind::Group,
+                                PinKind::Personal,
+                                PinKind::Ignore,
+                            ] {
+                                let _ = draw_filter_radio_chip(
+                                    ui,
+                                    pk.short_label(),
+                                    pk == PinKind::App,
+                                    &pal,
+                                );
+                            }
+                        },
+                    )
+                    .1;
+                });
+            },
+        );
+
+        for r in rects {
+            assert!((r.min.x - rects[0].min.x).abs() < 0.5, "left edge mismatch: {r:?} vs {:?}", rects[0]);
+            assert!((r.max.x - rects[0].max.x).abs() < 0.5, "right edge mismatch: {r:?} vs {:?}", rects[0]);
+        }
+
+        // Wide viewport (1600x900) expands fluidly past the old 860px cap
+        let (report, cfg) = make_synthetic_report_for_drives(4);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        for section in [SettingsSection::ScanScope, SettingsSection::Rulebook] {
+            st.settings_section = section;
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut st,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        r"C:\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            let max_x = out
+                .shapes
+                .iter()
+                .map(|cs| cs.shape.visual_bounding_rect().max.x)
+                .filter(|x| x.is_finite() && *x <= 1600.0)
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_x > 1400.0,
+                "expected fluid wide content pane > 1400px at 1600px viewport for {section:?}, got {max_x}"
+            );
+        }
     }
 
     #[test]
