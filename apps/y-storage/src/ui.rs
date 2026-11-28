@@ -64,8 +64,6 @@ const PINNED_ROW_H: f32 = 24.0;
 const SUB_LINE1_H: f32 = 22.0;
 const SUB_LINE2_H: f32 = 16.0;
 const COLLAPSED_ROW_OUTER_H: f32 = APP_ROW_H + SPACE_4 * 2.0;
-const SETTINGS_WIDE_MIN_W: f32 = 760.0;
-const SETTINGS_NAV_W: f32 = 216.0;
 const SETTINGS_TWO_COL_MIN_W: f32 = 560.0;
 const SETTINGS_POD_MIN_W: f32 = 320.0;
 const FORM_GRID_ACTION_W: f32 = 112.0;
@@ -9853,74 +9851,6 @@ fn draw_settings_about_card(
     );
 }
 
-fn draw_settings_nav_rail(
-    ui: &mut egui::Ui,
-    ui_state: &mut StorageUiState,
-    pal: &ThemePalette,
-) {
-    ui.allocate_ui_with_layout(
-        Vec2::new(SETTINGS_NAV_W, 0.0),
-        Layout::top_down(Align::Min),
-        |ui| {
-            draw_crisp_frame(
-                ui,
-                pal.panel,
-                pal.border,
-                RADIUS_PANEL,
-                Margin::same(SPACE_8),
-                |ui| {
-                    let inner_w = (SETTINGS_NAV_W - SPACE_8 * 2.0 - 2.0).max(120.0);
-                    ui.set_width(inner_w);
-                    ui.spacing_mut().item_spacing.y = SPACE_4;
-                    let ppp = ui.ctx().pixels_per_point();
-                    let font_id = FontId::new(12.0, FontFamily::Proportional);
-
-                    for section in SettingsSection::ALL {
-                        let selected = ui_state.settings_section == section;
-                        let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(inner_w, 30.0), Sense::click());
-                        let (fill, border_col, text_col) = if selected {
-                            (pal.accent_soft_fill, pal.accent_border, pal.text)
-                        } else if resp.hovered() {
-                            (pal.widget_hover, pal.border, pal.accent_line)
-                        } else {
-                            (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted)
-                        };
-                        let snapped = paint_crisp_bordered_box(
-                            ui.painter(),
-                            rect,
-                            RADIUS_CONTROL,
-                            fill,
-                            border_col,
-                            1.0,
-                            ppp,
-                        );
-                        if selected {
-                            let bar = Rect::from_min_max(
-                                Pos2::new(snapped.min.x + SPACE_4, snapped.min.y + SPACE_4),
-                                Pos2::new(snapped.min.x + SPACE_4 + 3.0, snapped.max.y - SPACE_4),
-                            );
-                            ui.painter().rect_filled(bar, 1.5, pal.accent_line);
-                        }
-                        let galley = ui.fonts(|f| {
-                            f.layout_no_wrap(section.label().to_owned(), font_id.clone(), text_col)
-                        });
-                        let text_box = Rect::from_min_max(
-                            Pos2::new(snapped.min.x + SPACE_12, snapped.min.y),
-                            Pos2::new((snapped.max.x - SPACE_8).max(snapped.min.x + SPACE_12), snapped.max.y),
-                        );
-                        let pos = optical_galley_pos(ui, text_box, &galley, None, false);
-                        ui.painter().galley(pos, galley, text_col);
-                        if resp.clicked() {
-                            ui_state.settings_section = section;
-                        }
-                    }
-                },
-            );
-        },
-    );
-}
-
 fn draw_settings_view(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
@@ -9936,108 +9866,72 @@ fn draw_settings_view(
 
     if ui_state.settings_focus_containers {
         ui_state.settings_section = SettingsSection::Rulebook;
+        ui_state.settings_focus_containers = false;
     }
 
-    let total_w = ui.available_width().max(240.0);
-    let is_wide = total_w >= SETTINGS_WIDE_MIN_W;
+    ui.spacing_mut().item_spacing.y = SPACE_4;
+    ui.label(RichText::new("Settings").size(16.0).color(pal.text));
+    ui.add_space(SPACE_4);
 
-    if is_wide {
-        let content_w = (total_w - SETTINGS_NAV_W - SPACE_16).max(320.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACE_16;
-            draw_settings_nav_rail(ui, ui_state, pal);
-            ui.allocate_ui_with_layout(
-                Vec2::new(content_w, ui.available_height()),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    let pane_inner_w = (content_w - SCROLL_GUTTER_W).max(240.0);
-                    draw_synced_scroll_area(
-                        ui,
-                        ("settings_scroll", ui_state.settings_section as u8),
-                        None,
-                        [false, false],
-                        pal,
-                        pal.bg,
-                        |ui| {
-                            ui.spacing_mut().item_spacing.y = SPACE_4;
-                            match ui_state.settings_section {
-                                SettingsSection::Appearance => {
-                                    draw_appearance_theme_section(
-                                        ui,
-                                        ui_state,
-                                        config,
-                                        pane_inner_w,
-                                        pal,
-                                        emit,
-                                    );
-                                }
-                                SettingsSection::ScanScope => {
-                                    draw_scan_scope_section(
-                                        ui,
-                                        ui_state,
-                                        &mut draft,
-                                        report,
-                                        &sys_win_key,
-                                        pane_inner_w,
-                                        pal,
-                                        &mut changed,
-                                    );
-                                }
-                                SettingsSection::Rulebook => {
-                                    let _ = draw_rulebook_section(
-                                        ui,
-                                        ui_state,
-                                        &mut draft,
-                                        pane_inner_w,
-                                        pal,
-                                        &mut changed,
-                                    );
-                                    ui_state.settings_focus_containers = false;
-                                }
-                            }
-                            ui.add_space(SPACE_12);
-                            draw_settings_about_card(ui, ui_state, pane_inner_w, pal);
-                        },
-                    );
-                },
-            );
-        });
-    } else {
-        let content_w = total_w.max(240.0);
-        let pane_inner_w = (content_w - SCROLL_GUTTER_W).max(240.0);
-        draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+        for section in SettingsSection::ALL {
+            let selected = ui_state.settings_section == section;
+            if draw_filter_radio_chip(ui, section.label(), selected, pal) {
+                ui_state.settings_section = section;
+            }
+        }
+    });
+    ui.add_space(SPACE_8);
+
+    let pane_inner_w = (ui.available_width().max(240.0) - SCROLL_GUTTER_W).max(240.0);
+    draw_synced_scroll_area(
+        ui,
+        ("settings_scroll", ui_state.settings_section as u8),
+        None,
+        [false, false],
+        pal,
+        pal.bg,
+        |ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
-            draw_appearance_theme_section(ui, ui_state, config, pane_inner_w, pal, emit);
-            ui.add_space(SPACE_12);
-            draw_scan_scope_section(
-                ui,
-                ui_state,
-                &mut draft,
-                report,
-                &sys_win_key,
-                pane_inner_w,
-                pal,
-                &mut changed,
-            );
-            ui.add_space(SPACE_12);
-            let rulebook_rect = draw_rulebook_section(
-                ui,
-                ui_state,
-                &mut draft,
-                pane_inner_w,
-                pal,
-                &mut changed,
-            );
-            if ui_state.settings_focus_containers {
-                ui.scroll_to_rect(rulebook_rect, Some(Align::BOTTOM));
-                if rulebook_rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
-                    ui_state.settings_focus_containers = false;
+            match ui_state.settings_section {
+                SettingsSection::Appearance => {
+                    draw_appearance_theme_section(
+                        ui,
+                        ui_state,
+                        config,
+                        pane_inner_w,
+                        pal,
+                        emit,
+                    );
+                }
+                SettingsSection::ScanScope => {
+                    draw_scan_scope_section(
+                        ui,
+                        ui_state,
+                        &mut draft,
+                        report,
+                        &sys_win_key,
+                        pane_inner_w,
+                        pal,
+                        &mut changed,
+                    );
+                }
+                SettingsSection::Rulebook => {
+                    let _ = draw_rulebook_section(
+                        ui,
+                        ui_state,
+                        &mut draft,
+                        pane_inner_w,
+                        pal,
+                        &mut changed,
+                    );
                 }
             }
             ui.add_space(SPACE_12);
             draw_settings_about_card(ui, ui_state, pane_inner_w, pal);
-        });
-    }
+        },
+    );
 
     if changed {
         ui_state.ledger_page = 0;
@@ -11718,7 +11612,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_wide_section_nav_and_narrow_collapse_render_cleanly() {
+    fn settings_top_tabs_and_narrow_wrap_render_cleanly() {
         let (report, cfg) = make_synthetic_report_for_drives(3);
         let ctx = egui::Context::default();
         configure_fonts_and_theme(&ctx, ThemeMode::Dark);
@@ -11726,7 +11620,7 @@ mod tests {
         st.active_view = ActiveView::Settings;
         st.settings_focus_containers = true;
 
-        // Wide viewport: focus flag selects Rulebook section and clears itself
+        // Wide viewport: focus flag selects Rulebook tab and clears itself
         let wide_out = ctx.run(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1275.0, 900.0))),
@@ -11749,50 +11643,31 @@ mod tests {
         assert_eq!(st.settings_section, SettingsSection::Rulebook);
         assert!(!st.settings_focus_containers);
 
-        // Render all 3 sections in wide mode (1020x720)
-        for section in SettingsSection::ALL {
-            st.settings_section = section;
-            let out = ctx.run(
-                RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
-                    ..Default::default()
-                },
-                |c| {
-                    draw_app_ui(
-                        c,
-                        &mut st,
-                        &cfg,
-                        Some(&report),
-                        false,
-                        None,
-                        r"C:\Windows",
-                        &mut |_| {},
-                    );
-                },
-            );
-            assert!(!out.shapes.is_empty());
-        }
-
-        // Narrow viewport (< SETTINGS_WIDE_MIN_W): collapses cleanly to single column
-        let narrow_out = ctx.run(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 720.0))),
-                ..Default::default()
-            },
-            |c| {
-                draw_app_ui(
-                    c,
-                    &mut st,
-                    &cfg,
-                    Some(&report),
-                    false,
-                    None,
-                    r"C:\Windows",
-                    &mut |_| {},
+        // Render all 3 tabs across standard (1020x720) and narrow wrapping (420x720) widths
+        for size in [Vec2::new(1020.0, 720.0), Vec2::new(420.0, 720.0)] {
+            for section in SettingsSection::ALL {
+                st.settings_section = section;
+                let out = ctx.run(
+                    RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |c| {
+                        draw_app_ui(
+                            c,
+                            &mut st,
+                            &cfg,
+                            Some(&report),
+                            false,
+                            None,
+                            r"C:\Windows",
+                            &mut |_| {},
+                        );
+                    },
                 );
-            },
-        );
-        assert!(!narrow_out.shapes.is_empty());
+                assert!(!out.shapes.is_empty());
+            }
+        }
     }
 
     #[test]
