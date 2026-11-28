@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod family;
 mod list_query;
 mod logo;
 mod logo_png;
@@ -62,6 +63,7 @@ fn main() {
     let mut smoke_gui_ms: Option<u64> = None;
     let mut smoke_gui_out: Option<PathBuf> = None;
     let mut bench_perf_out: Option<PathBuf> = None;
+    let mut dump_families_in: Option<PathBuf> = None;
     let mut capture_titlebar_out: Option<PathBuf> = None;
     let mut screenshot_out: Option<PathBuf> = None;
     let mut screenshot_report_json: Option<PathBuf> = None;
@@ -177,6 +179,12 @@ fn main() {
             "--bench-perf" => {
                 if i + 1 < args.len() {
                     bench_perf_out = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
+            "--dump-families" => {
+                if i + 1 < args.len() {
+                    dump_families_in = Some(PathBuf::from(&args[i + 1]));
                     i += 1;
                 }
             }
@@ -373,6 +381,14 @@ fn main() {
         return;
     }
 
+    if let Some(report_path) = dump_families_in {
+        if let Err(err) = run_dump_families(&report_path) {
+            eprintln!("dump families failed: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Some(cap_path) = capture_titlebar_out {
         let controller = Arc::new(Mutex::new(AppController::load_initial()));
         if let Err(err) = run_titlebar_capture(controller, &cap_path) {
@@ -401,6 +417,107 @@ fn main() {
             let _ = std::fs::write(&smoke_path, json);
         }
     }
+}
+
+fn run_dump_families(report_path: &PathBuf) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct MemberSummary<'a> {
+        id: &'a str,
+        display_name: &'a str,
+        total_bytes: u64,
+        category: AppCategory,
+        no_touch: Option<y_core::model::NoTouchCategory>,
+    }
+    #[derive(Serialize)]
+    struct FamilySummary<'a> {
+        id: &'a str,
+        display_name: &'a str,
+        publisher: &'a str,
+        normalized_publisher: &'a str,
+        total_bytes: u64,
+        member_sum_bytes: u64,
+        shared_category: Option<AppCategory>,
+        bases: &'a [family::FamilyBasis],
+        basis_label: String,
+        basis_detail: &'a str,
+        members: Vec<MemberSummary<'a>>,
+    }
+    #[derive(Serialize)]
+    struct DumpFamiliesOutput<'a> {
+        total_apps: usize,
+        total_entries: usize,
+        family_count: usize,
+        sum_apps_bytes: u64,
+        sum_entries_bytes: u64,
+        byte_diff: i128,
+        families: Vec<FamilySummary<'a>>,
+    }
+
+    let txt = std::fs::read_to_string(report_path)
+        .map_err(|e| format!("read {}: {e}", report_path.display()))?;
+    let report = if let Ok(wrapped) = serde_json::from_str::<CliScanOutput>(&txt) {
+        wrapped.report
+    } else {
+        serde_json::from_str::<ScanReport>(&txt)
+            .map_err(|e| format!("parse {}: {e}", report_path.display()))?
+    };
+
+    let entries = family::derive_app_families(&report.apps);
+    let sum_apps_bytes: u64 = report.apps.iter().map(|a| a.total_bytes).sum();
+    let sum_entries_bytes: u64 = entries
+        .iter()
+        .map(|e| e.effective_bytes(&report.apps, None))
+        .sum();
+    let families: Vec<FamilySummary<'_>> = entries
+        .iter()
+        .filter_map(|e| match e {
+            family::LedgerEntry::Unit(_) => None,
+            family::LedgerEntry::Family(f) => {
+                let members: Vec<MemberSummary<'_>> = f
+                    .member_indices
+                    .iter()
+                    .map(|&idx| {
+                        let a = &report.apps[idx];
+                        MemberSummary {
+                            id: &a.id,
+                            display_name: &a.display_name,
+                            total_bytes: a.total_bytes,
+                            category: a.category,
+                            no_touch: a.no_touch,
+                        }
+                    })
+                    .collect();
+                let member_sum_bytes = members.iter().map(|m| m.total_bytes).sum();
+                Some(FamilySummary {
+                    id: &f.id,
+                    display_name: &f.display_name,
+                    publisher: &f.publisher,
+                    normalized_publisher: &f.normalized_publisher,
+                    total_bytes: f.total_bytes,
+                    member_sum_bytes,
+                    shared_category: f.shared_category,
+                    bases: &f.bases,
+                    basis_label: f.basis_label(),
+                    basis_detail: &f.basis_detail,
+                    members,
+                })
+            }
+        })
+        .collect();
+    let out = DumpFamiliesOutput {
+        total_apps: report.apps.len(),
+        total_entries: entries.len(),
+        family_count: families.len(),
+        sum_apps_bytes,
+        sum_entries_bytes,
+        byte_diff: sum_entries_bytes as i128 - sum_apps_bytes as i128,
+        families,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 fn run_cli_scan(out_path: &PathBuf, ephemeral: bool, all_drives: bool) {

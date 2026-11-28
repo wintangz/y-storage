@@ -11,6 +11,8 @@ use y_core::model::{
     ZoneKind,
 };
 
+use crate::family::LedgerEntry;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnattributedSortMode {
     #[default]
@@ -449,6 +451,7 @@ fn app_matches_facets_for_mode(
 
 /// Combines the active filter chip, search text, and general facets using logical AND,
 /// switching size, growth, and Size/Growth sorting to per-drive bytes when a single drive filter is active.
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn filter_and_sort_apps_with_facets<'a>(
     apps: &'a [AttributedApp],
@@ -620,6 +623,160 @@ pub fn filter_and_sort_apps<'a>(
     // Preserve exact byte-for-byte original report order when in default Size desc mode.
     if (mode, dir) != (AppSortMode::Size, SortDirection::Desc) {
         out.sort_by(|a, b| compare_apps(a, b, mode, dir));
+    }
+    out
+}
+
+/// Pure comparator over top-level `LedgerEntry` rows (families sort by family total / shared attributes).
+#[must_use]
+pub fn compare_ledger_entries(
+    a: &LedgerEntry,
+    b: &LedgerEntry,
+    apps: &[AttributedApp],
+    mode: AppSortMode,
+    dir: SortDirection,
+    per_drive: Option<char>,
+) -> Ordering {
+    let eff_size = |e: &LedgerEntry| -> u64 { e.effective_bytes(apps, per_drive) };
+    let eff_growth = |e: &LedgerEntry| -> GrowthDelta { e.effective_growth(apps, per_drive) };
+    let name_a = a.display_name(apps);
+    let name_b = b.display_name(apps);
+    match mode {
+        AppSortMode::Size => match dir {
+            SortDirection::Desc => eff_size(b)
+                .cmp(&eff_size(a))
+                .then_with(|| name_a.cmp(name_b)),
+            SortDirection::Asc => eff_size(a)
+                .cmp(&eff_size(b))
+                .then_with(|| name_a.cmp(name_b)),
+        },
+        AppSortMode::Name => {
+            let la = name_a.to_lowercase();
+            let lb = name_b.to_lowercase();
+            let primary = match dir {
+                SortDirection::Asc => la.cmp(&lb),
+                SortDirection::Desc => lb.cmp(&la),
+            };
+            primary
+                .then_with(|| name_a.cmp(name_b))
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
+        }
+        AppSortMode::Publisher => {
+            let pa = a.primary_publisher(apps);
+            let pb = b.primary_publisher(apps);
+            let primary = match (pa, pb) {
+                (Some(sa), Some(sb)) => {
+                    let la = sa.to_lowercase();
+                    let lb = sb.to_lowercase();
+                    match dir {
+                        SortDirection::Asc => la.cmp(&lb),
+                        SortDirection::Desc => lb.cmp(&la),
+                    }
+                }
+                (Some(_), None) => match dir {
+                    SortDirection::Asc => Ordering::Less,
+                    SortDirection::Desc => Ordering::Greater,
+                },
+                (None, Some(_)) => match dir {
+                    SortDirection::Asc => Ordering::Greater,
+                    SortDirection::Desc => Ordering::Less,
+                },
+                (None, None) => Ordering::Equal,
+            };
+            primary
+                .then_with(|| name_a.to_lowercase().cmp(&name_b.to_lowercase()))
+                .then_with(|| name_a.cmp(name_b))
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
+        }
+        AppSortMode::Category => {
+            let ca = a.shared_category(apps).map(|c| c.label().to_lowercase());
+            let cb = b.shared_category(apps).map(|c| c.label().to_lowercase());
+            let primary = match (ca, cb) {
+                (Some(la), Some(lb)) => match dir {
+                    SortDirection::Asc => la.cmp(&lb),
+                    SortDirection::Desc => lb.cmp(&la),
+                },
+                (Some(_), None) => match dir {
+                    SortDirection::Asc => Ordering::Less,
+                    SortDirection::Desc => Ordering::Greater,
+                },
+                (None, Some(_)) => match dir {
+                    SortDirection::Asc => Ordering::Greater,
+                    SortDirection::Desc => Ordering::Less,
+                },
+                (None, None) => Ordering::Equal,
+            };
+            primary
+                .then_with(|| eff_size(b).cmp(&eff_size(a)))
+                .then_with(|| name_a.to_lowercase().cmp(&name_b.to_lowercase()))
+                .then_with(|| name_a.cmp(name_b))
+        }
+        AppSortMode::Growth => match (
+            growth_delta_bytes(eff_growth(a)),
+            growth_delta_bytes(eff_growth(b)),
+        ) {
+            (Some(da), Some(db)) => {
+                let primary = match dir {
+                    SortDirection::Desc => db.cmp(&da),
+                    SortDirection::Asc => da.cmp(&db),
+                };
+                primary
+                    .then_with(|| eff_size(b).cmp(&eff_size(a)))
+                    .then_with(|| name_a.cmp(name_b))
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => eff_size(b)
+                .cmp(&eff_size(a))
+                .then_with(|| name_a.cmp(name_b)),
+        },
+    }
+}
+
+/// Filters and sorts top-level `LedgerEntry` items: a matching member surfaces its family.
+#[must_use]
+pub fn filter_and_sort_ledger_entries(
+    entries: &[LedgerEntry],
+    apps: &[AttributedApp],
+    mode: AppSortMode,
+    dir: SortDirection,
+    chip: AppFilterChip,
+    search_query: &str,
+    facets: &FacetFilters,
+    shared_app_ids: &HashSet<String>,
+    system_drive_letter: char,
+) -> Vec<usize> {
+    let per_drive = active_per_drive_mode(chip, facets, system_drive_letter);
+    let q = search_query.trim().to_ascii_lowercase();
+    let mut out: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| match entry {
+            LedgerEntry::Unit(idx) => {
+                let app = &apps[*idx];
+                app_matches_chip_for_mode(app, chip, system_drive_letter, per_drive)
+                    && app_matches_search(app, search_query)
+                    && app_matches_facets_for_mode(app, facets, shared_app_ids, per_drive)
+            }
+            LedgerEntry::Family(fam) => {
+                let fam_text_hit = !q.is_empty()
+                    && (fam.display_name.to_ascii_lowercase().contains(&q)
+                        || fam.basis_label().to_ascii_lowercase().contains(&q));
+                fam.member_indices.iter().any(|&m_idx| {
+                    let member = &apps[m_idx];
+                    app_matches_chip_for_mode(member, chip, system_drive_letter, per_drive)
+                        && app_matches_facets_for_mode(member, facets, shared_app_ids, per_drive)
+                        && (fam_text_hit || app_matches_search(member, search_query))
+                })
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if per_drive.is_some() || (mode, dir) != (AppSortMode::Size, SortDirection::Desc) {
+        out.sort_by(|&ia, &ib| {
+            compare_ledger_entries(&entries[ia], &entries[ib], apps, mode, dir, per_drive)
+        });
     }
     out
 }
@@ -1499,5 +1656,81 @@ mod tests {
             active_per_drive_mode(AppFilterChip::HasSystemDriveFootprint, &d_facets, 'C'),
             None
         );
+    }
+
+    #[test]
+    fn family_top_level_sort_and_member_search_surfacing() {
+        let mut apps = vec![
+            make_app(
+                "reg:edge",
+                "Northwind Edge",
+                "Northwind Corp.",
+                600,
+                GrowthDelta::Changed(0),
+                None,
+                vec![AttributionBasis::InstallLocation],
+                &['C'],
+            ),
+            make_app(
+                "sys:edge-rt",
+                "Northwind Edge Runtime",
+                "Northwind Corp.",
+                500,
+                GrowthDelta::Changed(0),
+                Some(NoTouchCategory::SystemRuntime),
+                vec![AttributionBasis::InstallLocation],
+                &['C'],
+            ),
+            make_app(
+                "reg:big-solo",
+                "Big Solo App",
+                "Other Pub",
+                900,
+                GrowthDelta::Changed(0),
+                None,
+                vec![AttributionBasis::InstallLocation],
+                &['C'],
+            ),
+        ];
+        apps[0].category = AppCategory::Browsers;
+        apps[1].category = AppCategory::SystemAndRuntimes;
+        apps[2].category = AppCategory::Utilities;
+
+        let entries = crate::family::derive_app_families(&apps);
+        assert_eq!(entries.len(), 2);
+        // Family total = 1100 > Big Solo App = 900 -> family sorts first by Size Desc
+        assert!(entries[0].is_family());
+        assert_eq!(entries[0].effective_bytes(&apps, None), 1100);
+
+        let shared = HashSet::new();
+        // Search for satellite token "runtime" surfaces the family
+        let searched = filter_and_sort_ledger_entries(
+            &entries,
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::All,
+            "runtime",
+            &FacetFilters::default(),
+            &shared,
+            'C',
+        );
+        assert_eq!(searched.len(), 1);
+        assert!(entries[searched[0]].is_family());
+
+        // NO-TOUCH chip surfaces the family containing the NO-TOUCH member
+        let nt_filtered = filter_and_sort_ledger_entries(
+            &entries,
+            &apps,
+            AppSortMode::Size,
+            SortDirection::Desc,
+            AppFilterChip::NoTouch,
+            "",
+            &FacetFilters::default(),
+            &shared,
+            'C',
+        );
+        assert_eq!(nt_filtered.len(), 1);
+        assert!(entries[nt_filtered[0]].is_family());
     }
 }
