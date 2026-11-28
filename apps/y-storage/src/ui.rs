@@ -55,7 +55,7 @@ const DELTA_COL_W: f32 = 96.0;
 const GROWTH_NOISE_FLOOR_BYTES: u64 = 1_048_576; // 1 MB binary (DESIGN.md / FIX 6 noise floor)
 const APP_ICON_SIZE: f32 = 18.0;
 const PROP_BAR_W: f32 = 76.0;
-const PROP_BAR_H: f32 = 2.0;
+const PROP_BAR_H: f32 = 4.0;
 const SCROLL_GUTTER_W: f32 = 6.0 + SPACE_8;
 const HEADER_CONTROL_H: f32 = 28.0;
 const TABLE_HEADER_H: f32 = 26.0;
@@ -1675,10 +1675,12 @@ fn paint_horizontal_theme_sweep_bar(
     if fill_rect.width() <= 0.5 || fill_rect.height() <= 0.5 || full_track.width() <= 0.5 {
         return;
     }
-    let r = rounding
+    let r_clamped = rounding
         .min(fill_rect.height() * 0.5)
         .min(fill_rect.width() * 0.5)
         .max(0.0);
+    // Rounding <= 1.5 skips corner subdivision below, so zero it to prevent pinched 0px endpoints.
+    let r = if r_clamped <= 1.5 { 0.0 } else { r_clamped };
     let x0 = fill_rect.min.x;
     let x1 = fill_rect.max.x;
     let y0 = fill_rect.min.y;
@@ -1749,6 +1751,37 @@ fn paint_horizontal_theme_sweep_bar(
         prev_bot = vb;
     }
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Paints a pixel-snapped solid-rectangle proportion bar for ledger rows (square ends, no feathering).
+fn paint_ledger_size_bar(
+    painter: &egui::Painter,
+    track_rect: Rect,
+    display_bytes: u64,
+    max_bar_bytes: u64,
+    row_surface: Color32,
+    pal: &ThemePalette,
+    ppp: f32,
+) {
+    let snapped_track = snap_rect_to_pixels(track_rect, ppp);
+    let track_col = lerp_color(row_surface, pal.border, 0.55);
+    paint_solid_px_rect(painter, snapped_track, track_col);
+
+    if display_bytes == 0 || max_bar_bytes == 0 {
+        return;
+    }
+    let ratio = (display_bytes as f64 / max_bar_bytes as f64).clamp(0.0, 1.0);
+    let inv = if ppp > 0.0 { 1.0 / ppp } else { 1.0 };
+    let track_px = (snapped_track.width() * ppp).round().max(1.0);
+    let min_fill_px = (2.0 * ppp).round().max(2.0).min(track_px);
+    let fill_px = ((track_px as f64) * ratio)
+        .round()
+        .clamp(min_fill_px as f64, track_px as f64) as f32;
+    let fill_rect = Rect::from_min_max(
+        snapped_track.min,
+        Pos2::new(snapped_track.min.x + fill_px * inv, snapped_track.max.y),
+    );
+    paint_solid_px_rect(painter, fill_rect, pal.accent_line);
 }
 
 /// Paints a smooth vertical fade-out gradient overlay at the bottom edge of a scrolling list.
@@ -6108,7 +6141,7 @@ fn draw_unit_ledger_row(
             {
                 let text_rect = Rect::from_min_max(
                     size_cell_rect.min,
-                    Pos2::new(size_cell_rect.max.x, (y1 - 4.0).max(y0 + 14.0)),
+                    Pos2::new(size_cell_rect.max.x, (y1 - PROP_BAR_H - 2.0).max(y0 + 14.0)),
                 );
                 let mut s_ui =
                     table_cell_ui(ui, text_rect, Layout::right_to_left(Align::Center));
@@ -6159,33 +6192,15 @@ fn draw_unit_ledger_row(
                     ),
                     Pos2::new(size_cell_rect.max.x, y1 - 1.0),
                 );
-                let track_col = lerp_color(row_surface, pal.border, 0.55);
-                ui.painter()
-                    .rect_filled(track_rect, Rounding::ZERO, track_col);
-
-                let ratio = if ctx.max_bar_bytes > 0 {
-                    (display_bytes as f64 / ctx.max_bar_bytes as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let fill_w = if display_bytes == 0 {
-                    0.0
-                } else {
-                    (track_rect.width() * ratio as f32).clamp(1.0, track_rect.width())
-                };
-                if fill_w > 0.0 {
-                    let fill_rect = Rect::from_min_size(
-                        track_rect.min,
-                        Vec2::new(fill_w, track_rect.height()),
-                    );
-                    paint_horizontal_theme_sweep_bar(
-                        ui.painter(),
-                        track_rect,
-                        fill_rect,
-                        1.0,
-                        pal,
-                    );
-                }
+                paint_ledger_size_bar(
+                    ui.painter(),
+                    track_rect,
+                    display_bytes,
+                    ctx.max_bar_bytes,
+                    row_surface,
+                    pal,
+                    ctx.ppp,
+                );
             }
 
             let sum_click_rect = Rect::from_min_max(
@@ -7211,7 +7226,7 @@ fn draw_family_ledger_row(
             {
                 let text_rect = Rect::from_min_max(
                     size_cell_rect.min,
-                    Pos2::new(size_cell_rect.max.x, (y1 - 4.0).max(y0 + 14.0)),
+                    Pos2::new(size_cell_rect.max.x, (y1 - PROP_BAR_H - 2.0).max(y0 + 14.0)),
                 );
                 let mut s_ui =
                     table_cell_ui(ui, text_rect, Layout::right_to_left(Align::Center));
@@ -7245,33 +7260,15 @@ fn draw_family_ledger_row(
                     ),
                     Pos2::new(size_cell_rect.max.x, y1 - 1.0),
                 );
-                let track_col = lerp_color(row_surface, pal.border, 0.55);
-                ui.painter()
-                    .rect_filled(track_rect, Rounding::ZERO, track_col);
-
-                let ratio = if ctx.max_bar_bytes > 0 {
-                    (display_bytes as f64 / ctx.max_bar_bytes as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let fill_w = if display_bytes == 0 {
-                    0.0
-                } else {
-                    (track_rect.width() * ratio as f32).clamp(1.0, track_rect.width())
-                };
-                if fill_w > 0.0 {
-                    let fill_rect = Rect::from_min_size(
-                        track_rect.min,
-                        Vec2::new(fill_w, track_rect.height()),
-                    );
-                    paint_horizontal_theme_sweep_bar(
-                        ui.painter(),
-                        track_rect,
-                        fill_rect,
-                        1.0,
-                        pal,
-                    );
-                }
+                paint_ledger_size_bar(
+                    ui.painter(),
+                    track_rect,
+                    display_bytes,
+                    ctx.max_bar_bytes,
+                    row_surface,
+                    pal,
+                    ctx.ppp,
+                );
             }
 
             let sum_click_rect = Rect::from_min_max(
@@ -12334,6 +12331,361 @@ mod tests {
                 Some(NoTouchCategory::SystemRuntime),
             ),
         ];
+                                ZoneRuleKind::PersonalFiles.label(),
+                                true,
+                                &pal,
+                            );
+                        },
+                    );
+                    outcomes[2] = draw_settings_form_grid_row_with_rect(
+                        ui,
+                        "test_r3",
+                        &mut s3,
+                        "hint3",
+                        "Pin folder",
+                        avail_w,
+                        Some(shared_sel_w),
+                        true,
+                        &pal,
+                        |ui| {
+                            for pk in [
+                                PinKind::App,
+                                PinKind::Group,
+                                PinKind::Personal,
+                                PinKind::Ignore,
+                            ] {
+                                let _ = draw_filter_radio_chip(
+                                    ui,
+                                    pk.short_label(),
+                                    pk == PinKind::App,
+                                    &pal,
+                                );
+                            }
+                        },
+                    );
+                });
+            },
+        );
+
+        assert!(outcomes[0].browse_rect.is_none());
+        let b1 = outcomes[1].browse_rect.expect("row 2 has Browse...");
+        let b2 = outcomes[2].browse_rect.expect("row 3 has Browse...");
+        assert!((b1.min.x - b2.min.x).abs() < 0.5);
+        assert!((b1.max.x - b2.max.x).abs() < 0.5);
+
+        for o in outcomes {
+            let r = o.action_rect;
+            assert!((r.min.x - outcomes[0].action_rect.min.x).abs() < 0.5, "left edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
+            assert!((r.max.x - outcomes[0].action_rect.max.x).abs() < 0.5, "right edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
+        }
+
+        // Wide viewport (1600x900) expands fluidly past the old 860px cap and renders Browse... twice
+        let (report, cfg) = make_synthetic_report_for_drives(4);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        for section in [SettingsSection::ScanScope, SettingsSection::Rulebook] {
+            st.settings_section = section;
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut st,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        r"C:\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            if section == SettingsSection::Rulebook {
+                fn count_text(shape: &egui::Shape, target: &str) -> usize {
+                    match shape {
+                        egui::Shape::Text(ts) => usize::from(ts.galley.text() == target),
+                        egui::Shape::Vec(vec) => {
+                            vec.iter().map(|s| count_text(s, target)).sum()
+                        }
+                        _ => 0,
+                    }
+                }
+                let browse_count: usize = out
+                    .shapes
+                    .iter()
+                    .map(|cs| count_text(&cs.shape, "Browse..."))
+                    .sum();
+                assert_eq!(browse_count, 2);
+            }
+            let max_x = out
+                .shapes
+                .iter()
+                .map(|cs| cs.shape.visual_bounding_rect().max.x)
+                .filter(|x| x.is_finite() && *x <= 1600.0)
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_x > 1400.0,
+                "expected fluid wide content pane > 1400px at 1600px viewport for {section:?}, got {max_x}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_rulebook_zone_chip_labels_share_baseline() {
+        fn collect_text_positions(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(ts) => {
+                    out.push((ts.galley.text().to_owned(), ts.pos.y));
+                }
+                egui::Shape::Vec(vec) => {
+                    for s in vec {
+                        collect_text_positions(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (report, cfg) = make_synthetic_report_for_drives(2);
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        st.settings_section = SettingsSection::Rulebook;
+
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+
+        let mut text_ys: Vec<(String, f32)> = Vec::new();
+        for cs in &out.shapes {
+            collect_text_positions(&cs.shape, &mut text_ys);
+        }
+
+        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+            let names: Vec<&str> = cfg
+                .zones
+                .root_zones
+                .iter()
+                .filter(|rz| rz.kind == kind)
+                .map(|rz| rz.name.as_str())
+                .collect();
+            assert!(names.len() >= 2);
+            let ys: Vec<(&str, f32)> = names
+                .iter()
+                .map(|&name| {
+                    let y = text_ys
+                        .iter()
+                        .find(|(txt, _)| txt == name)
+                        .map(|(_, y)| *y)
+                        .unwrap_or_else(|| panic!("missing chip label {name}"));
+                    (name, y)
+                })
+                .collect();
+            let first_y = ys[0].1;
+            let row1: Vec<(&str, f32)> = ys
+                .iter()
+                .copied()
+                .filter(|(_, y)| (*y - first_y).abs() < 8.0)
+                .collect();
+            assert!(
+                row1.len() >= 2,
+                "expected >= 2 chips on first row of {kind:?}, got {row1:?}"
+            );
+            for (name, y) in &row1[1..] {
+                assert!(
+                    (*y - first_y).abs() < 0.5,
+                    "{kind:?} chip {name} y={y} differs from first chip {} y={first_y}",
+                    row1[0].0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_rulebook_windows_defaults_group_renders_without_remove_affordances() {
+        fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(ts) => out.push(ts.galley.text().to_owned()),
+                egui::Shape::Vec(vec) => {
+                    for s in vec {
+                        collect_texts(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (report, mut cfg) = make_synthetic_report_for_drives(2);
+        cfg.zones = ZoneRulebook {
+            root_zones: Vec::new(),
+            explicit_zones: Vec::new(),
+            pins: Vec::new(),
+        };
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        st.settings_section = SettingsSection::Rulebook;
+
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        let mut texts = Vec::new();
+        for cs in &out.shapes {
+            collect_texts(&cs.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|t| t == "Windows defaults"));
+        for loc in BUILTIN_WINDOWS_DEFAULT_LOCATIONS {
+            assert!(
+                texts.iter().any(|t| t == loc.name),
+                "missing built-in default {}",
+                loc.name
+            );
+        }
+        assert!(
+            !texts.iter().any(|t| t == "Remove"),
+            "Windows defaults must render with zero Remove affordances: {texts:?}"
+        );
+
+        // User rule with the same name as a built-in default must not be deduplicated.
+        assert!(cfg.zones.add_root_zone("Users", ZoneRuleKind::PersonalFiles));
+        let out_dup = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        let mut texts_dup = Vec::new();
+        for cs in &out_dup.shapes {
+            collect_texts(&cs.shape, &mut texts_dup);
+        }
+        let users_count = texts_dup.iter().filter(|t| t.as_str() == "Users").count();
+        assert_eq!(
+            users_count, 2,
+            "expected Users in both Windows defaults and user group, got {users_count}"
+        );
+    }
+
+    #[test]
+    fn fixture_6_pagination_counts_family_as_one_top_level_row() {
+        let mut report = make_synthetic_apps_report(50, 100);
+        // Add 4 same-publisher units forming 1 family -> 54 apps total, 51 top-level entries.
+        let fam_specs = [
+            ("reg:orb-browser", "Orb Browser", 900_000_000_u64, AppCategory::Browsers, None),
+            (
+                "sys:orb-runtime",
+                "Orb Browser Runtime",
+                400_000_000_u64,
+                AppCategory::SystemAndRuntimes,
+                Some(NoTouchCategory::SystemRuntime),
+            ),
+            ("reg:orb-sat1", "Orb Browser Helper", 5_000_000_u64, AppCategory::Utilities, None),
+            ("reg:orb-sat2", "Orb Browser Updater", 1_000_000_u64, AppCategory::Utilities, None),
+        ];
+        for (id, name, bytes, cat, nt) in fam_specs {
+            report.apps.push(AttributedApp {
+                id: id.into(),
+                display_name: name.into(),
+                publishers: vec!["Orb Systems Inc.".into()],
+                install_location: Some(format!(r"C:\Program Files\Orb\{id}")),
+                total_bytes: bytes,
+                previous_bytes: None,
+                growth: GrowthDelta::Changed(0),
+                per_drive_growth: Default::default(),
+                no_touch: nt,
+                bases: vec![AttributionBasis::InstallLocation],
+                items: vec![BreakdownItem {
+                    path: format!(r"C:\Program Files\Orb\{id}"),
+                    bytes,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::InstallLocation),
+                    basis_detail: None,
+                    no_touch: nt,
+                    drive_letter: 'C',
+                }],
+                dependencies: vec![],
+                carved_out_apps: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: cat,
+                category_basis: String::new(),
+            });
+        }
+
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        ensure_report_and_filter_caches(&ctx, &mut st, &report, &pal, 'C', pal.theme_key);
+
+        let cf = st.cached_filtered.as_ref().unwrap();
+        assert_eq!(cf.visible_indices.len(), 54);
+        assert_eq!(cf.visible_entries.len(), 51);
+        assert_eq!(ledger_page_bounds(cf.visible_entries.len(), 0, LEDGER_PAGE_SIZE), (0, 2, 0, 50));
+        assert_eq!(ledger_page_bounds(cf.visible_entries.len(), 1, LEDGER_PAGE_SIZE), (1, 2, 50, 51));
+    }
+
+    #[test]
+    fn family_header_expanded_members_and_notouch_drawer_render_cleanly() {
+        let mut report = make_synthetic_apps_report(4, 100);
+        // Mixed-category family -> shared_category is None (header shows no category)
+        let fam_a = [
+            ("reg:zephyr-main", "Zephyr Browser", 250_000_000_u64, AppCategory::Browsers, None),
+            (
+                "sys:zephyr-rt",
+                "Zephyr Browser Runtime",
+                120_000_000_u64,
+                AppCategory::SystemAndRuntimes,
+                Some(NoTouchCategory::SystemRuntime),
+            ),
+        ];
         for (id, name, bytes, cat, nt) in fam_a {
             report.apps.push(AttributedApp {
                 id: id.into(),
@@ -12619,5 +12971,110 @@ mod tests {
         );
         assert!(st.new_container_name_input.is_empty());
         assert!(matches!(emitted.last(), Some(UiAction::ResetAllSettings)));
+    }
+
+    #[test]
+    fn ledger_size_bar_renders_proportional_widths_and_uniform_4px_thickness() {
+        assert_eq!(PROP_BAR_H, 4.0);
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let row_surface = pal.panel;
+        let track_col = lerp_color(row_surface, pal.border, 0.55);
+        let pack = |c: Color32| ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | (c.b() as u32);
+        let fill_rgb = pack(pal.accent_line);
+        let track_rgb = pack(track_col);
+
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let w = 140usize;
+        let h = 120usize;
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32))),
+            ..Default::default()
+        };
+        raw.viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(1.0);
+
+        // 100%, 60%, 20%, 10%, tiny non-zero (clamped to 2px), and 0% (empty track)
+        let cases: &[(u64, usize, usize)] = &[
+            (1_000, 10, 100),
+            (600, 24, 60),
+            (200, 38, 20),
+            (100, 52, 10),
+            (1, 66, 2),
+            (0, 80, 0),
+        ];
+        let x0 = 20usize;
+        let track_w = 100usize;
+
+        let out = ctx.run(raw, |c| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(pal.bg))
+                .show(c, |ui| {
+                    for &(val, y0, _) in cases {
+                        let track_rect = Rect::from_min_size(
+                            Pos2::new(x0 as f32, y0 as f32),
+                            Vec2::new(track_w as f32, PROP_BAR_H),
+                        );
+                        paint_ledger_size_bar(
+                            ui.painter(),
+                            track_rect,
+                            val,
+                            1_000,
+                            row_surface,
+                            &pal,
+                            1.0,
+                        );
+                    }
+                });
+        });
+
+        let mut painter = crate::sw_painter::SoftwarePainter::new();
+        painter.apply_textures(&out.textures_delta);
+        let clipped = ctx.tessellate(out.shapes, out.pixels_per_point);
+        painter.paint_and_blit(
+            std::ptr::null_mut(),
+            w,
+            h,
+            out.pixels_per_point,
+            &clipped,
+            crate::theme::CLEAR_BG_DARK_RGB,
+            None,
+        );
+        let fb = painter.backbuffer_pixels();
+
+        for &(val, y0, expected_fill_w) in cases {
+            for x in x0..(x0 + expected_fill_w) {
+                for dy in 0..4usize {
+                    let px = fb[(y0 + dy) * w + x];
+                    assert_eq!(
+                        px, fill_rgb,
+                        "expected uniform 4px fill at x={x}, dy={dy} for val={val}"
+                    );
+                }
+            }
+            for x in (x0 + expected_fill_w)..(x0 + track_w) {
+                for dy in 0..4usize {
+                    let px = fb[(y0 + dy) * w + x];
+                    assert_eq!(
+                        px, track_rgb,
+                        "expected pure track colour at x={x}, dy={dy} for val={val}"
+                    );
+                }
+            }
+            for x in x0..(x0 + track_w) {
+                assert_ne!(
+                    fb[(y0 - 1) * w + x],
+                    fill_rgb,
+                    "unexpected fill bleed above track at x={x} for val={val}"
+                );
+                assert_ne!(
+                    fb[(y0 + 4) * w + x],
+                    fill_rgb,
+                    "unexpected fill bleed below track at x={x} for val={val}"
+                );
+            }
+        }
     }
 }
