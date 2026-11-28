@@ -721,7 +721,7 @@ fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
 }
 
-const CORNER_ARC_PTS: usize = 7;
+const CORNER_ARC_PTS: usize = 8;
 
 fn corner_unit_arcs() -> &'static [[(f32, f32); CORNER_ARC_PTS]; 4] {
     static ARCS: OnceLock<[[(f32, f32); CORNER_ARC_PTS]; 4]> = OnceLock::new();
@@ -1082,130 +1082,203 @@ fn build_feathered_rounded_box_mesh(
         return mesh;
     }
 
-    let bw = (border_px.max(1.0)) * px;
-    let rect1 = if snapped.width() > px && snapped.height() > px {
-        snapped.shrink(half_px)
-    } else {
-        snapped
-    };
-    let mut r0_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
-    let mut r1_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
-    let mut r2_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let bw = border_px.round().max(1.0) * px;
+    let x0 = snapped.left();
+    let x1 = snapped.right();
+    let y0 = snapped.top();
+    let y1 = snapped.bottom();
+    let min_dim = snapped.width().min(snapped.height());
 
-    let straight_1px_fast = bw <= px * 1.05
-        && r > px * 1.5
-        && snapped.width() > 2.0 * r + 2.0 * px
-        && snapped.height() > 2.0 * r + 2.0 * px;
-
-    let r1b_pts = if bw > px * 1.05 {
-        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
-        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), 0.0, &mut r1_pts);
-        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
-        let mut pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
-        let s1b = (bw - half_px).min(snapped.width().min(snapped.height()) * 0.45);
-        sample_rounded_rect_ring(snapped.shrink(s1b), (r - s1b).max(0.0), 0.0, &mut pts);
-        stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &pts, border_color);
-        pts
-    } else {
-        // Compensate 1.414px diagonal grid spacing at 45-degree corner midpoints so 1px strokes keep even optical density.
-        let diag_pad = 0.42 * px;
-        sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, diag_pad, &mut r0_pts);
-        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), diag_pad, &mut r1_pts);
-        let mut r1_in_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
-        sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), -diag_pad, &mut r1_in_pts);
-        if straight_1px_fast {
-            stitch_corner_arcs_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
-            stitch_corner_arcs_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
-            let x0 = snapped.left();
-            let x1 = snapped.right();
-            let y0 = snapped.top();
-            let y1 = snapped.bottom();
-            // 4 axis-aligned 1px border bars spanning between corner tangents
-            add_solid_rect_quad(
-                &mut mesh,
-                Rect::from_min_max(Pos2::new(x0 + r, y0), Pos2::new(x1 - r, y0 + px)),
-                border_color,
-            );
-            add_solid_rect_quad(
-                &mut mesh,
-                Rect::from_min_max(Pos2::new(x0 + r, y1 - px), Pos2::new(x1 - r, y1)),
-                border_color,
-            );
-            add_solid_rect_quad(
-                &mut mesh,
-                Rect::from_min_max(Pos2::new(x0, y0 + r), Pos2::new(x0 + px, y1 - r)),
-                border_color,
-            );
-            add_solid_rect_quad(
-                &mut mesh,
-                Rect::from_min_max(Pos2::new(x1 - px, y0 + r), Pos2::new(x1, y1 - r)),
-                border_color,
-            );
-        } else {
-            stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
-            stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
+    if r <= 0.5 * px {
+        if snapped.width() <= 2.0 * bw || snapped.height() <= 2.0 * bw {
+            add_solid_rect_quad(&mut mesh, snapped, border_color);
+            return mesh;
         }
-        r1_in_pts
-    };
+        if fill != Color32::TRANSPARENT {
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + bw, y0 + bw), Pos2::new(x1 - bw, y1 - bw)),
+                fill,
+            );
+        }
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y0 + bw)),
+            border_color,
+        );
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0, y1 - bw), Pos2::new(x1, y1)),
+            border_color,
+        );
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0, y0 + bw), Pos2::new(x0 + bw, y1 - bw)),
+            border_color,
+        );
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x1 - bw, y0 + bw), Pos2::new(x1, y1 - bw)),
+            border_color,
+        );
+        return mesh;
+    }
 
-    let inner_shrink = bw + half_px;
-    if snapped.width() > inner_shrink * 2.0 && snapped.height() > inner_shrink * 2.0 {
-        let rect2 = snapped.shrink(inner_shrink);
-        let r2 = (r - inner_shrink).max(0.0);
-        let inner_diag = if bw <= px * 1.05 { -0.42 * px } else { 0.0 };
-        sample_rounded_rect_ring(rect2, r2, inner_diag, &mut r2_pts);
-        if straight_1px_fast {
-            stitch_corner_arcs_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
-            if fill != Color32::TRANSPARENT {
-                let x0 = snapped.left();
-                let x1 = snapped.right();
-                let y0 = snapped.top();
-                let y1 = snapped.bottom();
+    let has_h_straight = x1 - x0 > 2.0 * r + 0.25 * px;
+    let has_v_straight = y1 - y0 > 2.0 * r + 0.25 * px;
+
+    // Step A: Interior fill first, extending to border centerline (0.5 * bw) in corners so zero pinholes leak.
+    if fill != Color32::TRANSPARENT && snapped.width() > 2.0 * bw && snapped.height() > 2.0 * bw {
+        if has_h_straight && has_v_straight {
+            if r > bw {
                 add_solid_rect_quad(
                     &mut mesh,
-                    Rect::from_min_max(Pos2::new(x0 + r, y0 + px), Pos2::new(x1 - r, y0 + r)),
+                    Rect::from_min_max(Pos2::new(x0 + r, y0 + bw), Pos2::new(x1 - r, y0 + r)),
                     fill,
                 );
                 add_solid_rect_quad(
                     &mut mesh,
-                    Rect::from_min_max(Pos2::new(x0 + px, y0 + r), Pos2::new(x1 - px, y1 - r)),
-                    fill,
-                );
-                add_solid_rect_quad(
-                    &mut mesh,
-                    Rect::from_min_max(Pos2::new(x0 + r, y1 - r), Pos2::new(x1 - r, y1 - px)),
-                    fill,
-                );
-                let tl_c = Pos2::new(x0 + r, y0 + r);
-                let tr_c = Pos2::new(x1 - r, y0 + r);
-                let br_c = Pos2::new(x1 - r, y1 - r);
-                let bl_c = Pos2::new(x0 + r, y1 - r);
-                add_corner_quadrant_fan(&mut mesh, &r2_pts[0..CORNER_ARC_PTS], tl_c, fill);
-                add_corner_quadrant_fan(
-                    &mut mesh,
-                    &r2_pts[CORNER_ARC_PTS..2 * CORNER_ARC_PTS],
-                    tr_c,
-                    fill,
-                );
-                add_corner_quadrant_fan(
-                    &mut mesh,
-                    &r2_pts[2 * CORNER_ARC_PTS..3 * CORNER_ARC_PTS],
-                    br_c,
-                    fill,
-                );
-                add_corner_quadrant_fan(
-                    &mut mesh,
-                    &r2_pts[3 * CORNER_ARC_PTS..4 * CORNER_ARC_PTS],
-                    bl_c,
+                    Rect::from_min_max(Pos2::new(x0 + r, y1 - r), Pos2::new(x1 - r, y1 - bw)),
                     fill,
                 );
             }
-        } else {
-            stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
-            fill_rounded_interior_9slice(&mut mesh, rect2, &r2_pts, r2, fill);
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + bw, y0 + r), Pos2::new(x1 - bw, y1 - r)),
+                fill,
+            );
+        } else if has_h_straight {
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + r, y0 + bw), Pos2::new(x1 - r, y1 - bw)),
+                fill,
+            );
+        } else if has_v_straight {
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + bw, y0 + r), Pos2::new(x1 - bw, y1 - r)),
+                fill,
+            );
         }
+
+        let fill_inset = (0.5 * bw).min(min_dim * 0.45);
+        let mut fill_ring = Vec::with_capacity(4 * CORNER_ARC_PTS);
+        sample_rounded_rect_ring(
+            snapped.shrink(fill_inset),
+            (r - fill_inset).max(0.0),
+            0.0,
+            &mut fill_ring,
+        );
+        if fill_ring.len() == 4 * CORNER_ARC_PTS {
+            let tl_c = Pos2::new(x0 + r, y0 + r);
+            let tr_c = Pos2::new(x1 - r, y0 + r);
+            let br_c = Pos2::new(x1 - r, y1 - r);
+            let bl_c = Pos2::new(x0 + r, y1 - r);
+            add_corner_quadrant_fan(&mut mesh, &fill_ring[0..CORNER_ARC_PTS], tl_c, fill);
+            add_corner_quadrant_fan(
+                &mut mesh,
+                &fill_ring[CORNER_ARC_PTS..2 * CORNER_ARC_PTS],
+                tr_c,
+                fill,
+            );
+            add_corner_quadrant_fan(
+                &mut mesh,
+                &fill_ring[2 * CORNER_ARC_PTS..3 * CORNER_ARC_PTS],
+                br_c,
+                fill,
+            );
+            add_corner_quadrant_fan(
+                &mut mesh,
+                &fill_ring[3 * CORNER_ARC_PTS..4 * CORNER_ARC_PTS],
+                bl_c,
+                fill,
+            );
+        }
+    }
+
+    // Step B: Crisp pixel-snapped straight border bars (no feathering, single solid line).
+    if has_h_straight {
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0 + r, y0), Pos2::new(x1 - r, y0 + bw)),
+            border_color,
+        );
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0 + r, y1 - bw), Pos2::new(x1 - r, y1)),
+            border_color,
+        );
+    }
+    if has_v_straight {
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x0, y0 + r), Pos2::new(x0 + bw, y1 - r)),
+            border_color,
+        );
+        add_solid_rect_quad(
+            &mut mesh,
+            Rect::from_min_max(Pos2::new(x1 - bw, y0 + r), Pos2::new(x1, y1 - r)),
+            border_color,
+        );
+    }
+
+    // Step C: Crisp single-line AA corner arcs aligned at exact tangents with the straight bars.
+    let mut r_aa_out = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let mut r_solid_out = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let mut r_aa_in = Vec::with_capacity(4 * CORNER_ARC_PTS);
+    let s_solid_out = half_px.min(min_dim * 0.45);
+    sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r_aa_out);
+    sample_rounded_rect_ring(
+        snapped.shrink(s_solid_out),
+        (r - s_solid_out).max(0.0),
+        0.0,
+        &mut r_solid_out,
+    );
+    stitch_corner_arcs_quads(
+        &mut mesh,
+        &r_aa_out,
+        Color32::TRANSPARENT,
+        &r_solid_out,
+        border_color,
+    );
+
+    if snapped.width() > 2.0 * (bw + half_px) && snapped.height() > 2.0 * (bw + half_px) {
+        let mut r_solid_in_buf = Vec::with_capacity(4 * CORNER_ARC_PTS);
+        let r_solid_in = if bw > px * 1.05 {
+            let s_solid_in = (bw - half_px).min(min_dim * 0.45);
+            sample_rounded_rect_ring(
+                snapped.shrink(s_solid_in),
+                (r - s_solid_in).max(0.0),
+                0.0,
+                &mut r_solid_in_buf,
+            );
+            stitch_corner_arcs_quads(
+                &mut mesh,
+                &r_solid_out,
+                border_color,
+                &r_solid_in_buf,
+                border_color,
+            );
+            &r_solid_in_buf
+        } else {
+            &r_solid_out
+        };
+        let s_aa_in = (bw + half_px).min(min_dim * 0.5);
+        sample_rounded_rect_ring(
+            snapped.shrink(s_aa_in),
+            (r - s_aa_in).max(0.0),
+            0.0,
+            &mut r_aa_in,
+        );
+        stitch_corner_arcs_quads(
+            &mut mesh,
+            r_solid_in,
+            border_color,
+            &r_aa_in,
+            Color32::TRANSPARENT,
+        );
     } else {
-        add_ring_center_fan(&mut mesh, &r1b_pts, snapped.center(), border_color);
+        add_ring_center_fan(&mut mesh, &r_solid_out, snapped.center(), border_color);
     }
     mesh
 }
@@ -12324,13 +12397,6 @@ mod tests {
                             );
                             let _ = draw_filter_radio_chip(
                                 ui,
-                "sys:zephyr-rt",
-                "Zephyr Browser Runtime",
-                120_000_000_u64,
-                AppCategory::SystemAndRuntimes,
-                Some(NoTouchCategory::SystemRuntime),
-            ),
-        ];
                                 ZoneRuleKind::PersonalFiles.label(),
                                 true,
                                 &pal,
@@ -13074,6 +13140,177 @@ mod tests {
                     fill_rgb,
                     "unexpected fill bleed below track at x={x} for val={val}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn pod_border_renders_as_single_crisp_line_in_light_and_dark_modes() {
+        let pack = |c: Color32| ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | (c.b() as u32);
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let pal = ThemePalette::for_mode(mode);
+            let bg_rgb = pack(pal.bg);
+            let panel_rgb = pack(pal.panel);
+            let border_rgb = pack(pal.border);
+            let clear_rgb = match mode {
+                ThemeMode::Light => crate::theme::CLEAR_BG_LIGHT_RGB,
+                ThemeMode::Dark => crate::theme::CLEAR_BG_DARK_RGB,
+            };
+
+            for ppp in [1.0_f32, 1.25, 1.5] {
+                let ctx = egui::Context::default();
+                configure_fonts_and_theme(&ctx, mode);
+                let logical_w = 240.0_f32;
+                let logical_h = 180.0_f32;
+                let phys_w = (logical_w * ppp).round() as usize;
+                let phys_h = (logical_h * ppp).round() as usize;
+                let mut raw = RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        Pos2::ZERO,
+                        Vec2::new(logical_w, logical_h),
+                    )),
+                    ..Default::default()
+                };
+                raw.viewports
+                    .entry(egui::ViewportId::ROOT)
+                    .or_default()
+                    .native_pixels_per_point = Some(ppp);
+
+                let mut pod_rect_out = Rect::NOTHING;
+                let mut btn_rect_out = Rect::NOTHING;
+                let out = ctx.run(raw, |c| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none().fill(pal.bg))
+                        .show(c, |ui| {
+                            let pod_area =
+                                Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(200.0, 84.0));
+                            let mut child = ui.new_child(
+                                UiBuilder::new().max_rect(pod_area).layout(Layout::top_down(Align::Min)),
+                            );
+                            let res = draw_crisp_frame(
+                                &mut child,
+                                pal.panel,
+                                pal.border,
+                                RADIUS_PANEL,
+                                Margin::same(SPACE_8),
+                                |ui| {
+                                    ui.allocate_exact_size(
+                                        Vec2::new(180.0, 60.0),
+                                        Sense::hover(),
+                                    );
+                                },
+                            );
+                            pod_rect_out = snap_rect_to_pixels(res.response.rect, ppp);
+
+                            let btn_area =
+                                Rect::from_min_size(Pos2::new(20.0, 120.0), Vec2::new(100.0, 28.0));
+                            btn_rect_out = paint_crisp_bordered_box(
+                                ui.painter(),
+                                btn_area,
+                                RADIUS_CONTROL,
+                                Color32::TRANSPARENT,
+                                pal.border,
+                                1.0,
+                                ppp,
+                            );
+                        });
+                });
+
+                let mut painter = crate::sw_painter::SoftwarePainter::new();
+                painter.apply_textures(&out.textures_delta);
+                let clipped = ctx.tessellate(out.shapes, out.pixels_per_point);
+                painter.paint_and_blit(
+                    std::ptr::null_mut(),
+                    phys_w,
+                    phys_h,
+                    out.pixels_per_point,
+                    &clipped,
+                    clear_rgb,
+                    None,
+                );
+                let fb = painter.backbuffer_pixels();
+
+                let px0 = (pod_rect_out.min.x * ppp).round() as usize;
+                let py0 = (pod_rect_out.min.y * ppp).round() as usize;
+                let px1 = (pod_rect_out.max.x * ppp).round() as usize;
+                let py1 = (pod_rect_out.max.y * ppp).round() as usize;
+                let mid_x = (px0 + px1) / 2;
+                let mid_y = (py0 + py1) / 2;
+
+                // Pod straight edges: bg -> single 1px border -> panel (no secondary offset line)
+                assert_eq!(fb[(py0 - 2) * phys_w + mid_x], bg_rgb, "top -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py0 - 1) * phys_w + mid_x], bg_rgb, "top -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[py0 * phys_w + mid_x], border_rgb, "top 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py0 + 1) * phys_w + mid_x], panel_rgb, "top +1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py0 + 2) * phys_w + mid_x], panel_rgb, "top +2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py0 + 3) * phys_w + mid_x], panel_rgb, "top +3 ({mode:?} ppp={ppp})");
+
+                assert_eq!(fb[(py1 - 4) * phys_w + mid_x], panel_rgb, "bot -4 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py1 - 3) * phys_w + mid_x], panel_rgb, "bot -3 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py1 - 2) * phys_w + mid_x], panel_rgb, "bot -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py1 - 1) * phys_w + mid_x], border_rgb, "bot -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[py1 * phys_w + mid_x], bg_rgb, "bot 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(py1 + 1) * phys_w + mid_x], bg_rgb, "bot +1 ({mode:?} ppp={ppp})");
+
+                assert_eq!(fb[mid_y * phys_w + (px0 - 2)], bg_rgb, "left -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px0 - 1)], bg_rgb, "left -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + px0], border_rgb, "left 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px0 + 1)], panel_rgb, "left +1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px0 + 2)], panel_rgb, "left +2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px0 + 3)], panel_rgb, "left +3 ({mode:?} ppp={ppp})");
+
+                assert_eq!(fb[mid_y * phys_w + (px1 - 4)], panel_rgb, "right -4 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px1 - 3)], panel_rgb, "right -3 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px1 - 2)], panel_rgb, "right -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px1 - 1)], border_rgb, "right -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + px1], bg_rgb, "right 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[mid_y * phys_w + (px1 + 1)], bg_rgb, "right +1 ({mode:?} ppp={ppp})");
+
+                // Pod 4 rounded corners: zero background pinhole leaks inside the corner radius
+                let r_px = snap_scalar_to_px(RADIUS_PANEL, ppp) * ppp;
+                let inner_r_sq = (r_px - 2.0).max(1.0).powi(2);
+                let corners = [
+                    ("TL", px0 as f32 + r_px, py0 as f32 + r_px, px0, px0 + r_px.ceil() as usize, py0, py0 + r_px.ceil() as usize),
+                    ("TR", px1 as f32 - r_px, py0 as f32 + r_px, px1 - r_px.ceil() as usize, px1, py0, py0 + r_px.ceil() as usize),
+                    ("BL", px0 as f32 + r_px, py1 as f32 - r_px, px0, px0 + r_px.ceil() as usize, py1 - r_px.ceil() as usize, py1),
+                    ("BR", px1 as f32 - r_px, py1 as f32 - r_px, px1 - r_px.ceil() as usize, px1, py1 - r_px.ceil() as usize, py1),
+                ];
+                for (cname, cx, cy, x_lo, x_hi, y_lo, y_hi) in corners {
+                    for py in y_lo..y_hi {
+                        for px in x_lo..x_hi {
+                            let dx = (px as f32 + 0.5) - cx;
+                            let dy = (py as f32 + 0.5) - cy;
+                            if dx * dx + dy * dy <= inner_r_sq {
+                                assert_ne!(
+                                    fb[py * phys_w + px],
+                                    bg_rgb,
+                                    "corner pinhole leak at {cname} ({px}, {py}) ({mode:?} ppp={ppp})"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Masthead-style transparent button: bg -> single 1px border -> bg (no secondary line)
+                let bx0 = (btn_rect_out.min.x * ppp).round() as usize;
+                let by0 = (btn_rect_out.min.y * ppp).round() as usize;
+                let bx1 = (btn_rect_out.max.x * ppp).round() as usize;
+                let by1 = (btn_rect_out.max.y * ppp).round() as usize;
+                let b_mid_x = (bx0 + bx1) / 2;
+                let b_mid_y = (by0 + by1) / 2;
+                assert_eq!(fb[(by0 - 1) * phys_w + b_mid_x], bg_rgb, "btn top -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[by0 * phys_w + b_mid_x], border_rgb, "btn top 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(by0 + 1) * phys_w + b_mid_x], bg_rgb, "btn top +1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(by0 + 2) * phys_w + b_mid_x], bg_rgb, "btn top +2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(by1 - 2) * phys_w + b_mid_x], bg_rgb, "btn bot -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[(by1 - 1) * phys_w + b_mid_x], border_rgb, "btn bot -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[by1 * phys_w + b_mid_x], bg_rgb, "btn bot 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + (bx0 - 1)], bg_rgb, "btn left -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + bx0], border_rgb, "btn left 0 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + (bx0 + 1)], bg_rgb, "btn left +1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + (bx1 - 2)], bg_rgb, "btn right -2 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + (bx1 - 1)], border_rgb, "btn right -1 ({mode:?} ppp={ppp})");
+                assert_eq!(fb[b_mid_y * phys_w + bx1], bg_rgb, "btn right 0 ({mode:?} ppp={ppp})");
             }
         }
     }
