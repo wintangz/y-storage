@@ -63,6 +63,13 @@ const PINNED_ROW_H: f32 = 24.0;
 const SUB_LINE1_H: f32 = 22.0;
 const SUB_LINE2_H: f32 = 16.0;
 const COLLAPSED_ROW_OUTER_H: f32 = APP_ROW_H + SPACE_4 * 2.0;
+const SETTINGS_WIDE_MIN_W: f32 = 760.0;
+const SETTINGS_NAV_W: f32 = 216.0;
+const SETTINGS_CONTENT_MAX_W: f32 = 860.0;
+const SETTINGS_TWO_COL_MIN_W: f32 = 560.0;
+const FORM_GRID_ACTION_W: f32 = 112.0;
+const FORM_GRID_SELECTOR_W: f32 = 228.0;
+const FORM_GRID_ROW_H: f32 = 26.0;
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 const SEGOE_UI_SEMIBOLD_PATH: &str = r"C:\Windows\Fonts\seguisb.ttf";
 const SEGOE_UI_BOLD_PATH: &str = r"C:\Windows\Fonts\segoeuib.ttf";
@@ -74,6 +81,25 @@ pub enum ActiveView {
     Main,
     Dependencies,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Appearance,
+    ScanScope,
+    Rulebook,
+}
+
+impl SettingsSection {
+    pub const ALL: [Self; 3] = [Self::Appearance, Self::ScanScope, Self::Rulebook];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance & Theme",
+            Self::ScanScope => "Scan Scope & Exclusions",
+            Self::Rulebook => "Attribution Zone Rulebook",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +237,7 @@ pub struct StorageUiState {
     pub new_container_path_kind: ZoneRuleKind,
     pub new_pin_path_input: String,
     pub new_pin_kind: PinKind,
+    pub settings_section: SettingsSection,
     pub settings_focus_containers: bool,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
@@ -270,6 +297,7 @@ impl Default for StorageUiState {
             new_container_path_kind: ZoneRuleKind::PersonalFiles,
             new_pin_path_input: String::new(),
             new_pin_kind: PinKind::App,
+            settings_section: SettingsSection::Appearance,
             settings_focus_containers: false,
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
@@ -8119,11 +8147,160 @@ fn draw_theme_preset_swatch_chip(
     resp.clicked()
 }
 
-fn draw_appearance_theme_card(
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SettingsFormGridLayout {
+    input_w: f32,
+    selector_w: f32,
+    action_w: f32,
+    stacked: bool,
+}
+
+fn compute_settings_form_grid(avail_w: f32, has_selector: bool) -> SettingsFormGridLayout {
+    let action_w = FORM_GRID_ACTION_W;
+    if has_selector {
+        let selector_w = FORM_GRID_SELECTOR_W;
+        let single_row_input_w = avail_w - selector_w - action_w - SPACE_8 * 2.0;
+        if single_row_input_w >= 150.0 {
+            SettingsFormGridLayout {
+                input_w: single_row_input_w,
+                selector_w,
+                action_w,
+                stacked: false,
+            }
+        } else {
+            SettingsFormGridLayout {
+                input_w: avail_w.max(120.0),
+                selector_w: (avail_w - action_w - SPACE_8).max(120.0),
+                action_w,
+                stacked: true,
+            }
+        }
+    } else {
+        SettingsFormGridLayout {
+            input_w: (avail_w - action_w - SPACE_8).max(120.0),
+            selector_w: 0.0,
+            action_w,
+            stacked: false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_settings_form_grid_row(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    text: &mut String,
+    hint: &str,
+    action_label: &str,
+    avail_w: f32,
+    has_selector: bool,
+    pal: &ThemePalette,
+    mut selector_fn: impl FnMut(&mut egui::Ui),
+) -> bool {
+    let grid = compute_settings_form_grid(avail_w, has_selector);
+    let mut clicked = false;
+    if grid.stacked {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_4;
+            draw_crisp_text_input(ui, id_salt, text, grid.input_w, hint, pal.input_bg, pal);
+            draw_split_row(
+                ui,
+                FORM_GRID_ROW_H,
+                grid.action_w,
+                Sense::hover(),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_4;
+                    selector_fn(ui);
+                },
+                |ui| {
+                    if draw_z_button(
+                        ui,
+                        action_label,
+                        Vec2::new(grid.action_w, FORM_GRID_ROW_H),
+                        11.5,
+                        RADIUS_CONTROL,
+                        true,
+                        false,
+                        ButtonVariant::SecondaryOutline,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        clicked = true;
+                    }
+                },
+            );
+        });
+    } else {
+        ui.allocate_ui_with_layout(
+            Vec2::new(avail_w, FORM_GRID_ROW_H),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_8;
+                ui.allocate_ui_with_layout(
+                    Vec2::new(grid.input_w, FORM_GRID_ROW_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        draw_crisp_text_input(
+                            ui,
+                            id_salt,
+                            text,
+                            grid.input_w,
+                            hint,
+                            pal.input_bg,
+                            pal,
+                        );
+                    },
+                );
+                if has_selector {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(grid.selector_w, FORM_GRID_ROW_H),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_4;
+                            selector_fn(ui);
+                        },
+                    );
+                }
+                if draw_z_button(
+                    ui,
+                    action_label,
+                    Vec2::new(grid.action_w, FORM_GRID_ROW_H),
+                    11.5,
+                    RADIUS_CONTROL,
+                    true,
+                    false,
+                    ButtonVariant::SecondaryOutline,
+                    pal,
+                )
+                .clicked()
+                {
+                    clicked = true;
+                }
+            },
+        );
+    }
+    clicked
+}
+
+fn drive_pod_natural_inner_h(non_locked_exclusions: usize, has_stats: bool) -> f32 {
+    let mut h = 22.0;
+    if has_stats {
+        h += SPACE_4 + 16.0;
+    }
+    if non_locked_exclusions > 0 {
+        h += SPACE_8
+            + (non_locked_exclusions as f32) * 20.0
+            + (non_locked_exclusions.saturating_sub(1) as f32) * SPACE_4;
+    }
+    h + SPACE_8 + FORM_GRID_ROW_H
+}
+
+fn draw_appearance_theme_section(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
     config: &AppConfig,
-    width_px: f32,
+    pane_inner_w: f32,
     pal: &ThemePalette,
     emit: &mut dyn FnMut(UiAction),
 ) {
@@ -8141,13 +8318,13 @@ fn draw_appearance_theme_card(
     );
     ui.add_space(SPACE_4);
 
-    let card_w = (width_px - SCROLL_GUTTER_W).max(240.0);
+    let card_w = pane_inner_w.max(240.0);
     draw_crisp_frame(
         ui,
         pal.panel,
         pal.border,
         RADIUS_PANEL,
-        Margin::symmetric(SPACE_12, SPACE_8),
+        Margin::same(SPACE_12),
         |ui| {
             let inner_w = (card_w - SPACE_12 * 2.0 - 2.0).max(200.0);
             ui.set_width(inner_w);
@@ -8285,9 +8462,9 @@ fn draw_appearance_theme_card(
                         pal.panel_alt,
                         pal.border,
                         RADIUS_PILL,
-                        Margin::symmetric(SPACE_8, 2.0),
+                        Margin::symmetric(SPACE_8, SPACE_4),
                         |ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.spacing_mut().item_spacing.x = SPACE_4;
                             let (sr, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             paint_crisp_bordered_box(
                                 ui.painter(),
@@ -8328,166 +8505,192 @@ fn draw_appearance_theme_card(
             }
         },
     );
-    ui.add_space(SPACE_12);
 }
 
-fn draw_settings_view(
+#[allow(clippy::too_many_arguments)]
+fn draw_scan_scope_section(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
-    config: &AppConfig,
+    draft: &mut AppConfig,
     report: Option<&ScanReport>,
-    system_windows_dir: &str,
+    sys_win_key: &str,
+    pane_inner_w: f32,
     pal: &ThemePalette,
-    emit: &mut dyn FnMut(UiAction),
+    changed: &mut bool,
 ) {
-    let mut draft = config.clone();
-    let mut changed = false;
-    let sys_win_key = normalize_path_key(system_windows_dir);
+    ui.label(
+        RichText::new("Scan Scope & Exclusions")
+            .size(16.0)
+            .color(pal.text),
+    );
+    ui.label(
+        RichText::new(
+            "Default: system drive only (Windows excluded). Excluded drives are never walked or sized (including InstallLocation), and apps solely on them are omitted.",
+        )
+        .size(11.5)
+        .color(pal.muted),
+    );
+    ui.add_space(SPACE_4);
 
-    draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
-        ui.spacing_mut().item_spacing.y = SPACE_4;
-        let scroll_w = ui.available_width().max(240.0);
+    let use_two_cols = draft.targets.len() >= 2 && pane_inner_w >= SETTINGS_TWO_COL_MIN_W;
+    let card_w = if use_two_cols {
+        ((pane_inner_w - SPACE_8) * 0.5).floor().max(260.0)
+    } else {
+        pane_inner_w.max(240.0)
+    };
 
-        draw_appearance_theme_card(ui, ui_state, config, scroll_w, pal, emit);
+    let target_meta = |target: &y_core::config::DriveScanTarget| {
+        let drv_info = report.and_then(|r| r.drives.iter().find(|d| d.letter == target.letter));
+        let is_sys =
+            drv_info.is_some_and(|d| d.is_system_drive) || target.letter.eq_ignore_ascii_case(&'C');
+        let has_stats = drv_info.is_some() || is_sys;
+        let non_locked = target
+            .exclusions
+            .iter()
+            .filter(|ex| !(is_sys && normalize_path_key(ex) == sys_win_key))
+            .count();
+        drive_pod_natural_inner_h(non_locked, has_stats)
+    };
 
-        ui.label(
-            RichText::new("Scan Scope & Exclusions")
-                .size(16.0)
-                .color(pal.text),
-        );
-        ui.label(
-            RichText::new(
-                "Default: system drive only (Windows excluded). Excluded drives are never walked or sized (including InstallLocation), and apps solely on them are omitted.",
-            )
-            .size(11.5)
-            .color(pal.muted),
-        );
-        ui.add_space(SPACE_4);
+    let mut draw_drive_target_card =
+        |ui: &mut egui::Ui,
+         target: &mut y_core::config::DriveScanTarget,
+         width_px: f32,
+         min_inner_h: f32| {
+            let drv_info = report.and_then(|r| r.drives.iter().find(|d| d.letter == target.letter));
+            let is_sys = drv_info.is_some_and(|d| d.is_system_drive)
+                || target.letter.eq_ignore_ascii_case(&'C');
+            let locked_win_path = if is_sys {
+                target
+                    .exclusions
+                    .iter()
+                    .find(|ex| normalize_path_key(ex) == sys_win_key)
+                    .cloned()
+            } else {
+                None
+            };
+            let stats_str = if let Some(di) = drv_info {
+                if is_sys {
+                    format!(
+                        "System · {} free · {}",
+                        format_size_2dec(di.free_bytes),
+                        format_size_2dec(di.total_bytes),
+                    )
+                } else {
+                    format!(
+                        "{} free · {}",
+                        format_size_2dec(di.free_bytes),
+                        format_size_2dec(di.total_bytes),
+                    )
+                }
+            } else if is_sys {
+                "System drive".to_string()
+            } else {
+                String::new()
+            };
+            let non_locked: Vec<(usize, String)> = target
+                .exclusions
+                .iter()
+                .enumerate()
+                .filter(|(_, ex)| !(is_sys && normalize_path_key(ex) == sys_win_key))
+                .map(|(i, ex)| (i, ex.clone()))
+                .collect();
+            let own_h = drive_pod_natural_inner_h(non_locked.len(), !stats_str.is_empty());
+            let extra_h = (min_inner_h - own_h).max(0.0);
 
-        let use_two_cols = draft.targets.len() >= 2 && scroll_w >= 680.0;
-        let card_w = if use_two_cols {
-            ((scroll_w - SCROLL_GUTTER_W - SPACE_8) * 0.5).floor().max(260.0)
-        } else {
-            (scroll_w - SCROLL_GUTTER_W).max(240.0)
-        };
-        let input_w = if use_two_cols { 176.0 } else { 260.0 };
+            ui.allocate_ui_with_layout(
+                Vec2::new(width_px, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    draw_crisp_frame(
+                        ui,
+                        pal.panel,
+                        pal.border,
+                        RADIUS_PANEL,
+                        Margin::same(SPACE_12),
+                        |ui| {
+                            let inner_card_w = (width_px - SPACE_12 * 2.0 - 2.0).max(180.0);
+                            ui.set_width(inner_card_w);
+                            ui.set_min_height(min_inner_h);
+                            ui.spacing_mut().item_spacing.y = SPACE_4;
 
-        let mut draw_drive_target_card =
-            |ui: &mut egui::Ui, target: &mut y_core::config::DriveScanTarget, width_px: f32| {
-                let drv_info = report
-                    .and_then(|r| r.drives.iter().find(|d| d.letter == target.letter));
-                let is_sys = drv_info.is_some_and(|d| d.is_system_drive)
-                    || target.letter.eq_ignore_ascii_case(&'C');
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(width_px, 0.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        draw_crisp_frame(
-                            ui,
-                            pal.panel,
-                            pal.border,
-                            RADIUS_PANEL,
-                            Margin::symmetric(SPACE_12, 6.0),
-                            |ui| {
-                                let inner_card_w = (width_px - SPACE_12 * 2.0 - 2.0).max(180.0);
-                                ui.set_width(inner_card_w);
-                                ui.spacing_mut().item_spacing.y = SPACE_4;
-
-                                draw_split_row(
-                                    ui,
-                                    22.0,
-                                    160.0,
-                                    Sense::hover(),
-                                    |ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_8;
-                                        let drv_hdr_font = FontId::new(13.0, FontFamily::Proportional);
-                                        draw_truncated_text(
+                            // Title line: Drive letter + Include in scope checkbox beside it + compact C: Windows-lock badge
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(inner_card_w, 22.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                                    draw_truncated_text(
+                                        ui,
+                                        &format!("Drive {}:\\", target.letter),
+                                        FontId::new(13.0, FontFamily::Proportional),
+                                        pal.text,
+                                        false,
+                                    );
+                                    if draw_crisp_checkbox(
+                                        ui,
+                                        &mut target.enabled,
+                                        "Include in scope",
+                                        pal,
+                                    ) {
+                                        *changed = true;
+                                    }
+                                    if let Some(locked_path) = locked_win_path.as_ref() {
+                                        let _ = paint_status_chip(
                                             ui,
-                                            &format!("Drive {}:\\", target.letter),
-                                            drv_hdr_font.clone(),
-                                            pal.text,
+                                            StatusKind::Danger,
+                                            "Windows locked",
+                                            pal,
+                                        )
+                                        .on_hover_text(format!("{locked_path} — Always excluded"));
+                                    }
+                                },
+                            );
+
+                            if !stats_str.is_empty() {
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(inner_card_w, 16.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        let resp = draw_truncated_text(
+                                            ui,
+                                            &stats_str,
+                                            FontId::new(11.0, FontFamily::Proportional),
+                                            pal.muted,
                                             false,
                                         );
-                                        let stats_str = if let Some(di) = drv_info {
-                                            if is_sys {
-                                                format!(
-                                                    "System · {} free · {}",
-                                                    format_size_2dec(di.free_bytes),
-                                                    format_size_2dec(di.total_bytes),
-                                                )
-                                            } else {
-                                                format!(
-                                                    "{} free · {}",
-                                                    format_size_2dec(di.free_bytes),
-                                                    format_size_2dec(di.total_bytes),
-                                                )
-                                            }
-                                        } else if is_sys {
-                                            "System drive".to_string()
-                                        } else {
-                                            String::new()
-                                        };
-                                        if !stats_str.is_empty() {
-                                            let resp = draw_baseline_paired_text(
-                                                ui,
-                                                &stats_str,
-                                                FontId::new(11.0, FontFamily::Proportional),
-                                                pal.muted,
-                                                drv_hdr_font,
-                                            );
-                                            if let Some(di) = drv_info {
-                                                let _ = resp.on_hover_text(format!(
-                                                    "Free: {} · Used: {} · Total: {}",
-                                                    format_exact_bytes(di.free_bytes),
-                                                    format_exact_bytes(di.used_bytes),
-                                                    format_exact_bytes(di.total_bytes),
-                                                ));
-                                            }
-                                        }
-                                    },
-                                    |ui| {
-                                        if draw_crisp_checkbox(
-                                            ui,
-                                            &mut target.enabled,
-                                            "Include in scope",
-                                            pal,
-                                        ) {
-                                            changed = true;
+                                        if let Some(di) = drv_info {
+                                            let _ = resp.on_hover_text(format!(
+                                                "Free: {} · Used: {} · Total: {}",
+                                                format_exact_bytes(di.free_bytes),
+                                                format_exact_bytes(di.used_bytes),
+                                                format_exact_bytes(di.total_bytes),
+                                            ));
                                         }
                                     },
                                 );
+                            }
 
-                                let mut remove_idx: Option<usize> = None;
-                                for (idx, ex) in target.exclusions.iter().enumerate() {
-                                    let is_locked_win = is_sys && normalize_path_key(ex) == sys_win_key;
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(inner_card_w, 20.0),
-                                        Layout::left_to_right(Align::Center),
+                            let mut remove_idx: Option<usize> = None;
+                            if !non_locked.is_empty() {
+                                ui.add_space(SPACE_4);
+                                for (idx, ex) in non_locked {
+                                    draw_split_row(
+                                        ui,
+                                        20.0,
+                                        56.0,
+                                        Sense::hover(),
                                         |ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_8;
                                             draw_truncated_text(
                                                 ui,
-                                                ex,
+                                                &ex,
                                                 FontId::new(11.0, FontFamily::Monospace),
                                                 pal.text,
                                                 false,
                                             );
-                                            if is_locked_win {
-                                                paint_status_chip(
-                                                    ui,
-                                                    StatusKind::Danger,
-                                                    "LOCKED",
-                                                    pal,
-                                                );
-                                                draw_truncated_text(
-                                                    ui,
-                                                    "Always excluded",
-                                                    FontId::new(10.5, FontFamily::Proportional),
-                                                    pal.subtle_text,
-                                                    false,
-                                                );
-                                            } else if draw_z_button(
+                                        },
+                                        |ui| {
+                                            if draw_z_button(
                                                 ui,
                                                 "Remove",
                                                 Vec2::new(56.0, 20.0),
@@ -8505,139 +8708,151 @@ fn draw_settings_view(
                                         },
                                     );
                                 }
-                                if let Some(idx) = remove_idx {
-                                    target.exclusions.remove(idx);
-                                    changed = true;
-                                }
+                            }
+                            if let Some(idx) = remove_idx {
+                                target.exclusions.remove(idx);
+                                *changed = true;
+                            }
 
-                                let input = ui_state
-                                    .new_exclusion_inputs
-                                    .entry(target.letter)
-                                    .or_default();
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = SPACE_8;
-                                    draw_crisp_text_input(
-                                        ui,
-                                        ("exclusion_input", target.letter),
-                                        input,
-                                        input_w,
-                                        &format!("{}:\\FolderToExclude", target.letter),
-                                        pal.input_bg,
-                                        pal,
-                                    );
-                                    if draw_z_button(
-                                        ui,
-                                        "Add exclusion",
-                                        Vec2::new(98.0, 26.0),
-                                        11.5,
-                                        RADIUS_CONTROL,
-                                        true,
-                                        false,
-                                        ButtonVariant::SecondaryOutline,
-                                        pal,
-                                    )
-                                    .clicked()
-                                    {
-                                        let trimmed = input.trim().to_string();
-                                        if !trimmed.is_empty()
-                                            && !target
-                                                .exclusions
-                                                .iter()
-                                                .any(|e| normalize_path_key(e) == normalize_path_key(&trimmed))
-                                        {
-                                            target.exclusions.push(trimmed);
-                                            input.clear();
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                            },
-                        );
-                    },
-                );
-            };
-
-        if use_two_cols {
-            let mut idx = 0;
-            while idx < draft.targets.len() {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = SPACE_8;
-                    draw_drive_target_card(ui, &mut draft.targets[idx], card_w);
-                    if idx + 1 < draft.targets.len() {
-                        draw_drive_target_card(ui, &mut draft.targets[idx + 1], card_w);
-                    }
-                });
-                idx += 2;
-            }
-        } else {
-            for target in &mut draft.targets {
-                draw_drive_target_card(ui, target, card_w);
-            }
-        }
-
-        // Unified Attribution Zone Rulebook (FIX 3 + FIX 8): grouped subheads carry the zone type once;
-        // zone chips render name + Remove only; ALL PinKind badges use neutral muted styling.
-        ui.add_space(SPACE_8);
-        let neutral_pin_style = ChipStyle {
-            fill: Color32::TRANSPARENT,
-            stroke: pal.border,
-            text: pal.muted,
-        };
-        let rulebook_frame = draw_crisp_frame(
-            ui,
-            pal.panel,
-            pal.border,
-            RADIUS_PANEL,
-            Margin::symmetric(SPACE_12, SPACE_8),
-            |ui| {
-                ui.set_width((scroll_w - SCROLL_GUTTER_W - SPACE_12 * 2.0 - 2.0).max(200.0));
-                ui.spacing_mut().item_spacing.y = SPACE_4;
-
-                draw_split_row(
-                    ui,
-                    24.0,
-                    124.0,
-                    Sense::hover(),
-                    |ui| {
-                        ui.label(
-                            RichText::new("Attribution Zone Rulebook")
-                                .size(13.5)
-                                .color(pal.text),
-                        );
-                    },
-                    |ui| {
-                        if draft.zones != ZoneRulebook::default()
-                            && draw_z_button(
+                            ui.add_space(SPACE_4 + extra_h);
+                            let input = ui_state
+                                .new_exclusion_inputs
+                                .entry(target.letter)
+                                .or_default();
+                            if draw_settings_form_grid_row(
                                 ui,
-                                "Reset defaults",
-                                Vec2::new(104.0, 24.0),
-                                11.5,
-                                RADIUS_CONTROL,
-                                true,
+                                ("exclusion_input", target.letter),
+                                input,
+                                &format!("{}:\\FolderToExclude", target.letter),
+                                "Add exclusion",
+                                inner_card_w,
                                 false,
-                                ButtonVariant::SecondaryOutline,
                                 pal,
-                            )
-                            .clicked()
-                        {
-                            draft.zones = ZoneRulebook::default();
-                            changed = true;
-                        }
-                    },
-                );
-                ui.label(
-                    RichText::new(
-                        "Rules match drive-root folder names or explicit paths. Registered install roots keep priority; Drive Root Rule tests top-level drive folders; Manual pins override inference.",
-                    )
-                    .size(11.0)
-                    .color(pal.muted),
-                );
+                                |_| {},
+                            ) {
+                                let trimmed = input.trim().to_string();
+                                if !trimmed.is_empty()
+                                    && !target
+                                        .exclusions
+                                        .iter()
+                                        .any(|e| normalize_path_key(e) == normalize_path_key(&trimmed))
+                                {
+                                    target.exclusions.push(trimmed);
+                                    input.clear();
+                                    *changed = true;
+                                }
+                            }
+                        },
+                    );
+                },
+            );
+        };
 
-                let name_font = FontId::new(11.5, FontFamily::Monospace);
-                let max_row_w = (ui.available_width() - SPACE_16).max(200.0);
-                let mut remove_name_idx: Option<usize> = None;
+    if use_two_cols {
+        let mut idx = 0;
+        while idx < draft.targets.len() {
+            if idx > 0 {
+                ui.add_space(SPACE_4);
+            }
+            let left_h = target_meta(&draft.targets[idx]);
+            let right_h = if idx + 1 < draft.targets.len() {
+                target_meta(&draft.targets[idx + 1])
+            } else {
+                0.0
+            };
+            let row_min_h = left_h.max(right_h);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_8;
+                draw_drive_target_card(ui, &mut draft.targets[idx], card_w, row_min_h);
+                if idx + 1 < draft.targets.len() {
+                    draw_drive_target_card(ui, &mut draft.targets[idx + 1], card_w, row_min_h);
+                }
+            });
+            idx += 2;
+        }
+    } else {
+        for (idx, target) in draft.targets.iter_mut().enumerate() {
+            if idx > 0 {
+                ui.add_space(SPACE_4);
+            }
+            let h = target_meta(target);
+            draw_drive_target_card(ui, target, card_w, h);
+        }
+    }
+}
 
-                for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+fn draw_rulebook_section(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    draft: &mut AppConfig,
+    pane_inner_w: f32,
+    pal: &ThemePalette,
+    changed: &mut bool,
+) -> Rect {
+    let neutral_pin_style = ChipStyle {
+        fill: Color32::TRANSPARENT,
+        stroke: pal.border,
+        text: pal.muted,
+    };
+
+    draw_split_row(
+        ui,
+        24.0,
+        124.0,
+        Sense::hover(),
+        |ui| {
+            ui.label(
+                RichText::new("Attribution Zone Rulebook")
+                    .size(16.0)
+                    .color(pal.text),
+            );
+        },
+        |ui| {
+            if draft.zones != ZoneRulebook::default()
+                && draw_z_button(
+                    ui,
+                    "Reset defaults",
+                    Vec2::new(104.0, 24.0),
+                    11.5,
+                    RADIUS_CONTROL,
+                    true,
+                    false,
+                    ButtonVariant::SecondaryOutline,
+                    pal,
+                )
+                .clicked()
+            {
+                draft.zones = ZoneRulebook::default();
+                *changed = true;
+            }
+        },
+    );
+    ui.label(
+        RichText::new(
+            "Rules match drive-root folder names or explicit paths. Registered install roots keep priority; Drive Root Rule tests top-level drive folders; Manual pins override inference.",
+        )
+        .size(11.5)
+        .color(pal.muted),
+    );
+    ui.add_space(SPACE_4);
+
+    let card_w = pane_inner_w.max(240.0);
+    let rulebook_frame = draw_crisp_frame(
+        ui,
+        pal.panel,
+        pal.border,
+        RADIUS_PANEL,
+        Margin::same(SPACE_12),
+        |ui| {
+            let inner_w = (card_w - SPACE_12 * 2.0 - 2.0).max(200.0);
+            ui.set_width(inner_w);
+            ui.spacing_mut().item_spacing.y = SPACE_4;
+
+            let name_font = FontId::new(11.5, FontFamily::Monospace);
+            let mut remove_name_idx: Option<usize> = None;
+
+            let mut draw_chip_group =
+                |ui: &mut egui::Ui, kind: ZoneRuleKind, col_w: f32| {
                     let group_items: Vec<(usize, String)> = draft
                         .zones
                         .root_zones
@@ -8646,334 +8861,323 @@ fn draw_settings_view(
                         .filter(|(_, rz)| rz.kind == kind)
                         .map(|(i, rz)| (i, rz.name.clone()))
                         .collect();
-                    ui.label(
-                        RichText::new(kind.label())
-                            .size(11.0)
-                            .color(pal.muted),
-                    );
-                    if group_items.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(SPACE_8);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(col_w, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(col_w);
+                            ui.spacing_mut().item_spacing.y = SPACE_4;
                             ui.label(
-                                RichText::new("None configured.")
-                                    .size(10.5)
-                                    .color(pal.subtle_text),
+                                RichText::new(kind.label())
+                                    .size(11.5)
+                                    .color(pal.muted),
                             );
-                        });
-                    } else {
-                        let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
-                        let mut cur_row: Vec<(usize, String)> = Vec::new();
-                        let mut cur_w = 0.0_f32;
-                        for (idx, name) in group_items {
-                            let text_w = ui
-                                .fonts(|f| f.layout_no_wrap(name.clone(), name_font.clone(), pal.text))
-                                .size()
-                                .x;
-                            let chip_w = text_w + SPACE_8 * 2.0 + SPACE_4 + 50.0 + 4.0;
-                            let next_w = if cur_row.is_empty() {
-                                chip_w
+                            if group_items.is_empty() {
+                                ui.label(
+                                    RichText::new("None configured.")
+                                        .size(10.5)
+                                        .color(pal.subtle_text),
+                                );
                             } else {
-                                cur_w + SPACE_8 + chip_w
-                            };
-                            if !cur_row.is_empty() && next_w > max_row_w {
-                                rows.push(std::mem::take(&mut cur_row));
-                                cur_w = chip_w;
-                            } else {
-                                cur_w = next_w;
-                            }
-                            cur_row.push((idx, name));
-                        }
-                        if !cur_row.is_empty() {
-                            rows.push(cur_row);
-                        }
-                        for row in rows {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.add_space(SPACE_8);
-                                for (idx, name) in row {
-                                    draw_crisp_frame(
-                                        ui,
-                                        pal.panel_alt,
-                                        pal.border,
-                                        RADIUS_CONTROL,
-                                        Margin::symmetric(SPACE_8, 1.0),
-                                        |ui| {
-                                            ui.with_layout(
-                                                Layout::left_to_right(Align::Center),
+                                let max_row_w = col_w.max(120.0);
+                                let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
+                                let mut cur_row: Vec<(usize, String)> = Vec::new();
+                                let mut cur_w = 0.0_f32;
+                                for (idx, name) in group_items {
+                                    let text_w = ui
+                                        .fonts(|f| {
+                                            f.layout_no_wrap(name.clone(), name_font.clone(), pal.text)
+                                        })
+                                        .size()
+                                        .x;
+                                    let chip_w = text_w + SPACE_8 * 2.0 + SPACE_4 + 48.0 + 4.0;
+                                    let next_w = if cur_row.is_empty() {
+                                        chip_w
+                                    } else {
+                                        cur_w + SPACE_8 + chip_w
+                                    };
+                                    if !cur_row.is_empty() && next_w > max_row_w {
+                                        rows.push(std::mem::take(&mut cur_row));
+                                        cur_w = chip_w;
+                                    } else {
+                                        cur_w = next_w;
+                                    }
+                                    cur_row.push((idx, name));
+                                }
+                                if !cur_row.is_empty() {
+                                    rows.push(cur_row);
+                                }
+                                for row in rows {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                                        for (idx, name) in row {
+                                            draw_crisp_frame(
+                                                ui,
+                                                pal.panel_alt,
+                                                pal.border,
+                                                RADIUS_CONTROL,
+                                                Margin::symmetric(SPACE_8, SPACE_4),
                                                 |ui| {
-                                                    ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                    draw_truncated_text(
-                                                        ui,
-                                                        &name,
-                                                        name_font.clone(),
-                                                        pal.text,
-                                                        false,
+                                                    ui.with_layout(
+                                                        Layout::left_to_right(Align::Center),
+                                                        |ui| {
+                                                            ui.spacing_mut().item_spacing.x = SPACE_4;
+                                                            draw_truncated_text(
+                                                                ui,
+                                                                &name,
+                                                                name_font.clone(),
+                                                                pal.text,
+                                                                false,
+                                                            );
+                                                            if draw_z_button(
+                                                                ui,
+                                                                "Remove",
+                                                                Vec2::new(48.0, 20.0),
+                                                                11.0,
+                                                                RADIUS_PILL,
+                                                                true,
+                                                                false,
+                                                                ButtonVariant::SubtleOutline,
+                                                                pal,
+                                                            )
+                                                            .clicked()
+                                                            {
+                                                                remove_name_idx = Some(idx);
+                                                            }
+                                                        },
                                                     );
-                                                    if draw_z_button(
-                                                        ui,
-                                                        "Remove",
-                                                        Vec2::new(48.0, 20.0),
-                                                        11.0,
-                                                        RADIUS_PILL,
-                                                        true,
-                                                        false,
-                                                        ButtonVariant::SubtleOutline,
-                                                        pal,
-                                                    )
-                                                    .clicked()
-                                                    {
-                                                        remove_name_idx = Some(idx);
-                                                    }
                                                 },
                                             );
+                                        }
+                                    });
+                                }
+                            }
+                        },
+                    );
+                };
+
+            if inner_w >= SETTINGS_TWO_COL_MIN_W {
+                let col_w = ((inner_w - SPACE_12) * 0.5).floor();
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_12;
+                    draw_chip_group(ui, ZoneRuleKind::AppContainer, col_w);
+                    draw_chip_group(ui, ZoneRuleKind::PersonalFiles, col_w);
+                });
+            } else {
+                draw_chip_group(ui, ZoneRuleKind::AppContainer, inner_w);
+                ui.add_space(SPACE_4);
+                draw_chip_group(ui, ZoneRuleKind::PersonalFiles, inner_w);
+            }
+
+            if let Some(idx) = remove_name_idx {
+                if draft.zones.remove_root_zone(idx) {
+                    *changed = true;
+                }
+            }
+
+            ui.add_space(SPACE_8);
+            ui.label(
+                RichText::new("Explicit folder zones:")
+                    .size(11.5)
+                    .color(pal.muted),
+            );
+            if draft.zones.explicit_zones.is_empty() {
+                ui.label(
+                    RichText::new("No explicit folder zones configured (e.g. D:\\Media -> Personal files).")
+                        .size(10.5)
+                        .color(pal.subtle_text),
+                );
+            } else {
+                let mut remove_path_idx: Option<usize> = None;
+                for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+                    let matching: Vec<(usize, String)> = draft
+                        .zones
+                        .explicit_zones
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, ez)| ez.kind == kind)
+                        .map(|(i, ez)| (i, ez.path.clone()))
+                        .collect();
+                    if matching.is_empty() {
+                        continue;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+                        ui.label(
+                            RichText::new(format!("{}:", kind.label()))
+                                .size(10.5)
+                                .color(pal.muted),
+                        );
+                        for (idx, path) in matching {
+                            draw_crisp_frame(
+                                ui,
+                                pal.panel_alt,
+                                pal.border,
+                                RADIUS_CONTROL,
+                                Margin::symmetric(SPACE_8, SPACE_4),
+                                |ui| {
+                                    ui.with_layout(
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_4;
+                                            draw_truncated_text(
+                                                ui,
+                                                &path,
+                                                name_font.clone(),
+                                                pal.text,
+                                                false,
+                                            );
+                                            if draw_z_button(
+                                                ui,
+                                                "Remove",
+                                                Vec2::new(48.0, 20.0),
+                                                11.0,
+                                                RADIUS_PILL,
+                                                true,
+                                                false,
+                                                ButtonVariant::SubtleOutline,
+                                                pal,
+                                            )
+                                            .clicked()
+                                            {
+                                                remove_path_idx = Some(idx);
+                                            }
                                         },
                                     );
-                                }
-                            });
+                                },
+                            );
                         }
+                    });
+                }
+                if let Some(idx) = remove_path_idx {
+                    if draft.zones.remove_explicit_zone(idx) {
+                        *changed = true;
                     }
                 }
-                if let Some(idx) = remove_name_idx {
-                    if draft.zones.remove_root_zone(idx) {
-                        changed = true;
-                    }
-                }
+            }
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                    draw_crisp_text_input(
-                        ui,
-                        "zone_name_input",
-                        &mut ui_state.new_container_name_input,
-                        210.0,
-                        "Folder name (e.g. Tools, Media)...",
-                        pal.input_bg,
-                        pal,
+            ui.add_space(SPACE_8);
+            ui.label(
+                RichText::new("Manual folder pins (override inference):")
+                    .size(11.5)
+                    .color(pal.muted),
+            );
+            if draft.zones.pins.is_empty() {
+                ui.label(
+                    RichText::new("No manual pins configured (App / Group / Personal / Ignore).")
+                        .size(10.5)
+                        .color(pal.subtle_text),
+                );
+            } else {
+                let mut remove_pin_idx: Option<usize> = None;
+                for (idx, pin) in draft.zones.pins.iter().enumerate() {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(inner_w, 20.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_8;
+                            draw_truncated_text(
+                                ui,
+                                &pin.path,
+                                FontId::new(11.0, FontFamily::Monospace),
+                                pal.text,
+                                false,
+                            );
+                            paint_chip(ui, pin.kind.label(), neutral_pin_style, pal.panel);
+                            if draw_z_button(
+                                ui,
+                                "Remove",
+                                Vec2::new(56.0, 20.0),
+                                11.0,
+                                RADIUS_PILL,
+                                true,
+                                false,
+                                ButtonVariant::SubtleOutline,
+                                pal,
+                            )
+                            .clicked()
+                            {
+                                remove_pin_idx = Some(idx);
+                            }
+                        },
                     );
+                }
+                if let Some(idx) = remove_pin_idx {
+                    if draft.zones.remove_pin(idx) {
+                        *changed = true;
+                    }
+                }
+            }
+
+            ui.add_space(SPACE_8);
+            ui.label(RichText::new("Add").size(11.5).color(pal.muted));
+            if draw_settings_form_grid_row(
+                ui,
+                "zone_name_input",
+                &mut ui_state.new_container_name_input,
+                "Folder name (e.g. Tools, Media)...",
+                "Add root zone",
+                inner_w,
+                true,
+                pal,
+                |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
                         let selected = ui_state.new_container_name_kind == kind;
                         if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
                             ui_state.new_container_name_kind = kind;
                         }
                     }
-                    if draw_z_button(
-                        ui,
-                        "Add root zone",
-                        Vec2::new(108.0, 26.0),
-                        11.5,
-                        RADIUS_CONTROL,
-                        true,
-                        false,
-                        ButtonVariant::SecondaryOutline,
-                        pal,
-                    )
-                    .clicked()
-                    {
-                        let candidate = ui_state.new_container_name_input.clone();
-                        if draft
-                            .zones
-                            .add_root_zone(&candidate, ui_state.new_container_name_kind)
-                        {
-                            ui_state.new_container_name_input.clear();
-                            changed = true;
-                        }
-                    }
-                });
-
-                ui.label(
-                    RichText::new("Explicit folder zones:")
-                        .size(11.0)
-                        .color(pal.muted),
-                );
-                if draft.zones.explicit_zones.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(SPACE_8);
-                        ui.label(
-                            RichText::new("No explicit folder zones configured (e.g. D:\\Media -> Personal files).")
-                                .size(10.5)
-                                .color(pal.subtle_text),
-                        );
-                    });
-                } else {
-                    let mut remove_path_idx: Option<usize> = None;
-                    for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
-                        let matching: Vec<(usize, String)> = draft
-                            .zones
-                            .explicit_zones
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, ez)| ez.kind == kind)
-                            .map(|(i, ez)| (i, ez.path.clone()))
-                            .collect();
-                        if matching.is_empty() {
-                            continue;
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                            ui.add_space(SPACE_8);
-                            ui.label(RichText::new(format!("{}:", kind.label())).size(10.5).color(pal.muted));
-                            for (idx, path) in matching {
-                                draw_crisp_frame(
-                                    ui,
-                                    pal.panel_alt,
-                                    pal.border,
-                                    RADIUS_CONTROL,
-                                    Margin::symmetric(SPACE_8, 1.0),
-                                    |ui| {
-                                        ui.with_layout(
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                draw_truncated_text(
-                                                    ui,
-                                                    &path,
-                                                    name_font.clone(),
-                                                    pal.text,
-                                                    false,
-                                                );
-                                                if draw_z_button(
-                                                    ui,
-                                                    "Remove",
-                                                    Vec2::new(48.0, 20.0),
-                                                    11.0,
-                                                    RADIUS_PILL,
-                                                    true,
-                                                    false,
-                                                    ButtonVariant::SubtleOutline,
-                                                    pal,
-                                                )
-                                                .clicked()
-                                                {
-                                                    remove_path_idx = Some(idx);
-                                                }
-                                            },
-                                        );
-                                    },
-                                );
-                            }
-                        });
-                    }
-                    if let Some(idx) = remove_path_idx {
-                        if draft.zones.remove_explicit_zone(idx) {
-                            changed = true;
-                        }
-                    }
+                },
+            ) {
+                let candidate = ui_state.new_container_name_input.clone();
+                if draft
+                    .zones
+                    .add_root_zone(&candidate, ui_state.new_container_name_kind)
+                {
+                    ui_state.new_container_name_input.clear();
+                    *changed = true;
                 }
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                    draw_crisp_text_input(
-                        ui,
-                        "zone_path_input",
-                        &mut ui_state.new_container_path_input,
-                        236.0,
-                        r"D:\Media or D:\Work\PortableTools",
-                        pal.input_bg,
-                        pal,
-                    );
+            }
+            ui.add_space(SPACE_4);
+            if draw_settings_form_grid_row(
+                ui,
+                "zone_path_input",
+                &mut ui_state.new_container_path_input,
+                r"D:\Media or D:\Work\PortableTools",
+                "Add path zone",
+                inner_w,
+                true,
+                pal,
+                |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
                         let selected = ui_state.new_container_path_kind == kind;
                         if draw_filter_radio_chip(ui, kind.label(), selected, pal) {
                             ui_state.new_container_path_kind = kind;
                         }
                     }
-                    if draw_z_button(
-                        ui,
-                        "Add path zone",
-                        Vec2::new(108.0, 26.0),
-                        11.5,
-                        RADIUS_CONTROL,
-                        true,
-                        false,
-                        ButtonVariant::SecondaryOutline,
-                        pal,
-                    )
-                    .clicked()
-                    {
-                        let candidate = ui_state.new_container_path_input.clone();
-                        if draft
-                            .zones
-                            .add_explicit_zone(&candidate, ui_state.new_container_path_kind)
-                        {
-                            ui_state.new_container_path_input.clear();
-                            changed = true;
-                        }
-                    }
-                });
-
-                ui.label(
-                    RichText::new("Manual folder pins (override inference):")
-                        .size(11.0)
-                        .color(pal.muted),
-                );
-                if draft.zones.pins.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(SPACE_8);
-                        ui.label(
-                            RichText::new("No manual pins configured (App / Group / Personal / Ignore).")
-                                .size(10.5)
-                                .color(pal.subtle_text),
-                        );
-                    });
-                } else {
-                    let mut remove_pin_idx: Option<usize> = None;
-                    let pin_row_w = ui.available_width().max(200.0);
-                    for (idx, pin) in draft.zones.pins.iter().enumerate() {
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(pin_row_w, 20.0),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.spacing_mut().item_spacing.x = SPACE_8;
-                                ui.add_space(SPACE_8);
-                                draw_truncated_text(
-                                    ui,
-                                    &pin.path,
-                                    FontId::new(11.0, FontFamily::Monospace),
-                                    pal.text,
-                                    false,
-                                );
-                                paint_chip(
-                                    ui,
-                                    pin.kind.label(),
-                                    neutral_pin_style,
-                                    pal.panel,
-                                );
-                                if draw_z_button(
-                                    ui,
-                                    "Remove",
-                                    Vec2::new(56.0, 20.0),
-                                    11.0,
-                                    RADIUS_PILL,
-                                    true,
-                                    false,
-                                    ButtonVariant::SubtleOutline,
-                                    pal,
-                                )
-                                .clicked()
-                                {
-                                    remove_pin_idx = Some(idx);
-                                }
-                            },
-                        );
-                    }
-                    if let Some(idx) = remove_pin_idx {
-                        if draft.zones.remove_pin(idx) {
-                            changed = true;
-                        }
-                    }
+                },
+            ) {
+                let candidate = ui_state.new_container_path_input.clone();
+                if draft
+                    .zones
+                    .add_explicit_zone(&candidate, ui_state.new_container_path_kind)
+                {
+                    ui_state.new_container_path_input.clear();
+                    *changed = true;
                 }
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-                    draw_crisp_text_input(
-                        ui,
-                        "zone_pin_input",
-                        &mut ui_state.new_pin_path_input,
-                        236.0,
-                        r"D:\Apps\CustomSuite or D:\Games\Orphan",
-                        pal.input_bg,
-                        pal,
-                    );
+            }
+            ui.add_space(SPACE_4);
+            if draw_settings_form_grid_row(
+                ui,
+                "zone_pin_input",
+                &mut ui_state.new_pin_path_input,
+                r"D:\Apps\CustomSuite or D:\Games\Orphan",
+                "Pin folder",
+                inner_w,
+                true,
+                pal,
+                |ui| {
                     for pk in [
                         PinKind::App,
                         PinKind::Group,
@@ -8985,66 +9189,244 @@ fn draw_settings_view(
                             ui_state.new_pin_kind = pk;
                         }
                     }
-                    if draw_z_button(
+                },
+            ) {
+                let candidate = ui_state.new_pin_path_input.clone();
+                if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
+                    ui_state.new_pin_path_input.clear();
+                    *changed = true;
+                }
+            }
+        },
+    );
+
+    rulebook_frame.response.rect
+}
+
+fn draw_settings_about_card(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    pane_inner_w: f32,
+    pal: &ThemePalette,
+) {
+    let card_w = pane_inner_w.max(240.0);
+    draw_crisp_frame(
+        ui,
+        pal.panel,
+        pal.border,
+        RADIUS_PANEL,
+        Margin::same(SPACE_12),
+        |ui| {
+            ui.set_width((card_w - SPACE_12 * 2.0 - 2.0).max(200.0));
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), HEADER_CONTROL_H),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_8;
+                    let _ = draw_wt_header_lockup(
                         ui,
-                        "Pin folder",
-                        Vec2::new(92.0, 26.0),
-                        11.5,
-                        RADIUS_CONTROL,
-                        true,
-                        false,
-                        ButtonVariant::SecondaryOutline,
+                        &mut ui_state.wt_logo_tex,
+                        "y-storage",
+                        &format!(
+                            "v{} · WT family read-only storage & dependency inspector",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        pal.muted,
                         pal,
-                    )
-                    .clicked()
-                    {
-                        let candidate = ui_state.new_pin_path_input.clone();
-                        if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
-                            ui_state.new_pin_path_input.clear();
-                            changed = true;
+                    );
+                },
+            );
+        },
+    );
+}
+
+fn draw_settings_nav_rail(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    pal: &ThemePalette,
+) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(SETTINGS_NAV_W, 0.0),
+        Layout::top_down(Align::Min),
+        |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.border,
+                RADIUS_PANEL,
+                Margin::same(SPACE_8),
+                |ui| {
+                    let inner_w = (SETTINGS_NAV_W - SPACE_8 * 2.0 - 2.0).max(120.0);
+                    ui.set_width(inner_w);
+                    ui.spacing_mut().item_spacing.y = SPACE_4;
+                    let ppp = ui.ctx().pixels_per_point();
+                    let font_id = FontId::new(12.0, FontFamily::Proportional);
+
+                    for section in SettingsSection::ALL {
+                        let selected = ui_state.settings_section == section;
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(inner_w, 30.0), Sense::click());
+                        let (fill, border_col, text_col) = if selected {
+                            (pal.accent_soft_fill, pal.accent_border, pal.text)
+                        } else if resp.hovered() {
+                            (pal.widget_hover, pal.border, pal.accent_line)
+                        } else {
+                            (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted)
+                        };
+                        let snapped = paint_crisp_bordered_box(
+                            ui.painter(),
+                            rect,
+                            RADIUS_CONTROL,
+                            fill,
+                            border_col,
+                            1.0,
+                            ppp,
+                        );
+                        if selected {
+                            let bar = Rect::from_min_max(
+                                Pos2::new(snapped.min.x + SPACE_4, snapped.min.y + SPACE_4),
+                                Pos2::new(snapped.min.x + SPACE_4 + 3.0, snapped.max.y - SPACE_4),
+                            );
+                            ui.painter().rect_filled(bar, 1.5, pal.accent_line);
+                        }
+                        let galley = ui.fonts(|f| {
+                            f.layout_no_wrap(section.label().to_owned(), font_id.clone(), text_col)
+                        });
+                        let text_box = Rect::from_min_max(
+                            Pos2::new(snapped.min.x + SPACE_12, snapped.min.y),
+                            Pos2::new((snapped.max.x - SPACE_8).max(snapped.min.x + SPACE_12), snapped.max.y),
+                        );
+                        let pos = optical_galley_pos(ui, text_box, &galley, None, false);
+                        ui.painter().galley(pos, galley, text_col);
+                        if resp.clicked() {
+                            ui_state.settings_section = section;
                         }
                     }
-                });
-            },
-        );
-        if ui_state.settings_focus_containers {
-            ui.scroll_to_rect(rulebook_frame.response.rect, Some(Align::BOTTOM));
-            if rulebook_frame.response.rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
-                ui_state.settings_focus_containers = false;
-            }
-        }
+                },
+            );
+        },
+    );
+}
 
-        // About card repeating the WT header lockup (§6.4)
-        ui.add_space(SPACE_4);
-        draw_crisp_frame(
-            ui,
-            pal.panel,
-            pal.border,
-            RADIUS_PANEL,
-            Margin::symmetric(SPACE_12, SPACE_8),
-            |ui| {
-                ui.set_width((scroll_w - SCROLL_GUTTER_W - SPACE_12 * 2.0 - 2.0).max(200.0));
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width(), HEADER_CONTROL_H),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_8;
-                        let _ = draw_wt_header_lockup(
-                            ui,
-                            &mut ui_state.wt_logo_tex,
-                            "y-storage",
-                            &format!(
-                                "v{} · WT family read-only storage & dependency inspector",
-                                env!("CARGO_PKG_VERSION")
-                            ),
-                            pal.muted,
-                            pal,
-                        );
-                    },
-                );
-            },
-        );
-    });
+fn draw_settings_view(
+    ui: &mut egui::Ui,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    report: Option<&ScanReport>,
+    system_windows_dir: &str,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    let mut draft = config.clone();
+    let mut changed = false;
+    let sys_win_key = normalize_path_key(system_windows_dir);
+
+    if ui_state.settings_focus_containers {
+        ui_state.settings_section = SettingsSection::Rulebook;
+    }
+
+    let total_w = ui.available_width().max(240.0);
+    let is_wide = total_w >= SETTINGS_WIDE_MIN_W;
+
+    if is_wide {
+        let content_w = (total_w - SETTINGS_NAV_W - SPACE_16)
+            .min(SETTINGS_CONTENT_MAX_W)
+            .max(320.0);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_16;
+            draw_settings_nav_rail(ui, ui_state, pal);
+            ui.allocate_ui_with_layout(
+                Vec2::new(content_w, ui.available_height()),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    let pane_inner_w = (content_w - SCROLL_GUTTER_W).max(240.0);
+                    draw_synced_scroll_area(
+                        ui,
+                        ("settings_scroll", ui_state.settings_section as u8),
+                        None,
+                        [false, false],
+                        pal,
+                        pal.bg,
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = SPACE_4;
+                            match ui_state.settings_section {
+                                SettingsSection::Appearance => {
+                                    draw_appearance_theme_section(
+                                        ui,
+                                        ui_state,
+                                        config,
+                                        pane_inner_w,
+                                        pal,
+                                        emit,
+                                    );
+                                }
+                                SettingsSection::ScanScope => {
+                                    draw_scan_scope_section(
+                                        ui,
+                                        ui_state,
+                                        &mut draft,
+                                        report,
+                                        &sys_win_key,
+                                        pane_inner_w,
+                                        pal,
+                                        &mut changed,
+                                    );
+                                }
+                                SettingsSection::Rulebook => {
+                                    let _ = draw_rulebook_section(
+                                        ui,
+                                        ui_state,
+                                        &mut draft,
+                                        pane_inner_w,
+                                        pal,
+                                        &mut changed,
+                                    );
+                                    ui_state.settings_focus_containers = false;
+                                }
+                            }
+                            ui.add_space(SPACE_12);
+                            draw_settings_about_card(ui, ui_state, pane_inner_w, pal);
+                        },
+                    );
+                },
+            );
+        });
+    } else {
+        let content_w = total_w.min(SETTINGS_CONTENT_MAX_W).max(240.0);
+        let pane_inner_w = (content_w - SCROLL_GUTTER_W).max(240.0);
+        draw_synced_scroll_area(ui, "settings_scroll", None, [false, false], pal, pal.bg, |ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_4;
+            draw_appearance_theme_section(ui, ui_state, config, pane_inner_w, pal, emit);
+            ui.add_space(SPACE_12);
+            draw_scan_scope_section(
+                ui,
+                ui_state,
+                &mut draft,
+                report,
+                &sys_win_key,
+                pane_inner_w,
+                pal,
+                &mut changed,
+            );
+            ui.add_space(SPACE_12);
+            let rulebook_rect = draw_rulebook_section(
+                ui,
+                ui_state,
+                &mut draft,
+                pane_inner_w,
+                pal,
+                &mut changed,
+            );
+            if ui_state.settings_focus_containers {
+                ui.scroll_to_rect(rulebook_rect, Some(Align::BOTTOM));
+                if rulebook_rect.bottom() <= ui.clip_rect().bottom() + 2.0 {
+                    ui_state.settings_focus_containers = false;
+                }
+            }
+            ui.add_space(SPACE_12);
+            draw_settings_about_card(ui, ui_state, pane_inner_w, pal);
+        });
+    }
 
     if changed {
         ui_state.ledger_page = 0;
@@ -10721,5 +11103,113 @@ mod tests {
             st.expanded_row_heights.contains_key("app:000"),
             "page 1 drawer should be laid out when returning to page 1"
         );
+    }
+
+    #[test]
+    fn settings_wide_section_nav_and_narrow_collapse_render_cleanly() {
+        let (report, cfg) = make_synthetic_report_for_drives(3);
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        st.settings_focus_containers = true;
+
+        // Wide viewport: focus flag selects Rulebook section and clears itself
+        let wide_out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1275.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!wide_out.shapes.is_empty());
+        assert_eq!(st.settings_section, SettingsSection::Rulebook);
+        assert!(!st.settings_focus_containers);
+
+        // Render all 3 sections in wide mode (1020x720)
+        for section in SettingsSection::ALL {
+            st.settings_section = section;
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut st,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        r"C:\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            assert!(!out.shapes.is_empty());
+        }
+
+        // Narrow viewport (< SETTINGS_WIDE_MIN_W): collapses cleanly to single column
+        let narrow_out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 720.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+        assert!(!narrow_out.shapes.is_empty());
+    }
+
+    #[test]
+    fn settings_form_grid_and_drive_pod_row_heights_align() {
+        for avail_w in [560.0_f32, 700.0, 820.0] {
+            let with_sel = compute_settings_form_grid(avail_w, true);
+            assert!(!with_sel.stacked);
+            assert_eq!(with_sel.action_w, FORM_GRID_ACTION_W);
+            assert!(
+                (with_sel.input_w + SPACE_8 + with_sel.selector_w + SPACE_8 + with_sel.action_w
+                    - avail_w)
+                    .abs()
+                    < 0.01
+            );
+
+            let no_sel = compute_settings_form_grid(avail_w, false);
+            assert!(!no_sel.stacked);
+            assert_eq!(no_sel.action_w, FORM_GRID_ACTION_W);
+            assert!((no_sel.input_w + SPACE_8 + no_sel.action_w - avail_w).abs() < 0.01);
+        }
+
+        let narrow = compute_settings_form_grid(420.0, true);
+        assert!(narrow.stacked);
+        assert_eq!(narrow.action_w, FORM_GRID_ACTION_W);
+
+        let h0 = drive_pod_natural_inner_h(0, true);
+        let h1 = drive_pod_natural_inner_h(1, true);
+        let h2 = drive_pod_natural_inner_h(2, true);
+        assert!(h0 < h1 && h1 < h2);
+        assert!(drive_pod_natural_inner_h(0, false) < h0);
     }
 }
