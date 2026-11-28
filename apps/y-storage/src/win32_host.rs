@@ -1128,6 +1128,20 @@ unsafe extern "system" fn wnd_proc(
                             st.needs_redraw = true;
                             unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
                         }
+                        UiAction::ResetAllSettings => {
+                            let mut g = st.controller.lock().unwrap();
+                            let win_cfg = g.config.window;
+                            let sys_win = g.system_windows_dir.clone();
+                            let drives = enumerate_fixed_drives();
+                            let mut reset_cfg = AppConfig::for_detected_drives(&drives, &sys_win);
+                            reset_cfg.window = win_cfg;
+                            g.config = reset_cfg;
+                            if !st.smoke_mode {
+                                let _ = g.config.save_atomic(&g.config_path);
+                            }
+                            st.needs_redraw = true;
+                            unsafe { PostMessageW(hwnd, WM_APP_FOLLOWUP_PAINT, 0, 0) };
+                        }
                         UiAction::LocateInExplorer(path) => {
                             if !st.smoke_mode {
                                 launch_explorer_select(&path);

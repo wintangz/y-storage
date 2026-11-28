@@ -119,6 +119,7 @@ pub enum UiAction {
         custom_rgb: [u8; 3],
     },
     SaveConfig(AppConfig),
+    ResetAllSettings,
     BrowseRulebookFolder(RulebookBrowseTarget),
     UpdateListView {
         sort_mode: AppSortMode,
@@ -247,6 +248,7 @@ pub struct StorageUiState {
     pub new_pin_kind: PinKind,
     pub settings_section: SettingsSection,
     pub settings_focus_containers: bool,
+    pub pending_confirmation: Option<PendingConfirmation>,
     pub dep_search_query: String,
     pub expanded_apps: HashSet<String>,
     pub expanded_families: HashSet<String>,
@@ -309,6 +311,7 @@ impl Default for StorageUiState {
             new_pin_kind: PinKind::App,
             settings_section: SettingsSection::Appearance,
             settings_focus_containers: false,
+            pending_confirmation: None,
             dep_search_query: String::new(),
             expanded_apps: HashSet::new(),
             expanded_families: HashSet::new(),
@@ -1428,11 +1431,110 @@ fn draw_crisp_frame<R>(
     res
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingConfirmation {
+    RemoveExclusion {
+        drive: char,
+        index: usize,
+        path: String,
+    },
+    RemoveRootZone {
+        index: usize,
+        name: String,
+    },
+    RemoveExplicitZone {
+        index: usize,
+        path: String,
+    },
+    RemoveManualPin {
+        index: usize,
+        path: String,
+    },
+    ResetRulebookDefaults,
+    ResetAllSettings,
+    RescanAll,
+    RescanDrive(char),
+}
+
+impl PendingConfirmation {
+    #[must_use]
+    pub const fn is_destructive(&self) -> bool {
+        !matches!(self, Self::RescanAll | Self::RescanDrive(_))
+    }
+
+    #[must_use]
+    pub fn title(&self) -> String {
+        match self {
+            Self::RemoveExclusion { .. } => "Remove exclusion?".to_owned(),
+            Self::RemoveRootZone { .. } => "Remove root zone rule?".to_owned(),
+            Self::RemoveExplicitZone { .. } => "Remove explicit folder zone?".to_owned(),
+            Self::RemoveManualPin { .. } => "Remove manual pin?".to_owned(),
+            Self::ResetRulebookDefaults => "Reset zone rulebook?".to_owned(),
+            Self::ResetAllSettings => "Reset all settings?".to_owned(),
+            Self::RescanAll => "Rescan enabled drives?".to_owned(),
+            Self::RescanDrive(dl) => format!("Rescan Drive {}:\\?", dl.to_ascii_uppercase()),
+        }
+    }
+
+    #[must_use]
+    pub fn body(&self) -> String {
+        match self {
+            Self::RemoveExclusion { drive, path, .. } => format!(
+                "Remove exclusion \"{}\" from Drive {}:\\? Subsequent scans will include this path again.",
+                path,
+                drive.to_ascii_uppercase()
+            ),
+            Self::RemoveRootZone { name, .. } => format!(
+                "Remove root zone rule \"{}\"? Folders matching this name will no longer use this rule.",
+                name
+            ),
+            Self::RemoveExplicitZone { path, .. } => format!(
+                "Remove explicit folder zone \"{}\"? Attribution will fall back to automatic rules.",
+                path
+            ),
+            Self::RemoveManualPin { path, .. } => format!(
+                "Remove manual pin \"{}\"? Attribution for this path will return to automatic inference.",
+                path
+            ),
+            Self::ResetRulebookDefaults => {
+                "Restore Attribution Zone Rulebook to shipped defaults? Custom root zones, explicit folder zones, and manual pins will be cleared."
+                    .to_owned()
+            }
+            Self::ResetAllSettings => {
+                "Restore ALL settings (theme, scan scope & exclusions, and zone rulebook + manual pins) to shipped defaults?"
+                    .to_owned()
+            }
+            Self::RescanAll => {
+                "Rescan all enabled drives and installed app registry entries now?".to_owned()
+            }
+            Self::RescanDrive(dl) => format!(
+                "Rescan Drive {}:\\ and merge updated usage into the current report?",
+                dl.to_ascii_uppercase()
+            ),
+        }
+    }
+
+    #[must_use]
+    pub const fn confirm_label(&self) -> &'static str {
+        match self {
+            Self::RemoveExclusion { .. }
+            | Self::RemoveRootZone { .. }
+            | Self::RemoveExplicitZone { .. }
+            | Self::RemoveManualPin { .. } => "Remove",
+            Self::ResetRulebookDefaults => "Reset defaults",
+            Self::ResetAllSettings => "Reset all",
+            Self::RescanAll | Self::RescanDrive(_) => "Rescan",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonVariant {
     PrimaryOutline,
     SecondaryOutline,
     SubtleOutline,
+    DangerOutline,
+    DangerSubtle,
 }
 
 #[inline]
@@ -1692,22 +1794,29 @@ fn resolve_button_colors(
 ) -> (Color32, Color32, Color32) {
     if !enabled {
         return match variant {
-            ButtonVariant::SubtleOutline => (
+            ButtonVariant::SubtleOutline | ButtonVariant::DangerSubtle => (
                 Color32::TRANSPARENT,
                 Color32::TRANSPARENT,
                 lerp_color(pal.bg, pal.muted, 0.55),
             ),
-            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
-                (Color32::TRANSPARENT, pal.border, pal.muted)
-            }
+            ButtonVariant::PrimaryOutline
+            | ButtonVariant::SecondaryOutline
+            | ButtonVariant::DangerOutline => (Color32::TRANSPARENT, pal.border, pal.muted),
         };
     }
     if pressed {
-        let press_border = match variant {
-            ButtonVariant::SubtleOutline => Color32::TRANSPARENT,
-            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => pal.accent_border,
+        return match variant {
+            ButtonVariant::SubtleOutline => (pal.widget_active, Color32::TRANSPARENT, pal.text),
+            ButtonVariant::PrimaryOutline | ButtonVariant::SecondaryOutline => {
+                (pal.widget_active, pal.accent_border, pal.text)
+            }
+            ButtonVariant::DangerSubtle => (pal.pill_red_fill, pal.status_red, pal.status_red),
+            ButtonVariant::DangerOutline => (
+                lerp_color(pal.pill_red_fill, pal.status_red, 0.25),
+                pal.status_red,
+                pal.status_red,
+            ),
         };
-        return (pal.widget_active, press_border, pal.text);
     }
     if hovered {
         return match variant {
@@ -1717,6 +1826,12 @@ fn resolve_button_colors(
             ButtonVariant::SubtleOutline => {
                 (pal.widget_hover, Color32::TRANSPARENT, pal.accent_line)
             }
+            ButtonVariant::DangerSubtle => (pal.pill_red_fill, Color32::TRANSPARENT, pal.status_red),
+            ButtonVariant::DangerOutline => (
+                lerp_color(pal.pill_red_fill, pal.status_red, 0.14),
+                pal.status_red,
+                pal.status_red,
+            ),
         };
     }
     if active_highlight {
@@ -1726,6 +1841,8 @@ fn resolve_button_colors(
         ButtonVariant::PrimaryOutline => (pal.accent_soft_fill, pal.accent_border, pal.accent_line),
         ButtonVariant::SecondaryOutline => (Color32::TRANSPARENT, pal.border, pal.text),
         ButtonVariant::SubtleOutline => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.muted),
+        ButtonVariant::DangerOutline => (pal.pill_red_fill, pal.status_red, pal.status_red),
+        ButtonVariant::DangerSubtle => (Color32::TRANSPARENT, Color32::TRANSPARENT, pal.status_red),
     }
 }
 
@@ -3861,9 +3978,8 @@ fn draw_drive_pods_grid(
                                         ))
                                         .clicked()
                                     {
-                                        ui_state.ledger_page = 0;
-                                        ui_state.ledger_scroll_to_top = true;
-                                        emit(UiAction::StartDriveRescan(dl));
+                                        ui_state.pending_confirmation =
+                                            Some(PendingConfirmation::RescanDrive(dl));
                                     }
                                 }
                             });
@@ -4350,10 +4466,12 @@ pub fn draw_app_ui_with_drive_busy(
     }
 
     if ctx.input(|i| i.key_pressed(Key::Escape)) {
-        ui_state.open_reverse_dep_id = None;
-        ui_state.open_facet_popup = None;
-        ui_state.open_unattrib_facet_popup = None;
-        ui_state.open_pod_scope_drive = None;
+        if ui_state.pending_confirmation.take().is_none() {
+            ui_state.open_reverse_dep_id = None;
+            ui_state.open_facet_popup = None;
+            ui_state.open_unattrib_facet_popup = None;
+            ui_state.open_pod_scope_drive = None;
+        }
     }
     let mut active_facet_anchor: Option<(&'static str, Rect)> = None;
     let mut active_unattrib_facet_anchor: Option<(&'static str, Rect)> = None;
@@ -4494,9 +4612,7 @@ pub fn draw_app_ui_with_drive_busy(
                         "Rescan all enabled drives and registry".to_string()
                     };
                     if rescan_resp.on_hover_text(rescan_tip).clicked() {
-                        ui_state.ledger_page = 0;
-                        ui_state.ledger_scroll_to_top = true;
-                        emit(UiAction::StartRescan);
+                        ui_state.pending_confirmation = Some(PendingConfirmation::RescanAll);
                     }
 
                     if draw_theme_toggle_button(ui, mode, &pal) {
@@ -5121,6 +5237,8 @@ pub fn draw_app_ui_with_drive_busy(
                 });
         }
     }
+
+    draw_confirmation_modal(ctx, ui_state, config, &pal, emit);
 }
 
 fn draw_main_app_list(
@@ -9366,7 +9484,7 @@ fn draw_scan_scope_section(
                                 );
                             }
 
-                            let mut remove_idx: Option<usize> = None;
+                            let mut remove_ex: Option<(usize, String)> = None;
                             if !non_locked.is_empty() {
                                 ui.add_space(SPACE_4);
                                 for (idx, ex) in non_locked {
@@ -9393,20 +9511,24 @@ fn draw_scan_scope_section(
                                                 RADIUS_CONTROL,
                                                 true,
                                                 false,
-                                                ButtonVariant::SubtleOutline,
+                                                ButtonVariant::DangerSubtle,
                                                 pal,
                                             )
                                             .clicked()
                                             {
-                                                remove_idx = Some(idx);
+                                                remove_ex = Some((idx, ex.clone()));
                                             }
                                         },
                                     );
                                 }
                             }
-                            if let Some(idx) = remove_idx {
-                                target.exclusions.remove(idx);
-                                *changed = true;
+                            if let Some((idx, path)) = remove_ex {
+                                ui_state.pending_confirmation =
+                                    Some(PendingConfirmation::RemoveExclusion {
+                                        drive: target.letter,
+                                        index: idx,
+                                        path,
+                                    });
                             }
 
                             ui.add_space(SPACE_4 + extra_h);
@@ -9512,7 +9634,7 @@ fn draw_rulebook_removable_chip(
                         RADIUS_PILL,
                         true,
                         false,
-                        ButtonVariant::SubtleOutline,
+                        ButtonVariant::DangerSubtle,
                         pal,
                     )
                     .clicked()
@@ -9615,8 +9737,7 @@ fn draw_rulebook_section(
                 )
                 .clicked()
             {
-                draft.zones = ZoneRulebook::default();
-                *changed = true;
+                ui_state.pending_confirmation = Some(PendingConfirmation::ResetRulebookDefaults);
             }
         },
     );
@@ -9642,7 +9763,7 @@ fn draw_rulebook_section(
             ui.spacing_mut().item_spacing.y = SPACE_4;
 
             let name_font = FontId::new(11.5, FontFamily::Monospace);
-            let mut remove_name_idx: Option<usize> = None;
+            let mut remove_name: Option<(usize, String)> = None;
 
             ui.label(
                 RichText::new("Windows defaults")
@@ -9726,7 +9847,7 @@ fn draw_rulebook_section(
                                                 max_chip_inner_w,
                                                 pal,
                                             ) {
-                                                remove_name_idx = Some(idx);
+                                                remove_name = Some((idx, name.clone()));
                                             }
                                         }
                                     });
@@ -9749,10 +9870,9 @@ fn draw_rulebook_section(
                 draw_chip_group(ui, ZoneRuleKind::PersonalFiles, inner_w);
             }
 
-            if let Some(idx) = remove_name_idx {
-                if draft.zones.remove_root_zone(idx) {
-                    *changed = true;
-                }
+            if let Some((idx, name)) = remove_name {
+                ui_state.pending_confirmation =
+                    Some(PendingConfirmation::RemoveRootZone { index: idx, name });
             }
 
             ui.add_space(SPACE_8);
@@ -9768,7 +9888,7 @@ fn draw_rulebook_section(
                         .color(pal.subtle_text),
                 );
             } else {
-                let mut remove_path_idx: Option<usize> = None;
+                let mut remove_path: Option<(usize, String)> = None;
                 for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
                     let matching: Vec<(usize, String)> = draft
                         .zones
@@ -9797,15 +9917,14 @@ fn draw_rulebook_section(
                                 max_chip_inner_w,
                                 pal,
                             ) {
-                                remove_path_idx = Some(idx);
+                                remove_path = Some((idx, path.clone()));
                             }
                         }
                     });
                 }
-                if let Some(idx) = remove_path_idx {
-                    if draft.zones.remove_explicit_zone(idx) {
-                        *changed = true;
-                    }
+                if let Some((idx, path)) = remove_path {
+                    ui_state.pending_confirmation =
+                        Some(PendingConfirmation::RemoveExplicitZone { index: idx, path });
                 }
             }
 
@@ -9822,7 +9941,7 @@ fn draw_rulebook_section(
                         .color(pal.subtle_text),
                 );
             } else {
-                let mut remove_pin_idx: Option<usize> = None;
+                let mut remove_pin: Option<(usize, String)> = None;
                 for (idx, pin) in draft.zones.pins.iter().enumerate() {
                     ui.allocate_ui_with_layout(
                         Vec2::new(inner_w, 20.0),
@@ -9845,20 +9964,19 @@ fn draw_rulebook_section(
                                 RADIUS_PILL,
                                 true,
                                 false,
-                                ButtonVariant::SubtleOutline,
+                                ButtonVariant::DangerSubtle,
                                 pal,
                             )
                             .clicked()
                             {
-                                remove_pin_idx = Some(idx);
+                                remove_pin = Some((idx, pin.path.clone()));
                             }
                         },
                     );
                 }
-                if let Some(idx) = remove_pin_idx {
-                    if draft.zones.remove_pin(idx) {
-                        *changed = true;
-                    }
+                if let Some((idx, path)) = remove_pin {
+                    ui_state.pending_confirmation =
+                        Some(PendingConfirmation::RemoveManualPin { index: idx, path });
                 }
             }
 
@@ -10050,15 +10168,41 @@ fn draw_settings_view(
     ui.label(RichText::new("Settings").size(16.0).color(pal.text));
     ui.add_space(SPACE_4);
 
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
-        for section in SettingsSection::ALL {
-            let selected = ui_state.settings_section == section;
-            if draw_filter_radio_chip(ui, section.label(), selected, pal) {
-                ui_state.settings_section = section;
+    let tab_row_w = ui.available_width();
+    let mut draw_tabs = |ui: &mut egui::Ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(SPACE_8, SPACE_4);
+            for section in SettingsSection::ALL {
+                let selected = ui_state.settings_section == section;
+                if draw_filter_radio_chip(ui, section.label(), selected, pal) {
+                    ui_state.settings_section = section;
+                }
             }
+        });
+    };
+    let draw_global_reset_btn = |ui: &mut egui::Ui| {
+        if draw_z_button(
+            ui,
+            "Reset to defaults",
+            Vec2::new(124.0, 22.0),
+            11.5,
+            RADIUS_CONTROL,
+            true,
+            false,
+            ButtonVariant::SecondaryOutline,
+            pal,
+        )
+        .clicked()
+        {
+            ui_state.pending_confirmation = Some(PendingConfirmation::ResetAllSettings);
         }
-    });
+    };
+    if tab_row_w >= 580.0 {
+        draw_split_row(ui, 24.0, 128.0, Sense::hover(), draw_tabs, draw_global_reset_btn);
+    } else {
+        draw_tabs(ui);
+        ui.with_layout(Layout::right_to_left(Align::Center), draw_global_reset_btn);
+    }
     ui.add_space(SPACE_8);
 
     let pane_inner_w = (ui.available_width().max(240.0) - SCROLL_GUTTER_W).max(240.0);
@@ -10117,6 +10261,213 @@ fn draw_settings_view(
         ui_state.ledger_scroll_to_top = true;
         emit(UiAction::SaveConfig(draft));
     }
+}
+
+fn execute_confirmed_action(
+    pending: PendingConfirmation,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    match pending {
+        PendingConfirmation::RemoveExclusion { drive, index, .. } => {
+            let mut draft = config.clone();
+            if let Some(target) = draft
+                .targets
+                .iter_mut()
+                .find(|t| t.letter.to_ascii_uppercase() == drive.to_ascii_uppercase())
+            {
+                if index < target.exclusions.len() {
+                    target.exclusions.remove(index);
+                    ui_state.ledger_page = 0;
+                    ui_state.ledger_scroll_to_top = true;
+                    emit(UiAction::SaveConfig(draft));
+                }
+            }
+        }
+        PendingConfirmation::RemoveRootZone { index, .. } => {
+            let mut draft = config.clone();
+            if draft.zones.remove_root_zone(index) {
+                ui_state.ledger_page = 0;
+                ui_state.ledger_scroll_to_top = true;
+                emit(UiAction::SaveConfig(draft));
+            }
+        }
+        PendingConfirmation::RemoveExplicitZone { index, .. } => {
+            let mut draft = config.clone();
+            if draft.zones.remove_explicit_zone(index) {
+                ui_state.ledger_page = 0;
+                ui_state.ledger_scroll_to_top = true;
+                emit(UiAction::SaveConfig(draft));
+            }
+        }
+        PendingConfirmation::RemoveManualPin { index, .. } => {
+            let mut draft = config.clone();
+            if draft.zones.remove_pin(index) {
+                ui_state.ledger_page = 0;
+                ui_state.ledger_scroll_to_top = true;
+                emit(UiAction::SaveConfig(draft));
+            }
+        }
+        PendingConfirmation::ResetRulebookDefaults => {
+            let mut draft = config.clone();
+            draft.zones = ZoneRulebook::default();
+            ui_state.ledger_page = 0;
+            ui_state.ledger_scroll_to_top = true;
+            emit(UiAction::SaveConfig(draft));
+        }
+        PendingConfirmation::ResetAllSettings => {
+            ui_state.new_exclusion_inputs.clear();
+            ui_state.new_container_name_input.clear();
+            ui_state.new_container_path_input.clear();
+            ui_state.new_pin_path_input.clear();
+            ui_state.custom_hex_input = format_hex_rgb(default_custom_theme_rgb());
+            ui_state.custom_hex_valid = true;
+            ui_state.ledger_page = 0;
+            ui_state.ledger_scroll_to_top = true;
+            emit(UiAction::ResetAllSettings);
+        }
+        PendingConfirmation::RescanAll => {
+            ui_state.ledger_page = 0;
+            ui_state.ledger_scroll_to_top = true;
+            emit(UiAction::StartRescan);
+        }
+        PendingConfirmation::RescanDrive(dl) => {
+            ui_state.ledger_page = 0;
+            ui_state.ledger_scroll_to_top = true;
+            emit(UiAction::StartDriveRescan(dl));
+        }
+    }
+}
+
+fn draw_confirmation_modal(
+    ctx: &egui::Context,
+    ui_state: &mut StorageUiState,
+    config: &AppConfig,
+    pal: &ThemePalette,
+    emit: &mut dyn FnMut(UiAction),
+) {
+    let Some(pending) = ui_state.pending_confirmation.clone() else {
+        return;
+    };
+
+    let screen = ctx.screen_rect();
+    let scrim_col = match config.theme_mode {
+        ThemeMode::Dark => Color32::from_black_alpha(150),
+        ThemeMode::Light => Color32::from_black_alpha(105),
+    };
+    egui::Area::new(egui::Id::new("confirm_modal_backdrop"))
+        .order(Order::Foreground)
+        .fixed_pos(screen.min)
+        .fade_in(false)
+        .movable(false)
+        .show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter().rect_filled(rect, Rounding::ZERO, scrim_col);
+            if resp.clicked() {
+                ui_state.pending_confirmation = None;
+            }
+        });
+
+    let modal_w = (screen.width() - SPACE_16 * 2.0).clamp(280.0, 440.0);
+    let inner_w = (modal_w - SPACE_16 * 2.0 - 2.0).max(240.0);
+    let title_str = pending.title();
+    let body_str = pending.body();
+    let title_h = ctx
+        .fonts(|f| {
+            f.layout(
+                title_str.clone(),
+                FontId::new(15.0, FontFamily::Proportional),
+                pal.text,
+                inner_w,
+            )
+            .size()
+            .y
+        });
+    let body_h = ctx
+        .fonts(|f| {
+            f.layout(
+                body_str.clone(),
+                FontId::new(12.0, FontFamily::Proportional),
+                pal.muted,
+                inner_w,
+            )
+            .size()
+            .y
+        });
+    let est_h = SPACE_16 * 2.0 + 2.0 + title_h + SPACE_8 + body_h + SPACE_4 + SPACE_8 * 2.0 + 28.0;
+    let dialog_pos = Pos2::new(
+        (screen.center().x - modal_w * 0.5).round(),
+        (screen.center().y - est_h * 0.5)
+            .max(screen.min.y + SPACE_16)
+            .round(),
+    );
+    let confirm_variant = if pending.is_destructive() {
+        ButtonVariant::DangerOutline
+    } else {
+        ButtonVariant::PrimaryOutline
+    };
+
+    egui::Area::new(egui::Id::new("confirm_modal_dialog"))
+        .order(Order::Tooltip)
+        .fixed_pos(dialog_pos)
+        .fade_in(false)
+        .movable(false)
+        .show(ctx, |ui| {
+            draw_crisp_frame(
+                ui,
+                pal.panel,
+                pal.border,
+                RADIUS_PANEL,
+                Margin::same(SPACE_16),
+                |ui| {
+                    ui.set_width(inner_w);
+                    ui.spacing_mut().item_spacing.y = SPACE_8;
+                    ui.label(RichText::new(title_str).size(15.0).color(pal.text));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(body_str).size(12.0).color(pal.muted),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(SPACE_4);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_8;
+                        if draw_z_button(
+                            ui,
+                            pending.confirm_label(),
+                            Vec2::new(112.0, 28.0),
+                            12.0,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            confirm_variant,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            ui_state.pending_confirmation = None;
+                            execute_confirmed_action(pending.clone(), ui_state, config, emit);
+                        }
+                        if draw_z_button(
+                            ui,
+                            "Cancel",
+                            Vec2::new(84.0, 28.0),
+                            12.0,
+                            RADIUS_CONTROL,
+                            true,
+                            false,
+                            ButtonVariant::SecondaryOutline,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            ui_state.pending_confirmation = None;
+                        }
+                    });
+                },
+            );
+        });
 }
 
 #[cfg(test)]
@@ -11976,354 +12327,6 @@ mod tests {
                             );
                             let _ = draw_filter_radio_chip(
                                 ui,
-                                ZoneRuleKind::PersonalFiles.label(),
-                                true,
-                                &pal,
-                            );
-                        },
-                    );
-                    outcomes[2] = draw_settings_form_grid_row_with_rect(
-                        ui,
-                        "test_r3",
-                        &mut s3,
-                        "hint3",
-                        "Pin folder",
-                        avail_w,
-                        Some(shared_sel_w),
-                        true,
-                        &pal,
-                        |ui| {
-                            for pk in [
-                                PinKind::App,
-                                PinKind::Group,
-                                PinKind::Personal,
-                                PinKind::Ignore,
-                            ] {
-                                let _ = draw_filter_radio_chip(
-                                    ui,
-                                    pk.short_label(),
-                                    pk == PinKind::App,
-                                    &pal,
-                                );
-                            }
-                        },
-                    );
-                });
-            },
-        );
-
-        assert!(outcomes[0].browse_rect.is_none());
-        let b1 = outcomes[1].browse_rect.expect("row 2 has Browse...");
-        let b2 = outcomes[2].browse_rect.expect("row 3 has Browse...");
-        assert!((b1.min.x - b2.min.x).abs() < 0.5);
-        assert!((b1.max.x - b2.max.x).abs() < 0.5);
-
-        for o in outcomes {
-            let r = o.action_rect;
-            assert!((r.min.x - outcomes[0].action_rect.min.x).abs() < 0.5, "left edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
-            assert!((r.max.x - outcomes[0].action_rect.max.x).abs() < 0.5, "right edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
-        }
-
-        // Wide viewport (1600x900) expands fluidly past the old 860px cap and renders Browse... twice
-        let (report, cfg) = make_synthetic_report_for_drives(4);
-        let mut st = StorageUiState::default();
-        st.active_view = ActiveView::Settings;
-        for section in [SettingsSection::ScanScope, SettingsSection::Rulebook] {
-            st.settings_section = section;
-            let out = ctx.run(
-                RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-                    ..Default::default()
-                },
-                |c| {
-                    draw_app_ui(
-                        c,
-                        &mut st,
-                        &cfg,
-                        Some(&report),
-                        false,
-                        None,
-                        r"C:\Windows",
-                        &mut |_| {},
-                    );
-                },
-            );
-            if section == SettingsSection::Rulebook {
-                fn count_text(shape: &egui::Shape, target: &str) -> usize {
-                    match shape {
-                        egui::Shape::Text(ts) => usize::from(ts.galley.text() == target),
-                        egui::Shape::Vec(vec) => {
-                            vec.iter().map(|s| count_text(s, target)).sum()
-                        }
-                        _ => 0,
-                    }
-                }
-                let browse_count: usize = out
-                    .shapes
-                    .iter()
-                    .map(|cs| count_text(&cs.shape, "Browse..."))
-                    .sum();
-                assert_eq!(browse_count, 2);
-            }
-            let max_x = out
-                .shapes
-                .iter()
-                .map(|cs| cs.shape.visual_bounding_rect().max.x)
-                .filter(|x| x.is_finite() && *x <= 1600.0)
-                .fold(0.0_f32, f32::max);
-            assert!(
-                max_x > 1400.0,
-                "expected fluid wide content pane > 1400px at 1600px viewport for {section:?}, got {max_x}"
-            );
-        }
-    }
-
-    #[test]
-    fn settings_rulebook_zone_chip_labels_share_baseline() {
-        fn collect_text_positions(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
-            match shape {
-                egui::Shape::Text(ts) => {
-                    out.push((ts.galley.text().to_owned(), ts.pos.y));
-                }
-                egui::Shape::Vec(vec) => {
-                    for s in vec {
-                        collect_text_positions(s, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let (report, cfg) = make_synthetic_report_for_drives(2);
-        let ctx = egui::Context::default();
-        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
-        let mut st = StorageUiState::default();
-        st.active_view = ActiveView::Settings;
-        st.settings_section = SettingsSection::Rulebook;
-
-        let out = ctx.run(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-                ..Default::default()
-            },
-            |c| {
-                draw_app_ui(
-                    c,
-                    &mut st,
-                    &cfg,
-                    Some(&report),
-                    false,
-                    None,
-                    r"C:\Windows",
-                    &mut |_| {},
-                );
-            },
-        );
-
-        let mut text_ys: Vec<(String, f32)> = Vec::new();
-        for cs in &out.shapes {
-            collect_text_positions(&cs.shape, &mut text_ys);
-        }
-
-        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
-            let names: Vec<&str> = cfg
-                .zones
-                .root_zones
-                .iter()
-                .filter(|rz| rz.kind == kind)
-                .map(|rz| rz.name.as_str())
-                .collect();
-            assert!(names.len() >= 2);
-            let ys: Vec<(&str, f32)> = names
-                .iter()
-                .map(|&name| {
-                    let y = text_ys
-                        .iter()
-                        .find(|(txt, _)| txt == name)
-                        .map(|(_, y)| *y)
-                        .unwrap_or_else(|| panic!("missing chip label {name}"));
-                    (name, y)
-                })
-                .collect();
-            let first_y = ys[0].1;
-            let row1: Vec<(&str, f32)> = ys
-                .iter()
-                .copied()
-                .filter(|(_, y)| (*y - first_y).abs() < 8.0)
-                .collect();
-            assert!(
-                row1.len() >= 2,
-                "expected >= 2 chips on first row of {kind:?}, got {row1:?}"
-            );
-            for (name, y) in &row1[1..] {
-                assert!(
-                    (*y - first_y).abs() < 0.5,
-                    "{kind:?} chip {name} y={y} differs from first chip {} y={first_y}",
-                    row1[0].0
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn settings_rulebook_windows_defaults_group_renders_without_remove_affordances() {
-        fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
-            match shape {
-                egui::Shape::Text(ts) => out.push(ts.galley.text().to_owned()),
-                egui::Shape::Vec(vec) => {
-                    for s in vec {
-                        collect_texts(s, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let (report, mut cfg) = make_synthetic_report_for_drives(2);
-        cfg.zones = ZoneRulebook {
-            root_zones: Vec::new(),
-            explicit_zones: Vec::new(),
-            pins: Vec::new(),
-        };
-        let ctx = egui::Context::default();
-        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
-        let mut st = StorageUiState::default();
-        st.active_view = ActiveView::Settings;
-        st.settings_section = SettingsSection::Rulebook;
-
-        let out = ctx.run(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
-                ..Default::default()
-            },
-            |c| {
-                draw_app_ui(
-                    c,
-                    &mut st,
-                    &cfg,
-                    Some(&report),
-                    false,
-                    None,
-                    r"C:\Windows",
-                    &mut |_| {},
-                );
-            },
-        );
-        let mut texts = Vec::new();
-        for cs in &out.shapes {
-            collect_texts(&cs.shape, &mut texts);
-        }
-        assert!(texts.iter().any(|t| t == "Windows defaults"));
-        for loc in BUILTIN_WINDOWS_DEFAULT_LOCATIONS {
-            assert!(
-                texts.iter().any(|t| t == loc.name),
-                "missing built-in default {}",
-                loc.name
-            );
-        }
-        assert!(
-            !texts.iter().any(|t| t == "Remove"),
-            "Windows defaults must render with zero Remove affordances: {texts:?}"
-        );
-
-        // User rule with the same name as a built-in default must not be deduplicated.
-        assert!(cfg.zones.add_root_zone("Users", ZoneRuleKind::PersonalFiles));
-        let out_dup = ctx.run(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
-                ..Default::default()
-            },
-            |c| {
-                draw_app_ui(
-                    c,
-                    &mut st,
-                    &cfg,
-                    Some(&report),
-                    false,
-                    None,
-                    r"C:\Windows",
-                    &mut |_| {},
-                );
-            },
-        );
-        let mut texts_dup = Vec::new();
-        for cs in &out_dup.shapes {
-            collect_texts(&cs.shape, &mut texts_dup);
-        }
-        let users_count = texts_dup.iter().filter(|t| t.as_str() == "Users").count();
-        assert_eq!(
-            users_count, 2,
-            "expected Users in both Windows defaults and user group, got {users_count}"
-        );
-    }
-
-    #[test]
-    fn fixture_6_pagination_counts_family_as_one_top_level_row() {
-        let mut report = make_synthetic_apps_report(50, 100);
-        // Add 4 same-publisher units forming 1 family -> 54 apps total, 51 top-level entries.
-        let fam_specs = [
-            ("reg:orb-browser", "Orb Browser", 900_000_000_u64, AppCategory::Browsers, None),
-            (
-                "sys:orb-runtime",
-                "Orb Browser Runtime",
-                400_000_000_u64,
-                AppCategory::SystemAndRuntimes,
-                Some(NoTouchCategory::SystemRuntime),
-            ),
-            ("reg:orb-sat1", "Orb Browser Helper", 5_000_000_u64, AppCategory::Utilities, None),
-            ("reg:orb-sat2", "Orb Browser Updater", 1_000_000_u64, AppCategory::Utilities, None),
-        ];
-        for (id, name, bytes, cat, nt) in fam_specs {
-            report.apps.push(AttributedApp {
-                id: id.into(),
-                display_name: name.into(),
-                publishers: vec!["Orb Systems Inc.".into()],
-                install_location: Some(format!(r"C:\Program Files\Orb\{id}")),
-                total_bytes: bytes,
-                previous_bytes: None,
-                growth: GrowthDelta::Changed(0),
-                per_drive_growth: Default::default(),
-                no_touch: nt,
-                bases: vec![AttributionBasis::InstallLocation],
-                items: vec![BreakdownItem {
-                    path: format!(r"C:\Program Files\Orb\{id}"),
-                    bytes,
-                    zone: Some(ZoneKind::Body),
-                    qualifier: None,
-                    basis: Some(AttributionBasis::InstallLocation),
-                    basis_detail: None,
-                    no_touch: nt,
-                    drive_letter: 'C',
-                }],
-                dependencies: vec![],
-                carved_out_apps: vec![],
-                display_icon: None,
-                icon_rgba: None,
-                category: cat,
-                category_basis: String::new(),
-            });
-        }
-
-        let ctx = egui::Context::default();
-        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
-        let pal = ThemePalette::for_mode(ThemeMode::Dark);
-        let mut st = StorageUiState::default();
-        ensure_report_and_filter_caches(&ctx, &mut st, &report, &pal, 'C', pal.theme_key);
-
-        let cf = st.cached_filtered.as_ref().unwrap();
-        assert_eq!(cf.visible_indices.len(), 54);
-        assert_eq!(cf.visible_entries.len(), 51);
-        assert_eq!(ledger_page_bounds(cf.visible_entries.len(), 0, LEDGER_PAGE_SIZE), (0, 2, 0, 50));
-        assert_eq!(ledger_page_bounds(cf.visible_entries.len(), 1, LEDGER_PAGE_SIZE), (1, 2, 50, 51));
-    }
-
-    #[test]
-    fn family_header_expanded_members_and_notouch_drawer_render_cleanly() {
-        let mut report = make_synthetic_apps_report(4, 100);
-        // Mixed-category family -> shared_category is None (header shows no category)
-        let fam_a = [
-            ("reg:zephyr-main", "Zephyr Browser", 250_000_000_u64, AppCategory::Browsers, None),
-            (
                 "sys:zephyr-rt",
                 "Zephyr Browser Runtime",
                 120_000_000_u64,
@@ -12400,5 +12403,221 @@ mod tests {
                 "NO-TOUCH member drawer inside expanded family should render and measure in {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn settings_remove_buttons_use_semantic_danger_red_across_themes() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            for preset in [
+                ThemePresetChoice::Blue,
+                ThemePresetChoice::Pink,
+                ThemePresetChoice::Green,
+                ThemePresetChoice::Red,
+            ] {
+                let pal = ThemePalette::from_config(mode, preset, default_custom_theme_rgb());
+                let subtle_rest =
+                    resolve_button_colors(ButtonVariant::DangerSubtle, true, false, false, false, &pal);
+                assert_eq!(subtle_rest.2, pal.status_red);
+                assert_eq!(subtle_rest.0, Color32::TRANSPARENT);
+
+                let subtle_hover =
+                    resolve_button_colors(ButtonVariant::DangerSubtle, true, false, true, false, &pal);
+                assert_eq!(subtle_hover.0, pal.pill_red_fill);
+                assert_eq!(subtle_hover.2, pal.status_red);
+
+                let outline_rest =
+                    resolve_button_colors(ButtonVariant::DangerOutline, true, false, false, false, &pal);
+                assert_eq!(outline_rest.0, pal.pill_red_fill);
+                assert_eq!(outline_rest.1, pal.status_red);
+                assert_eq!(outline_rest.2, pal.status_red);
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_modal_gates_remove_rescan_and_global_reset() {
+        fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(ts) => out.push(ts.galley.text().to_owned()),
+                egui::Shape::Vec(vec) => {
+                    for s in vec {
+                        collect_texts(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (report, cfg) = make_synthetic_report_for_drives(2);
+        assert!(!cfg.zones.explicit_zones.is_empty());
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+
+        // "Reset to defaults" is visible across all 3 Settings tabs
+        for section in SettingsSection::ALL {
+            st.settings_section = section;
+            let out = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1120.0, 800.0))),
+                    ..Default::default()
+                },
+                |c| {
+                    draw_app_ui(
+                        c,
+                        &mut st,
+                        &cfg,
+                        Some(&report),
+                        false,
+                        None,
+                        r"C:\Windows",
+                        &mut |_| {},
+                    );
+                },
+            );
+            let mut texts = Vec::new();
+            for cs in &out.shapes {
+                collect_texts(&cs.shape, &mut texts);
+            }
+            assert!(
+                texts.iter().any(|t| t == "Reset to defaults"),
+                "missing global Reset to defaults on {section:?}"
+            );
+        }
+
+        // Modal names the removed item, has Cancel + Confirm, and has NO "don't ask again"
+        st.pending_confirmation = Some(PendingConfirmation::RemoveExplicitZone {
+            index: 0,
+            path: r"D:\Media".to_owned(),
+        });
+        let mut emitted = Vec::new();
+        // Frame 1 runs egui::Area's initial sizing pass; frame 2 paints the visible modal.
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1120.0, 800.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |act| emitted.push(act),
+                );
+            },
+        );
+        let modal_out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1120.0, 800.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |act| emitted.push(act),
+                );
+            },
+        );
+        let mut modal_texts = Vec::new();
+        for cs in &modal_out.shapes {
+            collect_texts(&cs.shape, &mut modal_texts);
+        }
+        assert!(
+            modal_texts.iter().any(|t| t == "Remove explicit folder zone?"),
+            "missing modal title in {modal_texts:?}"
+        );
+        assert!(modal_texts.iter().any(|t| t.contains(r"D:\Media")));
+        assert!(modal_texts.iter().any(|t| t == "Cancel"));
+        assert!(modal_texts.iter().any(|t| t == "Remove"));
+        assert!(!modal_texts
+            .iter()
+            .any(|t| t.to_ascii_lowercase().contains("don't ask again")));
+        assert!(emitted.is_empty());
+
+        // Esc cancels modal without emitting actions
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1120.0, 800.0))),
+                events: vec![egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |act| emitted.push(act),
+                );
+            },
+        );
+        assert!(st.pending_confirmation.is_none());
+        assert!(emitted.is_empty());
+
+        // Confirm execution dispatches expected actions for Remove, Rescan, Rulebook Reset, and Global Reset
+        execute_confirmed_action(
+            PendingConfirmation::RemoveExplicitZone {
+                index: 0,
+                path: r"D:\Media".to_owned(),
+            },
+            &mut st,
+            &cfg,
+            &mut |act| emitted.push(act),
+        );
+        assert!(matches!(emitted.last(), Some(UiAction::SaveConfig(c)) if c.zones.explicit_zones.is_empty()));
+
+        execute_confirmed_action(
+            PendingConfirmation::ResetRulebookDefaults,
+            &mut st,
+            &cfg,
+            &mut |act| emitted.push(act),
+        );
+        assert!(matches!(emitted.last(), Some(UiAction::SaveConfig(c)) if c.zones == ZoneRulebook::default()));
+
+        execute_confirmed_action(
+            PendingConfirmation::RescanAll,
+            &mut st,
+            &cfg,
+            &mut |act| emitted.push(act),
+        );
+        assert!(matches!(emitted.last(), Some(UiAction::StartRescan)));
+
+        execute_confirmed_action(
+            PendingConfirmation::RescanDrive('D'),
+            &mut st,
+            &cfg,
+            &mut |act| emitted.push(act),
+        );
+        assert!(matches!(emitted.last(), Some(UiAction::StartDriveRescan('D'))));
+
+        st.new_container_name_input = "Temp".to_owned();
+        execute_confirmed_action(
+            PendingConfirmation::ResetAllSettings,
+            &mut st,
+            &cfg,
+            &mut |act| emitted.push(act),
+        );
+        assert!(st.new_container_name_input.is_empty());
+        assert!(matches!(emitted.last(), Some(UiAction::ResetAllSettings)));
     }
 }
