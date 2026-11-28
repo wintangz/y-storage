@@ -1,19 +1,19 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `e317234` (`settings-layout`)
-- **Verification Report**: `specs/032-settings-layout/verification.md`
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `30493754C889DDAA256B467099A88E45D2306EDF2950901CE134F2353B7E9FBA`)
+- **Branch / Latest Code Commit**: `main` at `6f8e6d8` (`app-family-rollup`)
+- **Verification Report**: `specs/033-app-family-rollup/verification.md`
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `7B035A5C83D807F6F2806EC3CB04E5331DC54AB585336110BD9E18DFE8F58F2F`)
 
 ## Tests
-- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **47 / 47 passed**, **0 failed**, **0 warnings**
-- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`128` prior workspace total + `2` new = `130` total)
+- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **55 / 55 passed**, **0 failed**, **0 warnings**
+- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`130` prior workspace total + `8` new = `138` total)
 
 ## Perf (`--bench-perf`, 1275x900, 120 DPI, unchanged since `0d7a280`)
 - **Scroll collapsed / expanded / resize**: `6.93 ms` / `8.02 ms` / `8.95 ms` (`0.0%` idle CPU)
 
-## Standing Live-Scan Invariants (`--ephemeral --all-drives`, unchanged since `0d7a280`)
-- **`EA SPORTS™ FIFA 23`** / **`Store: MSTeams`**: `107,199,710,486 B` / `279,428,566 B` (`0 B` delta)
-- **Drive Reconciliation**: `diff = 0 B` on all drives (`C:`, `D:`, `Y:`, `Z:`); `296` apps (`0` misattributions)
+## Live Rescan (`--ephemeral --all-drives`)
+- **Family Rollup (`app-family-rollup`)**: `296` apps -> `229` top-level entries (`23` families); `sum_entries == sum_apps` (`592,447,800,423 B`, `byte_diff = 0 B`); **`Microsoft Edge`** family `9,258,259,238 B` (`6` members, `stem · dependency`, every member unit byte-identical to scan)
+- **Standing Invariants (attribution untouched since `0d7a280`)**: `EA SPORTS™ FIFA 23` / `Store: MSTeams` `0 B` delta; `diff = 0 B` on all drives (`C:`, `D:`, `Y:`, `Z:`)
 
 ## Next Queued Rounds
-1. `app-family-rollup`
+- None queued.
