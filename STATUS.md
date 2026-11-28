@@ -1,12 +1,12 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `f9fbe8d` (`settings-layout` top tab row)
+- **Branch / Latest Code Commit**: `main` at `c72956b` (`settings-layout` chip label baseline)
 - **Verification Report**: `specs/033-app-family-rollup/verification.md` (+ `specs/032-settings-layout/verification.md`)
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `DB3DC7E9D9560E142DEEFC3EDD5721D9D215D9240FADF5267AED24B7B94BB8A9`)
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `AFC8BF06DC3F24D5755237A14602B7A50A0FDBDCA475D687E9FDF737E35F94F5`)
 
 ## Tests
-- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **56 / 56 passed**, **0 failed**, **0 warnings**
-- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`138` prior workspace total + `1` new = `139` total)
+- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **57 / 57 passed**, **0 failed**, **0 warnings**
+- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`139` prior workspace total + `1` new = `140` total)
 
 ## Perf (`--bench-perf`, 1275x900, 120 DPI, unchanged since `0d7a280`)
 - **Scroll collapsed / expanded / resize**: `6.93 ms` / `8.02 ms` / `8.95 ms` (`0.0%` idle CPU)
