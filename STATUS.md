@@ -1,8 +1,8 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `0dc9f71` (`settings-layout` delta fix)
+- **Branch / Latest Code Commit**: `main` at `f9fbe8d` (`settings-layout` top tab row)
 - **Verification Report**: `specs/033-app-family-rollup/verification.md` (+ `specs/032-settings-layout/verification.md`)
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `9ACA7AC1F6B868C7892F3CC2B10FF894718C42D6BC2FDC21FBF285CD0BDBFB8F`)
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `DB3DC7E9D9560E142DEEFC3EDD5721D9D215D9240FADF5267AED24B7B94BB8A9`)
 
 ## Tests
 - **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **56 / 56 passed**, **0 failed**, **0 warnings**
