@@ -405,6 +405,110 @@ fn looks_like_uninstaller_or_setup(path: &str) -> bool {
         || leaf.starts_with("install")
 }
 
+fn is_skipped_helper_exe_stem(stem_lower: &str) -> bool {
+    let compact: String = stem_lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    const SKIP_TOKENS: &[&str] = &[
+        "setup",
+        "uninstall",
+        "unins",
+        "launcher",
+        "changename",
+        "crash",
+        "report",
+        "redist",
+        "vcredist",
+        "dxsetup",
+        "update",
+        "helper",
+        "anticheat",
+        "createdump",
+    ];
+    SKIP_TOKENS
+        .iter()
+        .any(|tok| stem_lower.contains(tok) || compact.contains(tok))
+}
+
+fn binaries_path_rank(rel_path: &Path) -> u8 {
+    let mut has_binaries = false;
+    let mut has_bin = false;
+    let mut has_win64 = false;
+    let mut has_win32 = false;
+    if let Some(parent) = rel_path.parent() {
+        for comp in parent.components() {
+            let s = comp.as_os_str().to_string_lossy().to_ascii_lowercase();
+            match s.as_str() {
+                "binaries" => has_binaries = true,
+                "bin" => has_bin = true,
+                "win64" | "x64" => has_win64 = true,
+                "win32" | "x86" => has_win32 = true,
+                _ => {}
+            }
+        }
+    }
+    if has_binaries && has_win64 {
+        3
+    } else if has_binaries && has_win32 {
+        2
+    } else if has_binaries || has_bin || has_win64 {
+        1
+    } else {
+        0
+    }
+}
+
+fn identity_match_score(
+    stem_lower: &str,
+    app_tok: &str,
+    folder_tok: &str,
+    identity_words: &[String],
+) -> u32 {
+    let stem_tok = normalize_app_token(stem_lower);
+    let core_words: Vec<&str> = stem_tok
+        .split_whitespace()
+        .filter(|w| {
+            !matches!(
+                *w,
+                "win64" | "win32" | "x64" | "x86" | "shipping" | "retail" | "dx11" | "dx12"
+            )
+        })
+        .collect();
+    let core_stem = if core_words.is_empty() {
+        stem_tok.clone()
+    } else {
+        core_words.join(" ")
+    };
+
+    let compact_core = core_stem.replace(' ', "");
+    let compact_app = app_tok.replace(' ', "");
+    let compact_folder = folder_tok.replace(' ', "");
+
+    if (!app_tok.is_empty() && (core_stem == app_tok || compact_core == compact_app))
+        || (!folder_tok.is_empty() && (core_stem == folder_tok || compact_core == compact_folder))
+    {
+        return 1000;
+    }
+
+    let matched_words = identity_words
+        .iter()
+        .filter(|w| stem_tok.contains(w.as_str()) || compact_core.contains(w.as_str()))
+        .count() as u32;
+
+    if compact_core.len() >= 4
+        && ((!compact_app.is_empty()
+            && (compact_app.contains(&compact_core) || compact_core.contains(&compact_app)))
+            || (!compact_folder.is_empty()
+                && (compact_folder.contains(&compact_core)
+                    || compact_core.contains(&compact_folder))))
+    {
+        return 500 + matched_words * 50;
+    }
+
+    matched_words * 50
+}
+
 fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> {
     let root_path = Path::new(root);
     if !root_path.is_dir() {
@@ -412,19 +516,28 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
     }
 
     let app_tok = normalize_app_token(display_name);
-    let app_words: Vec<&str> = app_tok
-        .split_whitespace()
-        .filter(|w| w.len() >= 2)
-        .collect();
+    let folder_tok = root_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(normalize_app_token)
+        .unwrap_or_default();
+    let mut identity_words: Vec<String> = Vec::new();
+    for src in [app_tok.as_str(), folder_tok.as_str()] {
+        for w in src.split_whitespace() {
+            if w.len() >= 2 && !identity_words.iter().any(|existing| existing == w) {
+                identity_words.push(w.to_string());
+            }
+        }
+    }
 
-    // BFS up to depth 4 (capped at 64 dirs) so launchers/UE games (`Portal\Binaries\Win64\...`)
-    // and versioned browser runtimes (`Application\<ver>\msedgewebview2.exe`) resolve cleanly.
+    // BFS across the app folder tree (depth < 12, capped at 2048 dirs) so deeply nested
+    // principal binaries such as `<App>\Engine\Binaries\Win64\<App>-Win64-Shipping.exe` are found.
     let mut dirs_to_check: Vec<PathBuf> = Vec::new();
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root_path.to_path_buf(), 0));
     while let Some((dir, depth)) = queue.pop_front() {
         dirs_to_check.push(dir.clone());
-        if dirs_to_check.len() >= 64 || depth >= 4 {
+        if dirs_to_check.len() >= 2048 || depth >= 12 {
             continue;
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -442,6 +555,8 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
                             | "shaders"
                             | "__installer"
                             | "redist"
+                            | "_commonredist"
+                            | "commonredist"
                             | "support"
                             | "directx"
                             | "crashdumps"
@@ -454,6 +569,8 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
                             | "node_modules"
                             | "saved"
                             | "intermediate"
+                            | ".git"
+                            | "__pycache__"
                     ) {
                         continue;
                     }
@@ -461,13 +578,13 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
                 }
             }
             children.sort();
-            for c in children.into_iter().take(20) {
+            for c in children {
                 queue.push_back((c, depth + 1));
             }
         }
     }
 
-    let mut scored: Vec<(i32, u64, String)> = Vec::new();
+    let mut scored: Vec<(u32, u64, u8, String)> = Vec::new();
     for dir in dirs_to_check {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for ent in entries.flatten() {
@@ -485,68 +602,34 @@ fn find_best_exes_in_install_dir(root: &str, display_name: &str) -> Vec<String> 
                 continue;
             }
             let path_str = normalize_windows_path(&p.to_string_lossy());
+            if is_generic_shell_binary(&path_str) {
+                continue;
+            }
             let stem_lower = p
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if stem_lower.starts_with("unins")
-                || stem_lower.contains("uninstall")
-                || stem_lower.contains("crashhandler")
-                || stem_lower.contains("createdump")
-                || stem_lower.starts_with("vc_redist")
-                || stem_lower.starts_with("vcredist")
-                || stem_lower.starts_with("dxsetup")
-                || stem_lower.contains("anticheat")
-            {
+            if is_skipped_helper_exe_stem(&stem_lower) {
                 continue;
             }
 
             let meta_bytes = ent.metadata().map(|m| m.len()).unwrap_or(0);
-            let stem_tok = normalize_app_token(&stem_lower);
-            let mut score = 0i32;
-            if ext == "exe" {
-                score += 10;
-            } else {
-                score += 12; // Explicit app .ico in install root is usually crisp.
-            }
-            if !app_tok.is_empty() && stem_tok == app_tok {
-                score += 120;
-            } else {
-                let compact_app = app_tok.replace(' ', "");
-                let compact_stem = stem_tok.replace(' ', "");
-                if !compact_app.is_empty()
-                    && (compact_stem == compact_app || compact_app.contains(&compact_stem))
-                    && compact_stem.len() >= 3
-                {
-                    score += 80;
-                }
-                for w in &app_words {
-                    if stem_tok.contains(w) {
-                        score += 25;
-                    }
-                }
-            }
-            if stem_lower.contains("update")
-                || stem_lower.contains("setup")
-                || stem_lower.contains("helper")
-                || stem_lower.contains("service")
-                || stem_lower.contains("reporter")
-            {
-                score -= 35;
-            }
-            if dir == root_path {
-                score += 15;
-            }
-            if meta_bytes >= 120_000 {
-                score += 10;
-            }
-            scored.push((score, meta_bytes, path_str));
+            let name_score =
+                identity_match_score(&stem_lower, &app_tok, &folder_tok, &identity_words);
+            let rel_path = p.strip_prefix(root_path).unwrap_or(&p);
+            let path_rank = binaries_path_rank(rel_path);
+            scored.push((name_score, meta_bytes, path_rank, path_str));
         }
     }
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
-    scored.into_iter().take(4).map(|x| x.2).collect()
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    scored.into_iter().take(4).map(|x| x.3).collect()
 }
 
 fn extract_png_via_gdiplus(path: &str) -> Option<(usize, usize, Vec<u8>)> {
@@ -1199,5 +1282,106 @@ mod tests {
         assert_eq!(decoded.len(), (APP_ICON_PX as usize) * (APP_ICON_PX as usize) * 4);
         assert!(decoded.chunks_exact(4).any(|px| px[3] >= 24));
         assert!(report.apps[0].install_location.is_none());
+    }
+
+    fn write_dummy_file(path: &Path, size_bytes: usize) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, vec![0u8; size_bytes]).unwrap();
+    }
+
+    #[test]
+    fn folder_fallback_ranks_nested_principal_exe_over_top_level_helpers() {
+        let root = std::env::temp_dir().join(format!(
+            "y_storage_icon_rank_principal_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let app_dir = root.join("SparkingZERO");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        write_dummy_file(&app_dir.join("SparkingZERO_Launcher.exe"), 786 * 1024);
+        write_dummy_file(&app_dir.join("Change Name.exe"), 35 * 1024);
+        write_dummy_file(&app_dir.join("CrashReportClient.exe"), 500 * 1024);
+        write_dummy_file(&app_dir.join("vcredist_x64.exe"), 1024 * 1024);
+        write_dummy_file(&app_dir.join("misc_tool.exe"), 50 * 1024);
+        let principal = app_dir
+            .join("SparkingZERO")
+            .join("Engine")
+            .join("Binaries")
+            .join("Win64")
+            .join("SparkingZERO-Win64-Shipping.exe");
+        write_dummy_file(&principal, 2 * 1024 * 1024);
+
+        let ranked = find_best_exes_in_install_dir(
+            &app_dir.to_string_lossy(),
+            "DRAGON BALL: Sparking! ZERO",
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(!ranked.is_empty(), "expected at least one exe candidate");
+        assert_eq!(
+            ranked[0],
+            normalize_windows_path(&principal.to_string_lossy()),
+            "nested principal exe should win over top-level launcher and helpers; ranked={ranked:?}"
+        );
+        for candidate in &ranked {
+            let lower = candidate.to_ascii_lowercase();
+            assert!(
+                !lower.contains("launcher")
+                    && !lower.contains("change name")
+                    && !lower.contains("crashreport")
+                    && !lower.contains("vcredist"),
+                "helper binary should have been hard-skipped: {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_fallback_prefers_larger_size_and_binaries_win64_on_name_tie() {
+        let root = std::env::temp_dir().join(format!(
+            "y_storage_icon_rank_tiebreak_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let size_tie_dir = root.join("AlphaGame");
+        let small_top = size_tie_dir.join("AlphaGame.exe");
+        let large_nested = size_tie_dir.join("Game").join("AlphaGame.exe");
+        write_dummy_file(&small_top, 32 * 1024);
+        write_dummy_file(&large_nested, 1024 * 1024);
+
+        let size_ranked = find_best_exes_in_install_dir(
+            &size_tie_dir.to_string_lossy(),
+            "AlphaGame",
+        );
+        assert_eq!(
+            size_ranked.first().map(String::as_str),
+            Some(normalize_windows_path(&large_nested.to_string_lossy()).as_str()),
+            "larger exe should beat smaller top-level exe on equal name match"
+        );
+
+        let path_tie_dir = root.join("BetaGame");
+        let top_equal = path_tie_dir.join("BetaGame.exe");
+        let win64_equal = path_tie_dir
+            .join("Beta")
+            .join("Binaries")
+            .join("Win64")
+            .join("BetaGame.exe");
+        write_dummy_file(&top_equal, 512 * 1024);
+        write_dummy_file(&win64_equal, 512 * 1024);
+
+        let path_ranked = find_best_exes_in_install_dir(
+            &path_tie_dir.to_string_lossy(),
+            "BetaGame",
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            path_ranked.first().map(String::as_str),
+            Some(normalize_windows_path(&win64_equal.to_string_lossy()).as_str()),
+            "Binaries\\Win64 exe should beat top-level exe on equal name match and size"
+        );
     }
 }
