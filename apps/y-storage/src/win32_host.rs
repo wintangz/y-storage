@@ -48,12 +48,13 @@ use y_platform_windows::scanner::{
 use crate::sw_painter::{PaintStats, SoftwarePainter};
 use crate::theme::{CLEAR_BG_DARK_RGB, CLEAR_BG_LIGHT_RGB};
 use crate::ui::{
-    StorageUiState, UiAction, configure_fonts_and_theme, configure_fonts_and_theme_with,
-    draw_app_ui_with_drive_busy,
+    RulebookBrowseTarget, StorageUiState, UiAction, configure_fonts_and_theme,
+    configure_fonts_and_theme_with, draw_app_ui_with_drive_busy,
 };
 
 const WM_APP_SCAN_UPDATE: u32 = 0x8000 + 10;
 const WM_APP_FOLLOWUP_PAINT: u32 = 0x8000 + 11;
+const WM_APP_BROWSE_FOLDER: u32 = 0x8000 + 12;
 const TIMER_REPAINT_ID: usize = 9000;
 const TIMER_BENCH_DONE_ID: usize = 9001;
 const TIMER_SAVE_CONFIG_ID: usize = 9002;
@@ -197,6 +198,7 @@ struct WindowHostState {
     hover_cursor_icon: egui::CursorIcon,
     repaint_timer_active: bool,
     config_save_dirty: bool,
+    pending_browse_target: Option<RulebookBrowseTarget>,
     smoke_mode: bool,
     start_time: Instant,
     bench_recording: bool,
@@ -640,6 +642,7 @@ pub fn run_gui_app(
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         config_save_dirty: false,
+        pending_browse_target: None,
         smoke_mode: smoke_ms.is_some(),
         start_time: Instant::now(),
         bench_recording: false,
@@ -840,6 +843,32 @@ unsafe extern "system" fn wnd_proc(
             let st = unsafe { &mut *state_ptr };
             st.needs_redraw = true;
             unsafe { InvalidateRect(hwnd, null(), 0) };
+            0
+        }
+        WM_APP_BROWSE_FOLDER => {
+            let target = {
+                let st = unsafe { &mut *state_ptr };
+                st.pending_browse_target.take()
+            };
+            if let Some(target) = target {
+                let title = match target {
+                    RulebookBrowseTarget::ExplicitPath => "Select folder for explicit zone rule",
+                    RulebookBrowseTarget::ManualPin => "Select folder to pin",
+                };
+                if let Some(picked) = pick_folder_dialog(hwnd, title) {
+                    let st = unsafe { &mut *state_ptr };
+                    match target {
+                        RulebookBrowseTarget::ExplicitPath => {
+                            st.ui_state.new_container_path_input = picked;
+                        }
+                        RulebookBrowseTarget::ManualPin => {
+                            st.ui_state.new_pin_path_input = picked;
+                        }
+                    }
+                    st.needs_redraw = true;
+                    unsafe { InvalidateRect(hwnd, null(), 0) };
+                }
+            }
             0
         }
         WM_TIMER => {
@@ -1107,6 +1136,12 @@ unsafe extern "system" fn wnd_proc(
                         UiAction::OpenWebSearch(url) => {
                             if !st.smoke_mode {
                                 open_external_search_url(hwnd, &url);
+                            }
+                        }
+                        UiAction::BrowseRulebookFolder(target) => {
+                            if !st.smoke_mode {
+                                st.pending_browse_target = Some(target);
+                                unsafe { PostMessageW(hwnd, WM_APP_BROWSE_FOLDER, 0, 0) };
                             }
                         }
                     }
@@ -1578,6 +1613,7 @@ pub fn run_perf_benchmark(out_path: &std::path::Path) -> Result<(), String> {
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         config_save_dirty: false,
+        pending_browse_target: None,
         smoke_mode: true,
         start_time: Instant::now(),
         bench_recording: false,
@@ -2002,6 +2038,7 @@ pub fn run_titlebar_capture(
         hover_cursor_icon: egui::CursorIcon::Default,
         repaint_timer_active: false,
         config_save_dirty: false,
+        pending_browse_target: None,
         smoke_mode: true,
         start_time: Instant::now(),
         bench_recording: false,
@@ -2133,6 +2170,109 @@ fn launch_explorer_select(path: &str) {
     let _ = std::process::Command::new("explorer.exe")
         .raw_arg(raw_arg)
         .spawn();
+}
+
+fn pick_folder_dialog(hwnd: HWND, title: &str) -> Option<String> {
+    use core::ffi::c_void;
+    use windows_sys::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS, FileOpenDialog, SIGDN_FILESYSPATH,
+    };
+    use windows_sys::core::{GUID, HRESULT};
+
+    const IID_IFILE_OPEN_DIALOG: GUID = GUID::from_u128(0xd57c7288_d4ad_4768_be02_9d969532d960);
+
+    #[inline]
+    unsafe fn vtbl_slot(obj: *mut c_void, idx: usize) -> *const c_void {
+        let vtbl = unsafe { *(obj as *const *const *const c_void) };
+        unsafe { *vtbl.add(idx) }
+    }
+
+    #[inline]
+    unsafe fn com_release(obj: *mut c_void) {
+        if !obj.is_null() {
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 =
+                unsafe { std::mem::transmute(vtbl_slot(obj, 2)) };
+            unsafe { release(obj) };
+        }
+    }
+
+    unsafe {
+        let co_hr = CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+        // S_OK (0) or S_FALSE (1) means this call owns a CoUninitialize() pair.
+        let need_uninit = co_hr == 0 || co_hr == 1;
+        if co_hr < 0 && co_hr != -2147417850 {
+            return None;
+        }
+
+        let mut dialog: *mut c_void = null_mut();
+        let hr = CoCreateInstance(
+            &FileOpenDialog,
+            null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IFILE_OPEN_DIALOG,
+            &mut dialog,
+        );
+        if hr < 0 || dialog.is_null() {
+            if need_uninit {
+                CoUninitialize();
+            }
+            return None;
+        }
+
+        let get_options: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT =
+            std::mem::transmute(vtbl_slot(dialog, 10));
+        let set_options: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT =
+            std::mem::transmute(vtbl_slot(dialog, 9));
+        let set_title: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT =
+            std::mem::transmute(vtbl_slot(dialog, 17));
+        let show: unsafe extern "system" fn(*mut c_void, HWND) -> HRESULT =
+            std::mem::transmute(vtbl_slot(dialog, 3));
+        let get_result: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
+            std::mem::transmute(vtbl_slot(dialog, 20));
+
+        let mut opts: u32 = 0;
+        if get_options(dialog, &mut opts) >= 0 {
+            let _ = set_options(
+                dialog,
+                opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR,
+            );
+        }
+        let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = set_title(dialog, title_w.as_ptr());
+
+        let mut picked: Option<String> = None;
+        if show(dialog, hwnd) >= 0 {
+            let mut item: *mut c_void = null_mut();
+            if get_result(dialog, &mut item) >= 0 && !item.is_null() {
+                let get_display_name: unsafe extern "system" fn(
+                    *mut c_void,
+                    i32,
+                    *mut *mut u16,
+                ) -> HRESULT = std::mem::transmute(vtbl_slot(item, 5));
+                let mut psz: *mut u16 = null_mut();
+                if get_display_name(item, SIGDN_FILESYSPATH, &mut psz) >= 0 && !psz.is_null() {
+                    let mut len = 0usize;
+                    while *psz.add(len) != 0 {
+                        len += 1;
+                    }
+                    picked = Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+                        psz, len,
+                    )));
+                    CoTaskMemFree(psz as *const c_void);
+                }
+                com_release(item);
+            }
+        }
+        com_release(dialog);
+        if need_uninit {
+            CoUninitialize();
+        }
+        picked
+    }
 }
 
 fn open_external_search_url(hwnd: HWND, url: &str) {

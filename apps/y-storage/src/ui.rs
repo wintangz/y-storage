@@ -68,6 +68,7 @@ const COLLAPSED_ROW_OUTER_H: f32 = APP_ROW_H + SPACE_4 * 2.0;
 const SETTINGS_TWO_COL_MIN_W: f32 = 560.0;
 const SETTINGS_POD_MIN_W: f32 = 320.0;
 const FORM_GRID_ACTION_W: f32 = 112.0;
+const FORM_GRID_BROWSE_W: f32 = 76.0;
 const FORM_GRID_ROW_H: f32 = 26.0;
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 const SEGOE_UI_SEMIBOLD_PATH: &str = r"C:\Windows\Fonts\seguisb.ttf";
@@ -101,6 +102,12 @@ impl SettingsSection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulebookBrowseTarget {
+    ExplicitPath,
+    ManualPin,
+}
+
 #[derive(Debug, Clone)]
 pub enum UiAction {
     StartRescan,
@@ -112,6 +119,7 @@ pub enum UiAction {
         custom_rgb: [u8; 3],
     },
     SaveConfig(AppConfig),
+    BrowseRulebookFolder(RulebookBrowseTarget),
     UpdateListView {
         sort_mode: AppSortMode,
         sort_direction: SortDirection,
@@ -8726,6 +8734,92 @@ fn compute_settings_form_grid(avail_w: f32, selector_w: Option<f32>) -> Settings
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+struct FormGridRowOutcome {
+    action_clicked: bool,
+    browse_clicked: bool,
+    action_rect: Rect,
+    browse_rect: Option<Rect>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_form_grid_input_cell(
+    ui: &mut egui::Ui,
+    input_rect: Rect,
+    id_salt: impl std::hash::Hash,
+    text: &mut String,
+    hint: &str,
+    has_browse: bool,
+    pal: &ThemePalette,
+) -> (bool, Option<Rect>) {
+    if !has_browse {
+        let mut input_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(input_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        draw_crisp_text_input(
+            &mut input_ui,
+            id_salt,
+            text,
+            input_rect.width(),
+            hint,
+            pal.input_bg,
+            pal,
+        );
+        return (false, None);
+    }
+
+    let text_w = (input_rect.width() - FORM_GRID_BROWSE_W - SPACE_4).max(80.0);
+    let text_rect = Rect::from_min_max(
+        input_rect.min,
+        Pos2::new(
+            (input_rect.min.x + text_w).min(input_rect.max.x),
+            input_rect.max.y,
+        ),
+    );
+    let mut text_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    draw_crisp_text_input(
+        &mut text_ui,
+        id_salt,
+        text,
+        text_w,
+        hint,
+        pal.input_bg,
+        pal,
+    );
+
+    let browse_rect = Rect::from_min_max(
+        Pos2::new(
+            (input_rect.max.x - FORM_GRID_BROWSE_W).max(text_rect.max.x),
+            input_rect.min.y,
+        ),
+        input_rect.max,
+    );
+    let mut browse_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(browse_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let browse_resp = draw_z_button(
+        &mut browse_ui,
+        "Browse...",
+        Vec2::new(FORM_GRID_BROWSE_W, FORM_GRID_ROW_H),
+        11.5,
+        RADIUS_CONTROL,
+        true,
+        false,
+        ButtonVariant::SecondaryOutline,
+        pal,
+    );
+    (browse_resp.clicked(), Some(browse_resp.rect))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_settings_form_grid_row_with_rect(
     ui: &mut egui::Ui,
@@ -8735,16 +8829,24 @@ fn draw_settings_form_grid_row_with_rect(
     action_label: &str,
     avail_w: f32,
     selector_w: Option<f32>,
+    has_browse: bool,
     pal: &ThemePalette,
     mut selector_fn: impl FnMut(&mut egui::Ui),
-) -> (bool, Rect) {
+) -> FormGridRowOutcome {
     let grid = compute_settings_form_grid(avail_w, selector_w);
-    let mut clicked = false;
+    let mut action_clicked = false;
+    let mut browse_clicked = false;
     let mut action_rect = Rect::NOTHING;
+    let mut browse_rect = None;
     if grid.stacked {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = SPACE_4;
-            draw_crisp_text_input(ui, id_salt, text, grid.input_w, hint, pal.input_bg, pal);
+            let (input_rect, _) =
+                ui.allocate_exact_size(Vec2::new(grid.input_w, FORM_GRID_ROW_H), Sense::hover());
+            let (bc, br) =
+                draw_form_grid_input_cell(ui, input_rect, id_salt, text, hint, has_browse, pal);
+            browse_clicked = bc;
+            browse_rect = br;
             draw_split_row(
                 ui,
                 FORM_GRID_ROW_H,
@@ -8768,7 +8870,7 @@ fn draw_settings_form_grid_row_with_rect(
                     );
                     action_rect = resp.rect;
                     if resp.clicked() {
-                        clicked = true;
+                        action_clicked = true;
                     }
                 },
             );
@@ -8783,20 +8885,10 @@ fn draw_settings_form_grid_row_with_rect(
                 row_rect.max.y,
             ),
         );
-        let mut input_ui = ui.new_child(
-            UiBuilder::new()
-                .max_rect(input_rect)
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        draw_crisp_text_input(
-            &mut input_ui,
-            id_salt,
-            text,
-            grid.input_w,
-            hint,
-            pal.input_bg,
-            pal,
-        );
+        let (bc, br) =
+            draw_form_grid_input_cell(ui, input_rect, id_salt, text, hint, has_browse, pal);
+        browse_clicked = bc;
+        browse_rect = br;
 
         if selector_w.is_some() {
             let sel_min_x = (input_rect.max.x + SPACE_8).min(row_rect.max.x);
@@ -8836,10 +8928,15 @@ fn draw_settings_form_grid_row_with_rect(
         );
         action_rect = resp.rect;
         if resp.clicked() {
-            clicked = true;
+            action_clicked = true;
         }
     }
-    (clicked, action_rect)
+    FormGridRowOutcome {
+        action_clicked,
+        browse_clicked,
+        action_rect,
+        browse_rect,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8851,10 +8948,11 @@ fn draw_settings_form_grid_row(
     action_label: &str,
     avail_w: f32,
     selector_w: Option<f32>,
+    has_browse: bool,
     pal: &ThemePalette,
     selector_fn: impl FnMut(&mut egui::Ui),
-) -> bool {
-    draw_settings_form_grid_row_with_rect(
+) -> (bool, bool) {
+    let out = draw_settings_form_grid_row_with_rect(
         ui,
         id_salt,
         text,
@@ -8862,10 +8960,11 @@ fn draw_settings_form_grid_row(
         action_label,
         avail_w,
         selector_w,
+        has_browse,
         pal,
         selector_fn,
-    )
-    .0
+    );
+    (out.action_clicked, out.browse_clicked)
 }
 
 fn settings_drive_pod_cols(target_count: usize, pane_inner_w: f32) -> usize {
@@ -9323,9 +9422,12 @@ fn draw_scan_scope_section(
                                 "Add exclusion",
                                 inner_card_w,
                                 None,
+                                false,
                                 pal,
                                 |_| {},
-                            ) {
+                            )
+                            .0
+                            {
                                 let trimmed = input.trim().to_string();
                                 if !trimmed.is_empty()
                                     && !target
@@ -9468,6 +9570,7 @@ fn draw_rulebook_builtin_chip(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_rulebook_section(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
@@ -9476,6 +9579,7 @@ fn draw_rulebook_section(
     pane_inner_w: f32,
     pal: &ThemePalette,
     changed: &mut bool,
+    emit: &mut dyn FnMut(UiAction),
 ) -> Rect {
     let sys_drive = path_drive_letter(system_windows_dir).unwrap_or('C');
     let neutral_pin_style = ChipStyle {
@@ -9787,6 +9891,7 @@ fn draw_rulebook_section(
                 "Add root zone",
                 inner_w,
                 Some(shared_selector_w),
+                false,
                 pal,
                 |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
@@ -9796,7 +9901,9 @@ fn draw_rulebook_section(
                         }
                     }
                 },
-            ) {
+            )
+            .0
+            {
                 let candidate = ui_state.new_container_name_input.clone();
                 if draft
                     .zones
@@ -9807,7 +9914,7 @@ fn draw_rulebook_section(
                 }
             }
             ui.add_space(SPACE_4);
-            if draw_settings_form_grid_row(
+            let (add_path_clicked, browse_path_clicked) = draw_settings_form_grid_row(
                 ui,
                 "zone_path_input",
                 &mut ui_state.new_container_path_input,
@@ -9815,6 +9922,7 @@ fn draw_rulebook_section(
                 "Add path zone",
                 inner_w,
                 Some(shared_selector_w),
+                true,
                 pal,
                 |ui| {
                     for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
@@ -9824,7 +9932,13 @@ fn draw_rulebook_section(
                         }
                     }
                 },
-            ) {
+            );
+            if browse_path_clicked {
+                emit(UiAction::BrowseRulebookFolder(
+                    RulebookBrowseTarget::ExplicitPath,
+                ));
+            }
+            if add_path_clicked {
                 let candidate = ui_state.new_container_path_input.clone();
                 if draft
                     .zones
@@ -9835,7 +9949,7 @@ fn draw_rulebook_section(
                 }
             }
             ui.add_space(SPACE_4);
-            if draw_settings_form_grid_row(
+            let (pin_clicked, browse_pin_clicked) = draw_settings_form_grid_row(
                 ui,
                 "zone_pin_input",
                 &mut ui_state.new_pin_path_input,
@@ -9843,6 +9957,7 @@ fn draw_rulebook_section(
                 "Pin folder",
                 inner_w,
                 Some(shared_selector_w),
+                true,
                 pal,
                 |ui| {
                     for pk in [
@@ -9857,7 +9972,13 @@ fn draw_rulebook_section(
                         }
                     }
                 },
-            ) {
+            );
+            if browse_pin_clicked {
+                emit(UiAction::BrowseRulebookFolder(
+                    RulebookBrowseTarget::ManualPin,
+                ));
+            }
+            if pin_clicked {
                 let candidate = ui_state.new_pin_path_input.clone();
                 if draft.zones.set_pin(&candidate, ui_state.new_pin_kind) {
                     ui_state.new_pin_path_input.clear();
@@ -9982,6 +10103,7 @@ fn draw_settings_view(
                         pane_inner_w,
                         pal,
                         &mut changed,
+                        emit,
                     );
                 }
             }
@@ -11771,7 +11893,12 @@ mod tests {
         let mut s1 = String::new();
         let mut s2 = String::new();
         let mut s3 = String::new();
-        let mut rects = [Rect::NOTHING; 3];
+        let mut outcomes = [FormGridRowOutcome {
+            action_clicked: false,
+            browse_clicked: false,
+            action_rect: Rect::NOTHING,
+            browse_rect: None,
+        }; 3];
 
         let _ = ctx.run(
             RawInput {
@@ -11805,7 +11932,7 @@ mod tests {
                         "4-option pin selector ({pin_sel_w}) should govern shared column width ({zone_sel_w})"
                     );
 
-                    rects[0] = draw_settings_form_grid_row_with_rect(
+                    outcomes[0] = draw_settings_form_grid_row_with_rect(
                         ui,
                         "test_r1",
                         &mut s1,
@@ -11813,6 +11940,7 @@ mod tests {
                         "Add root zone",
                         avail_w,
                         Some(shared_sel_w),
+                        false,
                         &pal,
                         |ui| {
                             let _ = draw_filter_radio_chip(
@@ -11828,9 +11956,8 @@ mod tests {
                                 &pal,
                             );
                         },
-                    )
-                    .1;
-                    rects[1] = draw_settings_form_grid_row_with_rect(
+                    );
+                    outcomes[1] = draw_settings_form_grid_row_with_rect(
                         ui,
                         "test_r2",
                         &mut s2,
@@ -11838,6 +11965,7 @@ mod tests {
                         "Add path zone",
                         avail_w,
                         Some(shared_sel_w),
+                        true,
                         &pal,
                         |ui| {
                             let _ = draw_filter_radio_chip(
@@ -11853,9 +11981,8 @@ mod tests {
                                 &pal,
                             );
                         },
-                    )
-                    .1;
-                    rects[2] = draw_settings_form_grid_row_with_rect(
+                    );
+                    outcomes[2] = draw_settings_form_grid_row_with_rect(
                         ui,
                         "test_r3",
                         &mut s3,
@@ -11863,6 +11990,7 @@ mod tests {
                         "Pin folder",
                         avail_w,
                         Some(shared_sel_w),
+                        true,
                         &pal,
                         |ui| {
                             for pk in [
@@ -11879,18 +12007,24 @@ mod tests {
                                 );
                             }
                         },
-                    )
-                    .1;
+                    );
                 });
             },
         );
 
-        for r in rects {
-            assert!((r.min.x - rects[0].min.x).abs() < 0.5, "left edge mismatch: {r:?} vs {:?}", rects[0]);
-            assert!((r.max.x - rects[0].max.x).abs() < 0.5, "right edge mismatch: {r:?} vs {:?}", rects[0]);
+        assert!(outcomes[0].browse_rect.is_none());
+        let b1 = outcomes[1].browse_rect.expect("row 2 has Browse...");
+        let b2 = outcomes[2].browse_rect.expect("row 3 has Browse...");
+        assert!((b1.min.x - b2.min.x).abs() < 0.5);
+        assert!((b1.max.x - b2.max.x).abs() < 0.5);
+
+        for o in outcomes {
+            let r = o.action_rect;
+            assert!((r.min.x - outcomes[0].action_rect.min.x).abs() < 0.5, "left edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
+            assert!((r.max.x - outcomes[0].action_rect.max.x).abs() < 0.5, "right edge mismatch: {r:?} vs {:?}", outcomes[0].action_rect);
         }
 
-        // Wide viewport (1600x900) expands fluidly past the old 860px cap
+        // Wide viewport (1600x900) expands fluidly past the old 860px cap and renders Browse... twice
         let (report, cfg) = make_synthetic_report_for_drives(4);
         let mut st = StorageUiState::default();
         st.active_view = ActiveView::Settings;
@@ -11914,6 +12048,23 @@ mod tests {
                     );
                 },
             );
+            if section == SettingsSection::Rulebook {
+                fn count_text(shape: &egui::Shape, target: &str) -> usize {
+                    match shape {
+                        egui::Shape::Text(ts) => usize::from(ts.galley.text() == target),
+                        egui::Shape::Vec(vec) => {
+                            vec.iter().map(|s| count_text(s, target)).sum()
+                        }
+                        _ => 0,
+                    }
+                }
+                let browse_count: usize = out
+                    .shapes
+                    .iter()
+                    .map(|cs| count_text(&cs.shape, "Browse..."))
+                    .sum();
+                assert_eq!(browse_count, 2);
+            }
             let max_x = out
                 .shapes
                 .iter()
