@@ -1,8 +1,8 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `e2ed91f` (`settings-layout` Windows defaults group)
+- **Branch / Latest Code Commit**: `main` at `b1ffbd5` (`settings-layout` Rulebook Browse... picker)
 - **Verification Report**: `specs/033-app-family-rollup/verification.md` (+ `specs/032-settings-layout/verification.md`)
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `E2265407A611BE1CEE01A2993D45B51B0041FDC0D77ED3585C7CAE88D63CC963`)
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `ADA28A1D4C0B2CEA2ADC68AE264D8211624677A518B2BDDF79F858D246D8EB0B`)
 
 ## Tests (`cargo test --workspace`)
 - **`y-storage` / `y-core` / `y-platform-windows`**: **58 / 58** / **74 / 74** / **9 / 9** (**141 / 141 total**, **0 failed**, **0 warnings**)
