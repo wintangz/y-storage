@@ -40,8 +40,12 @@ pub const SPACE_16: f32 = 16.0;
 const RADIUS_PANEL: f32 = 8.0;
 const RADIUS_CONTROL: f32 = 6.0;
 const RADIUS_PILL: f32 = 4.0;
+const RADIUS_TABLE_CELL: f32 = 3.0;
 const BADGE_PILL_H: f32 = 18.0;
 const RADIUS_BADGE_PILL: f32 = BADGE_PILL_H * 0.5;
+
+pub const LEDGER_PAGE_SIZE: usize = 50;
+const LEDGER_FOOTER_H: f32 = 34.0;
 
 const SIZE_COL_W: f32 = 96.0;
 const PER_DRIVE_SIZE_COL_W: f32 = 186.0;
@@ -225,6 +229,9 @@ pub struct StorageUiState {
     pub ledger_height_px: Option<f32>,
     ledger_drag_start_h: Option<f32>,
     pub scroll_ledger_bottom: bool,
+    pub ledger_page: usize,
+    pub ledger_scroll_to_top: bool,
+    pub header_rects: [Option<(AppSortMode, Rect)>; 5],
     pub icon_textures: HashMap<String, egui::TextureHandle>,
     pub icon_cache_scan_ts: Option<u64>,
     pub first_row_size_rect: Option<Rect>,
@@ -281,6 +288,9 @@ impl Default for StorageUiState {
             ledger_height_px: None,
             ledger_drag_start_h: None,
             scroll_ledger_bottom: false,
+            ledger_page: 0,
+            ledger_scroll_to_top: false,
+            header_rects: [None; 5],
             icon_textures: HashMap::new(),
             icon_cache_scan_ts: None,
             first_row_size_rect: None,
@@ -668,7 +678,7 @@ fn snap_rect_to_pixels(rect: Rect, ppp: f32) -> Rect {
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
 }
 
-const CORNER_ARC_PTS: usize = 17;
+const CORNER_ARC_PTS: usize = 7;
 
 fn corner_unit_arcs() -> &'static [[(f32, f32); CORNER_ARC_PTS]; 4] {
     static ARCS: OnceLock<[[(f32, f32); CORNER_ARC_PTS]; 4]> = OnceLock::new();
@@ -771,6 +781,49 @@ fn stitch_closed_ring_quads(
         let o1 = base + (j * 2) as u32;
         let i1 = o1 + 1;
         mesh.indices.extend_from_slice(&[o0, o1, i0, i0, o1, i1]);
+    }
+}
+
+/// Stitches ONLY the 4 rounded corner arcs between concentric `4 * CORNER_ARC_PTS` rings,
+/// leaving the 4 straight H/V edges to axis-aligned `add_solid_rect_quad` bars.
+fn stitch_corner_arcs_quads(
+    mesh: &mut egui::epaint::Mesh,
+    outer_pts: &[Pos2],
+    outer_col: Color32,
+    inner_pts: &[Pos2],
+    inner_col: Color32,
+) {
+    let n = outer_pts.len();
+    if n != 4 * CORNER_ARC_PTS || inner_pts.len() != n {
+        stitch_closed_ring_quads(mesh, outer_pts, outer_col, inner_pts, inner_col);
+        return;
+    }
+    let base = mesh.vertices.len() as u32;
+    mesh.vertices.reserve(n * 2);
+    mesh.indices.reserve(4 * (CORNER_ARC_PTS - 1) * 6);
+    for i in 0..n {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: outer_pts[i],
+            uv: egui::epaint::WHITE_UV,
+            color: outer_col,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: inner_pts[i],
+            uv: egui::epaint::WHITE_UV,
+            color: inner_col,
+        });
+    }
+    for corner in 0..4 {
+        let start = corner * CORNER_ARC_PTS;
+        for k in 0..(CORNER_ARC_PTS - 1) {
+            let i = start + k;
+            let j = i + 1;
+            let o0 = base + (i * 2) as u32;
+            let i0 = o0 + 1;
+            let o1 = base + (j * 2) as u32;
+            let i1 = o1 + 1;
+            mesh.indices.extend_from_slice(&[o0, o1, i0, i0, o1, i1]);
+        }
     }
 }
 
@@ -883,10 +936,8 @@ fn fill_rounded_interior_9slice(
         return;
     }
     if ring_pts.len() == 4 * CORNER_ARC_PTS
-        && fill_rect.width() >= 96.0
-        && fill_rect.height() >= 48.0
-        && fill_rect.width() > 2.0 * r_in + 0.5
-        && fill_rect.height() > 2.0 * r_in + 0.5
+        && fill_rect.width() > 2.0 * r_in + 1.0
+        && fill_rect.height() > 2.0 * r_in + 1.0
     {
         let left = fill_rect.left();
         let right = fill_rect.right();
@@ -955,13 +1006,16 @@ fn build_feathered_rounded_box_mesh(
     }
     let px = 1.0 / ppp.max(0.5);
     let half_px = 0.5 * px;
-    let r = rounding.clamp(0.0, 0.5 * snapped.width().min(snapped.height()));
+    let r = snap_scalar_to_px(
+        rounding.clamp(0.0, 0.5 * snapped.width().min(snapped.height())),
+        ppp,
+    );
 
     if border_color == Color32::TRANSPARENT {
         if fill == Color32::TRANSPARENT {
             return mesh;
         }
-        if r <= 0.0 {
+        if r <= 0.5 * px {
             add_solid_rect_quad(&mut mesh, snapped, fill);
             return mesh;
         }
@@ -975,8 +1029,13 @@ fn build_feathered_rounded_box_mesh(
         };
         let r1 = (r - half_px).max(0.0);
         sample_rounded_rect_ring(rect1, r1, 0.0, &mut r1_pts);
-        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
-        fill_rounded_interior_9slice(&mut mesh, rect1, &r1_pts, r1, fill);
+        if snapped.width() > 2.0 * r + px && snapped.height() > 2.0 * r + px {
+            stitch_corner_arcs_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
+            fill_rounded_interior_9slice(&mut mesh, snapped, &r1_pts, r, fill);
+        } else {
+            stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, fill);
+            fill_rounded_interior_9slice(&mut mesh, rect1, &r1_pts, r1, fill);
+        }
         return mesh;
     }
 
@@ -989,6 +1048,11 @@ fn build_feathered_rounded_box_mesh(
     let mut r0_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
     let mut r1_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
     let mut r2_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
+
+    let straight_1px_fast = bw <= px * 1.05
+        && r > px * 1.5
+        && snapped.width() > 2.0 * r + 2.0 * px
+        && snapped.height() > 2.0 * r + 2.0 * px;
 
     let r1b_pts = if bw > px * 1.05 {
         sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, 0.0, &mut r0_pts);
@@ -1004,10 +1068,40 @@ fn build_feathered_rounded_box_mesh(
         let diag_pad = 0.42 * px;
         sample_rounded_rect_ring(snapped.expand(half_px), r + half_px, diag_pad, &mut r0_pts);
         sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), diag_pad, &mut r1_pts);
-        stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
         let mut r1_in_pts = Vec::with_capacity(4 * CORNER_ARC_PTS);
         sample_rounded_rect_ring(rect1, (r - half_px).max(0.0), -diag_pad, &mut r1_in_pts);
-        stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
+        if straight_1px_fast {
+            stitch_corner_arcs_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
+            stitch_corner_arcs_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
+            let x0 = snapped.left();
+            let x1 = snapped.right();
+            let y0 = snapped.top();
+            let y1 = snapped.bottom();
+            // 4 axis-aligned 1px border bars spanning between corner tangents
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + r, y0), Pos2::new(x1 - r, y0 + px)),
+                border_color,
+            );
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0 + r, y1 - px), Pos2::new(x1 - r, y1)),
+                border_color,
+            );
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x0, y0 + r), Pos2::new(x0 + px, y1 - r)),
+                border_color,
+            );
+            add_solid_rect_quad(
+                &mut mesh,
+                Rect::from_min_max(Pos2::new(x1 - px, y0 + r), Pos2::new(x1, y1 - r)),
+                border_color,
+            );
+        } else {
+            stitch_closed_ring_quads(&mut mesh, &r0_pts, Color32::TRANSPARENT, &r1_pts, border_color);
+            stitch_closed_ring_quads(&mut mesh, &r1_pts, border_color, &r1_in_pts, border_color);
+        }
         r1_in_pts
     };
 
@@ -1017,8 +1111,56 @@ fn build_feathered_rounded_box_mesh(
         let r2 = (r - inner_shrink).max(0.0);
         let inner_diag = if bw <= px * 1.05 { -0.42 * px } else { 0.0 };
         sample_rounded_rect_ring(rect2, r2, inner_diag, &mut r2_pts);
-        stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
-        fill_rounded_interior_9slice(&mut mesh, rect2, &r2_pts, r2, fill);
+        if straight_1px_fast {
+            stitch_corner_arcs_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
+            if fill != Color32::TRANSPARENT {
+                let x0 = snapped.left();
+                let x1 = snapped.right();
+                let y0 = snapped.top();
+                let y1 = snapped.bottom();
+                add_solid_rect_quad(
+                    &mut mesh,
+                    Rect::from_min_max(Pos2::new(x0 + r, y0 + px), Pos2::new(x1 - r, y0 + r)),
+                    fill,
+                );
+                add_solid_rect_quad(
+                    &mut mesh,
+                    Rect::from_min_max(Pos2::new(x0 + px, y0 + r), Pos2::new(x1 - px, y1 - r)),
+                    fill,
+                );
+                add_solid_rect_quad(
+                    &mut mesh,
+                    Rect::from_min_max(Pos2::new(x0 + r, y1 - r), Pos2::new(x1 - r, y1 - px)),
+                    fill,
+                );
+                let tl_c = Pos2::new(x0 + r, y0 + r);
+                let tr_c = Pos2::new(x1 - r, y0 + r);
+                let br_c = Pos2::new(x1 - r, y1 - r);
+                let bl_c = Pos2::new(x0 + r, y1 - r);
+                add_corner_quadrant_fan(&mut mesh, &r2_pts[0..CORNER_ARC_PTS], tl_c, fill);
+                add_corner_quadrant_fan(
+                    &mut mesh,
+                    &r2_pts[CORNER_ARC_PTS..2 * CORNER_ARC_PTS],
+                    tr_c,
+                    fill,
+                );
+                add_corner_quadrant_fan(
+                    &mut mesh,
+                    &r2_pts[2 * CORNER_ARC_PTS..3 * CORNER_ARC_PTS],
+                    br_c,
+                    fill,
+                );
+                add_corner_quadrant_fan(
+                    &mut mesh,
+                    &r2_pts[3 * CORNER_ARC_PTS..4 * CORNER_ARC_PTS],
+                    bl_c,
+                    fill,
+                );
+            }
+        } else {
+            stitch_closed_ring_quads(&mut mesh, &r1b_pts, border_color, &r2_pts, fill);
+            fill_rounded_interior_9slice(&mut mesh, rect2, &r2_pts, r2, fill);
+        }
     } else {
         add_ring_center_fan(&mut mesh, &r1b_pts, snapped.center(), border_color);
     }
@@ -1400,11 +1542,11 @@ fn paint_horizontal_theme_sweep_bar(
     let y0 = fill_rect.min.y;
     let y1 = fill_rect.max.y;
 
-    let mut xs: Vec<f32> = Vec::with_capacity(20);
+    let mut xs: Vec<f32> = Vec::with_capacity(14);
     xs.push(x0);
-    if r > 0.25 {
-        for k in 1..=5 {
-            let a = (k as f32) / 6.0 * std::f32::consts::FRAC_PI_2;
+    if r > 1.5 {
+        for k in 1..=3 {
+            let a = (k as f32) / 4.0 * std::f32::consts::FRAC_PI_2;
             xs.push(x0 + r * (1.0 - a.cos()));
         }
     }
@@ -1414,9 +1556,9 @@ fn paint_horizontal_theme_sweep_bar(
             xs.push(stop_x);
         }
     }
-    if r > 0.25 {
-        for k in 1..=5 {
-            let a = (k as f32) / 6.0 * std::f32::consts::FRAC_PI_2;
+    if r > 1.5 {
+        for k in 1..=3 {
+            let a = (k as f32) / 4.0 * std::f32::consts::FRAC_PI_2;
             xs.push(x1 - r * (1.0 - a.sin()));
         }
     }
@@ -1724,6 +1866,29 @@ fn draw_synced_scroll_area_viewport(
     rail_bg: Color32,
     body: impl FnOnce(&mut egui::Ui, Rect),
 ) {
+    draw_synced_scroll_area_viewport_with_reset(
+        ui,
+        id_salt,
+        max_height,
+        auto_shrink,
+        false,
+        pal,
+        rail_bg,
+        body,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_synced_scroll_area_viewport_with_reset(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    max_height: Option<f32>,
+    auto_shrink: [bool; 2],
+    scroll_to_top: bool,
+    pal: &ThemePalette,
+    rail_bg: Color32,
+    body: impl FnOnce(&mut egui::Ui, Rect),
+) {
     ui.scope(|ui| {
         ui.spacing_mut().scroll.floating = false;
         ui.spacing_mut().scroll.foreground_color = false;
@@ -1744,6 +1909,9 @@ fn draw_synced_scroll_area_viewport(
             .auto_shrink(auto_shrink);
         if let Some(mh) = max_height {
             sa = sa.max_height(mh);
+        }
+        if scroll_to_top {
+            sa = sa.vertical_scroll_offset(0.0);
         }
         sa.show_viewport(ui, |ui, viewport| {
             // Restore inner widget fills so buttons inside scrolled cards still paint with pal.widget.
@@ -2472,6 +2640,19 @@ fn table_cell_ui(ui: &mut egui::Ui, cell_rect: Rect, layout: Layout) -> egui::Ui
     cell_ui
 }
 
+pub fn ledger_page_bounds(
+    total_items: usize,
+    page_idx: usize,
+    page_size: usize,
+) -> (usize, usize, usize, usize) {
+    let ps = page_size.max(1);
+    let total_pages = total_items.div_ceil(ps).max(1);
+    let clamped_page = page_idx.min(total_pages - 1);
+    let start = (clamped_page * ps).min(total_items);
+    let end = (start + ps).min(total_items);
+    (clamped_page, total_pages, start, end)
+}
+
 fn draw_sortable_col_header(
     ui: &mut egui::Ui,
     cell_rect: Rect,
@@ -2487,9 +2668,21 @@ fn draw_sortable_col_header(
     let id = ui.make_persistent_id(("table_hdr", id_salt));
     let resp = ui.interact(cell_rect, id, Sense::click());
     let hovered = resp.hovered();
+    let ppp = ui.ctx().pixels_per_point();
 
     if hovered {
-        ui.painter().rect_filled(cell_rect, Rounding::same(3.0), pal.widget_hover);
+        let mut hover_rect = snap_rect_to_pixels(cell_rect, ppp);
+        hover_rect.min.y = hover_rect.min.y.max(cell_rect.min.y);
+        hover_rect.max.y = hover_rect.max.y.min(cell_rect.max.y);
+        paint_crisp_bordered_box(
+            ui.painter(),
+            hover_rect,
+            RADIUS_TABLE_CELL,
+            pal.widget_hover,
+            Color32::TRANSPARENT,
+            0.0,
+            ppp,
+        );
     }
 
     let fg = if resp.is_pointer_button_down_on() {
@@ -2504,7 +2697,6 @@ fn draw_sortable_col_header(
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id, fg));
     let arrow_w = if is_active { 12.0 } else { 0.0 };
     let total_w = galley.size().x + arrow_w;
-    let ppp = ui.ctx().pixels_per_point();
     let start_x = if right_aligned {
         (cell_rect.max.x - total_w).max(cell_rect.min.x)
     } else {
@@ -2514,10 +2706,11 @@ fn draw_sortable_col_header(
     let text_pos = optical_galley_pos(ui, align_rect, &galley, None, false);
     ui.painter().galley(text_pos, galley, fg);
     if is_active {
-        let arrow_c = Pos2::new(
-            snap_scalar_to_px(start_x + total_w - 4.0, ppp),
-            snap_scalar_to_px(cell_rect.center().y, ppp),
+        let arrow_x = snap_scalar_to_px(
+            (start_x + total_w - 4.5).clamp(cell_rect.min.x + 4.5, cell_rect.max.x - 4.5),
+            ppp,
         );
+        let arrow_c = Pos2::new(arrow_x, snap_scalar_to_px(cell_rect.center().y, ppp));
         draw_sort_arrow(ui.painter(), arrow_c, active_dir == SortDirection::Desc, pal.accent_line);
     }
 
@@ -2822,6 +3015,8 @@ fn draw_facet_popup_overlay(
 
     if area_resp.inner {
         ui_state.open_facet_popup = None;
+        ui_state.ledger_page = 0;
+        ui_state.ledger_scroll_to_top = true;
         emit(UiAction::UpdateListView {
             sort_mode: ui_state.sort_mode,
             sort_direction: ui_state.sort_direction,
@@ -3063,6 +3258,10 @@ fn ensure_report_and_filter_caches(
             || f.sys_drive != sys_drive_letter
     });
     if filter_stale {
+        if ui_state.cached_filtered.is_some() {
+            ui_state.ledger_page = 0;
+            ui_state.ledger_scroll_to_top = true;
+        }
         let cr = ui_state.cached_report.as_ref().unwrap();
         let filtered = filter_and_sort_apps_with_facets(
             &rep.apps,
@@ -3538,6 +3737,8 @@ fn draw_drive_pods_grid(
                                     {
                                         t.enabled = included;
                                     }
+                                    ui_state.ledger_page = 0;
+                                    ui_state.ledger_scroll_to_top = true;
                                     emit(UiAction::SaveConfig(next_cfg));
                                 }
 
@@ -3597,6 +3798,8 @@ fn draw_drive_pods_grid(
                                         ))
                                         .clicked()
                                     {
+                                        ui_state.ledger_page = 0;
+                                        ui_state.ledger_scroll_to_top = true;
                                         emit(UiAction::StartDriveRescan(dl));
                                     }
                                 }
@@ -3835,6 +4038,8 @@ fn draw_pod_scope_overlay(
         });
 
     if changed {
+        ui_state.ledger_page = 0;
+        ui_state.ledger_scroll_to_top = true;
         emit(UiAction::SaveConfig(draft));
     }
     if close_clicked {
@@ -4226,6 +4431,8 @@ pub fn draw_app_ui_with_drive_busy(
                         "Rescan all enabled drives and registry".to_string()
                     };
                     if rescan_resp.on_hover_text(rescan_tip).clicked() {
+                        ui_state.ledger_page = 0;
+                        ui_state.ledger_scroll_to_top = true;
                         emit(UiAction::StartRescan);
                     }
 
@@ -4707,6 +4914,8 @@ pub fn draw_app_ui_with_drive_busy(
                         }
 
                         if list_view_dirty {
+                            ui_state.ledger_page = 0;
+                            ui_state.ledger_scroll_to_top = true;
                             if let Some(rep) = report {
                                 ensure_report_and_filter_caches(
                                     ctx,
@@ -4895,7 +5104,12 @@ fn draw_main_app_list(
     let total_mode_bytes = per_drive_mode.map_or(total_attributed_bytes, |dl| {
         rep.total_apps_bytes_on_drive(dl)
     });
-    let shown = visible_indices.len();
+    let total_filtered = visible_indices.len();
+    let (page_idx, total_pages, page_start, page_end) =
+        ledger_page_bounds(total_filtered, ui_state.ledger_page, LEDGER_PAGE_SIZE);
+    ui_state.ledger_page = page_idx;
+    let page_indices = &visible_indices[page_start..page_end];
+    let page_shown = page_indices.len();
 
     let avail_w = ui.available_width();
     let avail_h = ui.available_height();
@@ -4912,6 +5126,8 @@ fn draw_main_app_list(
     let header_bg_slot = ui.painter().add(egui::Shape::Noop);
 
     let panel_top_y = ui.cursor().min.y;
+    let prev_item_spacing_y = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
     ui.add_space(inset);
 
     let hdr_content_x0 = panel_left + inset + SPACE_12;
@@ -4924,10 +5140,23 @@ fn draw_main_app_list(
     let hdr_y0 = hdr_row_rect.min.y;
     let hdr_y1 = hdr_row_rect.max.y;
 
+    let name_hdr_rect = cols.name.rect(hdr_y0, hdr_y1);
+    let pub_hdr_rect = cols.publisher.rect(hdr_y0, hdr_y1);
+    let cat_hdr_rect = cols.category.rect(hdr_y0, hdr_y1);
+    let delta_hdr_rect = cols.delta.rect(hdr_y0, hdr_y1);
+    let size_hdr_rect = cols.size.rect(hdr_y0, hdr_y1);
+    ui_state.header_rects = [
+        Some((AppSortMode::Name, name_hdr_rect)),
+        Some((AppSortMode::Publisher, pub_hdr_rect)),
+        Some((AppSortMode::Category, cat_hdr_rect)),
+        Some((AppSortMode::Growth, delta_hdr_rect)),
+        Some((AppSortMode::Size, size_hdr_rect)),
+    ];
+
     let mut sort_clicked: Option<AppSortMode> = None;
     if draw_sortable_col_header(
         ui,
-        cols.name.rect(hdr_y0, hdr_y1),
+        name_hdr_rect,
         "main_name",
         "App name",
         AppSortMode::Name,
@@ -4940,7 +5169,7 @@ fn draw_main_app_list(
     }
     if draw_sortable_col_header(
         ui,
-        cols.publisher.rect(hdr_y0, hdr_y1),
+        pub_hdr_rect,
         "main_pub",
         "Publisher",
         AppSortMode::Publisher,
@@ -4953,7 +5182,7 @@ fn draw_main_app_list(
     }
     if draw_sortable_col_header(
         ui,
-        cols.category.rect(hdr_y0, hdr_y1),
+        cat_hdr_rect,
         "main_cat",
         "Category",
         AppSortMode::Category,
@@ -4966,7 +5195,7 @@ fn draw_main_app_list(
     }
     if draw_sortable_col_header(
         ui,
-        cols.delta.rect(hdr_y0, hdr_y1),
+        delta_hdr_rect,
         "main_delta",
         "Growth delta",
         AppSortMode::Growth,
@@ -4983,7 +5212,7 @@ fn draw_main_app_list(
     };
     if draw_sortable_col_header(
         ui,
-        cols.size.rect(hdr_y0, hdr_y1),
+        size_hdr_rect,
         "main_size",
         &size_col_hdr,
         AppSortMode::Size,
@@ -4998,6 +5227,8 @@ fn draw_main_app_list(
         let (nm, nd) = mode.click_transition(ui_state.sort_mode, ui_state.sort_direction);
         ui_state.sort_mode = nm;
         ui_state.sort_direction = nd;
+        ui_state.ledger_page = 0;
+        ui_state.ledger_scroll_to_top = true;
         ui_state.cached_filtered = None;
         ui.ctx().request_repaint();
         emit(UiAction::UpdateListView {
@@ -5016,10 +5247,10 @@ fn draw_main_app_list(
     paint_solid_px_rect(ui.painter(), hdr_div_rect, pal.border);
     ui.advance_cursor_after_rect(hdr_div_rect);
 
-    // Precompute cumulative row y-offsets across all `shown` rows (`<= 262` floats) for exact O(log N) viewport virtualization.
-    let mut row_tops = Vec::with_capacity(shown + 1);
+    // Precompute cumulative row y-offsets across current page rows (`<= 50`) for exact O(log N) viewport virtualization.
+    let mut row_tops = Vec::with_capacity(page_shown + 1);
     row_tops.push(0.0_f32);
-    for &app_idx in &visible_indices {
+    for &app_idx in page_indices {
         let app = &rep.apps[app_idx];
         let h = if ui_state.expanded_apps.contains(&app.id) {
             ui_state
@@ -5035,7 +5266,9 @@ fn draw_main_app_list(
     }
     let total_virtual_h = row_tops.last().copied().unwrap_or(0.0);
 
-    let body_max_h = (avail_h - (TABLE_HEADER_H + 1.0 + inset * 2.0 + 2.0)).max(0.0);
+    let footer_reserve = LEDGER_FOOTER_H + 1.0;
+    let body_max_h = (avail_h - (TABLE_HEADER_H + 1.0 + footer_reserve + inset * 2.0 + 2.0)).max(0.0);
+    let scroll_to_top = std::mem::take(&mut ui_state.ledger_scroll_to_top);
     let expanded_apps = &mut ui_state.expanded_apps;
     let expanded_row_heights = &mut ui_state.expanded_row_heights;
     let icon_textures = &mut ui_state.icon_textures;
@@ -5047,17 +5280,18 @@ fn draw_main_app_list(
     let mut show_bottom_fade = false;
 
     if body_max_h >= 6.0 {
-        draw_synced_scroll_area_viewport(
+        draw_synced_scroll_area_viewport_with_reset(
         ui,
         "main_app_scroll",
         Some(body_max_h),
         [false, true],
+        scroll_to_top,
         pal,
         pal.bg,
         |ui, viewport| {
             ui.set_width(panel_w);
             ui.spacing_mut().item_spacing.y = 0.0;
-            show_bottom_fade = shown > 0 && viewport.max.y + 1.5 < total_virtual_h;
+            show_bottom_fade = page_shown > 0 && viewport.max.y + 1.5 < total_virtual_h;
 
             let body_clip = Rect::from_min_max(
                 Pos2::new(panel_left + inset, ui.clip_rect().min.y),
@@ -5066,7 +5300,7 @@ fn draw_main_app_list(
             .intersect(ui.clip_rect());
             ui.set_clip_rect(body_clip);
 
-            if shown == 0 {
+            if page_shown == 0 {
                 egui::Frame::none()
                     .inner_margin(Margin::symmetric(SPACE_12 + inset, SPACE_12))
                     .show(ui, |ui| {
@@ -5084,11 +5318,11 @@ fn draw_main_app_list(
             let vis_y1 = (viewport.max.y + COLLAPSED_ROW_OUTER_H * 2.0).min(total_virtual_h);
             let first_vis = row_tops[1..]
                 .partition_point(|&bot| bot < vis_y0)
-                .min(shown.saturating_sub(1));
+                .min(page_shown.saturating_sub(1));
             let end_vis = row_tops[first_vis + 1..]
                 .partition_point(|&bot| bot < vis_y1)
                 .saturating_add(first_vis + 1)
-                .min(shown);
+                .min(page_shown);
 
             let top_skip = row_tops[first_vis];
             if top_skip > 0.0 {
@@ -5096,7 +5330,7 @@ fn draw_main_app_list(
             }
 
             for row_idx in first_vis..end_vis {
-                let app_idx = visible_indices[row_idx];
+                let app_idx = page_indices[row_idx];
                 let app = &rep.apps[app_idx];
                 let expanded = expanded_apps.contains(&app.id);
                 let row_slot = ui.painter().add(egui::Shape::Noop);
@@ -5420,7 +5654,7 @@ fn draw_main_app_list(
                                 );
                                 let track_col = lerp_color(row_surface, pal.border, 0.55);
                                 ui.painter()
-                                    .rect_filled(track_rect, Rounding::same(1.0), track_col);
+                                    .rect_filled(track_rect, Rounding::ZERO, track_col);
 
                                 let ratio = if max_bar_bytes > 0 {
                                     (display_bytes as f64 / max_bar_bytes as f64).clamp(0.0, 1.0)
@@ -6346,10 +6580,10 @@ fn draw_main_app_list(
                     ui.painter().set(row_slot, egui::Shape::mesh(m));
                 }
 
-                let next_expanded = visible_indices
+                let next_expanded = page_indices
                     .get(row_idx + 1)
                     .is_some_and(|&next_idx| expanded_apps.contains(&rep.apps[next_idx].id));
-                if !expanded && row_idx + 1 < shown && !next_expanded {
+                if !expanded && row_idx + 1 < page_shown && !next_expanded {
                     let sep = Rect::from_min_size(
                         Pos2::new(inner_row_rect.min.x, (inner_row_rect.max.y - 1.0).round()),
                         Vec2::new(inner_row_rect.width(), 1.0),
@@ -6367,7 +6601,113 @@ fn draw_main_app_list(
     }
     ui_state.cached_report = cached_report;
 
-    ui.add_space(inset + 2.0);
+    let footer_div_y = ui.cursor().min.y;
+    let footer_div_rect = Rect::from_min_size(
+        Pos2::new(panel_left + inset, footer_div_y),
+        Vec2::new((panel_w - inset * 2.0).max(0.0), 1.0),
+    );
+    paint_solid_px_rect(ui.painter(), footer_div_rect, pal.border);
+    ui.advance_cursor_after_rect(footer_div_rect);
+
+    let (footer_row_rect, _) =
+        ui.allocate_exact_size(Vec2::new(panel_w, LEDGER_FOOTER_H), Sense::hover());
+    let footer_inner_rect = Rect::from_min_max(
+        Pos2::new(panel_left + inset + SPACE_12, footer_row_rect.min.y),
+        Pos2::new(
+            (panel_left + panel_w - inset - SPACE_12).max(panel_left + inset + SPACE_12 + 120.0),
+            footer_row_rect.max.y,
+        ),
+    );
+    {
+        let mut f_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(footer_inner_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let range_txt = if total_filtered == 0 {
+            "Showing 0 of 0".to_string()
+        } else {
+            format!("Showing {}–{} of {}", page_start + 1, page_end, total_filtered)
+        };
+        let pager_w = 240.0_f32;
+        let left_w = (footer_inner_rect.width() - pager_w - SPACE_8).max(80.0);
+        let left_rect = Rect::from_min_size(
+            footer_inner_rect.min,
+            Vec2::new(left_w, footer_inner_rect.height()),
+        );
+        draw_optical_label_in_rect(
+            &mut f_ui,
+            left_rect,
+            &range_txt,
+            FontId::new(11.5, FontFamily::Proportional),
+            pal.muted,
+            false,
+            false,
+        );
+
+        let right_rect = Rect::from_min_max(
+            Pos2::new(left_rect.max.x + SPACE_8, footer_inner_rect.min.y),
+            footer_inner_rect.max,
+        );
+        let mut r_ui = f_ui.new_child(
+            UiBuilder::new()
+                .max_rect(right_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        r_ui.spacing_mut().item_spacing.x = SPACE_8;
+
+        let can_next = page_idx + 1 < total_pages;
+        if draw_z_button(
+            &mut r_ui,
+            "Next",
+            Vec2::new(62.0, 24.0),
+            11.5,
+            RADIUS_CONTROL,
+            can_next,
+            false,
+            ButtonVariant::SecondaryOutline,
+            pal,
+        )
+        .clicked()
+            && can_next
+        {
+            ui_state.ledger_page = (page_idx + 1).min(total_pages - 1);
+            ui_state.ledger_scroll_to_top = true;
+            ui.ctx().request_repaint();
+        }
+
+        let page_lbl = format!("Page {} of {}", page_idx + 1, total_pages);
+        let page_font = FontId::new(11.5, FontFamily::Proportional);
+        let page_w = r_ui
+            .fonts(|f| f.layout_no_wrap(page_lbl.clone(), page_font.clone(), pal.text).size().x)
+            .ceil()
+            + 4.0;
+        let (lbl_rect, _) = r_ui.allocate_exact_size(Vec2::new(page_w, 24.0), Sense::hover());
+        draw_optical_label_in_rect(&mut r_ui, lbl_rect, &page_lbl, page_font, pal.text, false, true);
+
+        let can_prev = page_idx > 0;
+        if draw_z_button(
+            &mut r_ui,
+            "Previous",
+            Vec2::new(76.0, 24.0),
+            11.5,
+            RADIUS_CONTROL,
+            can_prev,
+            false,
+            ButtonVariant::SecondaryOutline,
+            pal,
+        )
+        .clicked()
+            && can_prev
+        {
+            ui_state.ledger_page = page_idx.saturating_sub(1);
+            ui_state.ledger_scroll_to_top = true;
+            ui.ctx().request_repaint();
+        }
+    }
+
+    ui.add_space(inset);
+    ui.spacing_mut().item_spacing.y = prev_item_spacing_y;
     let panel_bot_y = ui.cursor().min.y;
     let raw_panel_rect = Rect::from_min_max(
         Pos2::new(panel_left, panel_top_y),
@@ -6401,15 +6741,16 @@ fn draw_main_app_list(
                 ),
             );
         }
-        if show_bottom_fade && inner_panel.height() > TABLE_HEADER_H + 30.0 {
+        let fade_bottom = footer_div_y.min(inner_panel.max.y);
+        if show_bottom_fade && fade_bottom > hdr_y1 + 30.0 {
             let fade_rect = Rect::from_min_max(
                 Pos2::new(
                     inner_panel.min.x,
-                    (inner_panel.max.y - 22.0).max(hdr_y1 + 1.0),
+                    (fade_bottom - 22.0).max(hdr_y1 + 1.0),
                 ),
                 Pos2::new(
                     (inner_panel.max.x - 10.0).max(inner_panel.min.x),
-                    inner_panel.max.y,
+                    fade_bottom,
                 ),
             );
             paint_bottom_fade_overlay(ui.painter(), fade_rect, pal.panel);
@@ -8706,6 +9047,8 @@ fn draw_settings_view(
     });
 
     if changed {
+        ui_state.ledger_page = 0;
+        ui_state.ledger_scroll_to_top = true;
         emit(UiAction::SaveConfig(draft));
     }
 }
@@ -10152,5 +10495,231 @@ mod tests {
                 "baseline drift too large at ppp={ppp}: inc_y={inc_y}, exc_y={exc_y}"
             );
         }
+    }
+
+    fn make_synthetic_apps_report(count: usize, scan_ts: u64) -> ScanReport {
+        let apps = (0..count)
+            .map(|i| AttributedApp {
+                id: format!("app:{i:03}"),
+                display_name: format!("App {i:03}"),
+                publishers: vec![if i % 2 == 0 { "Pub Alpha".into() } else { "Pub Beta".into() }],
+                install_location: Some(format!(r"C:\Apps\App{i:03}")),
+                total_bytes: ((count - i) as u64) * 1_000_000,
+                previous_bytes: Some(((count - i) as u64) * 500_000),
+                growth: GrowthDelta::Changed(((count - i) as i64) * 500_000),
+                per_drive_growth: Default::default(),
+                no_touch: None,
+                bases: vec![AttributionBasis::InstallLocation],
+                items: vec![BreakdownItem {
+                    path: format!(r"C:\Apps\App{i:03}"),
+                    bytes: ((count - i) as u64) * 1_000_000,
+                    zone: Some(ZoneKind::Body),
+                    qualifier: None,
+                    basis: Some(AttributionBasis::InstallLocation),
+                    basis_detail: None,
+                    no_touch: None,
+                    drive_letter: 'C',
+                }],
+                dependencies: vec![],
+                carved_out_apps: vec![],
+                display_icon: None,
+                icon_rgba: None,
+                category: y_core::model::AppCategory::Utilities,
+                category_basis: String::new(),
+            })
+            .collect();
+        ScanReport {
+            scan_timestamp_unix: scan_ts,
+            scan_timestamp_display: "2026-11-28 05:00".into(),
+            duration_ms: 10,
+            drives: vec![DriveInfo {
+                letter: 'C',
+                root: "C:\\".into(),
+                total_bytes: 500_000_000_000,
+                free_bytes: 250_000_000_000,
+                used_bytes: 250_000_000_000,
+                is_system_drive: true,
+                full_walk_enabled: true,
+                exclusions: vec![],
+                last_scanned_unix: Some(scan_ts),
+                last_scanned_display: Some("2026-11-28 05:00".into()),
+            }],
+            registry_stats: RegistryDiscoveryStats {
+                raw_display_name_entries: count,
+                raw_with_install_location: count,
+                canonical_apps: count,
+                canonical_with_direct_install_location: count,
+                canonical_with_inferred_install_location: 0,
+            },
+            apps,
+            shared_caches: vec![],
+            shared_caches_total_bytes: 0,
+            your_files: vec![],
+            your_files_total_bytes: 0,
+            windows_system: vec![],
+            windows_system_total_bytes: 0,
+            unattributed: vec![],
+            unattributed_total_bytes: 0,
+            reverse_dependencies: vec![],
+            installed_registry_names: vec![],
+            applied_containers: None,
+            applied_zones: None,
+            catalog_source: "embedded".into(),
+            warnings: vec![],
+            evidence_curated_conflicts: vec![],
+        }
+    }
+
+    #[test]
+    fn ledger_page_bounds_handles_empty_exact_and_clamped_pages() {
+        assert_eq!(ledger_page_bounds(0, 0, LEDGER_PAGE_SIZE), (0, 1, 0, 0));
+        assert_eq!(ledger_page_bounds(0, 3, LEDGER_PAGE_SIZE), (0, 1, 0, 0));
+        assert_eq!(ledger_page_bounds(50, 0, LEDGER_PAGE_SIZE), (0, 1, 0, 50));
+        assert_eq!(ledger_page_bounds(50, 5, LEDGER_PAGE_SIZE), (0, 1, 0, 50));
+        assert_eq!(ledger_page_bounds(51, 0, LEDGER_PAGE_SIZE), (0, 2, 0, 50));
+        assert_eq!(ledger_page_bounds(51, 1, LEDGER_PAGE_SIZE), (1, 2, 50, 51));
+        assert_eq!(ledger_page_bounds(296, 1, LEDGER_PAGE_SIZE), (1, 6, 50, 100));
+        assert_eq!(ledger_page_bounds(296, 5, LEDGER_PAGE_SIZE), (5, 6, 250, 296));
+        assert_eq!(ledger_page_bounds(296, 99, LEDGER_PAGE_SIZE), (5, 6, 250, 296));
+    }
+
+    #[test]
+    fn ledger_pagination_resets_to_page_1_on_filter_sort_search_scope_and_rescan() {
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let pal = ThemePalette::for_mode(ThemeMode::Dark);
+        let report1 = make_synthetic_apps_report(120, 100);
+        let report2 = make_synthetic_apps_report(120, 200);
+        let mut st = StorageUiState::default();
+
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        assert_eq!(st.cached_filtered.as_ref().unwrap().visible_indices.len(), 120);
+
+        // Filter chip change -> page 1
+        st.ledger_page = 2;
+        st.ledger_scroll_to_top = false;
+        st.filter_chip = AppFilterChip::Grew;
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+        assert_eq!(st.cached_filtered.as_ref().unwrap().visible_indices.len(), 120);
+
+        // Search change -> page 1
+        st.ledger_page = 1;
+        st.ledger_scroll_to_top = false;
+        st.search_query = "App 0".into();
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+
+        // Sort change -> page 1
+        st.search_query.clear();
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        st.ledger_page = 2;
+        st.ledger_scroll_to_top = false;
+        st.sort_mode = AppSortMode::Name;
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+
+        // Facet change -> page 1
+        st.ledger_page = 2;
+        st.ledger_scroll_to_top = false;
+        st.facets.publisher = Some("Pub Alpha".into());
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+        assert_eq!(st.cached_filtered.as_ref().unwrap().visible_indices.len(), 60);
+
+        // Scope (system drive) change -> page 1
+        st.facets = FacetFilters::default();
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'C', pal.theme_key);
+        st.ledger_page = 1;
+        st.ledger_scroll_to_top = false;
+        ensure_report_and_filter_caches(&ctx, &mut st, &report1, &pal, 'D', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+
+        // Rescan timestamp change -> page 1
+        st.ledger_page = 2;
+        st.ledger_scroll_to_top = false;
+        ensure_report_and_filter_caches(&ctx, &mut st, &report2, &pal, 'D', pal.theme_key);
+        assert_eq!(st.ledger_page, 0);
+        assert!(st.ledger_scroll_to_top);
+    }
+
+    #[test]
+    fn ledger_header_hover_cells_match_columns_at_100_and_125_dpi() {
+        let report = make_synthetic_apps_report(120, 100);
+        let cfg = AppConfig::default();
+        for ppp in [1.0_f32, 1.25] {
+            let ctx = egui::Context::default();
+            configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+            let mut st = StorageUiState::default();
+            st.ledger_collapsed = true;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+                ..Default::default()
+            };
+            let mut raw = raw;
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(ppp);
+            let _ = ctx.run(raw, |c| {
+                draw_app_ui(c, &mut st, &cfg, Some(&report), false, None, r"C:\Windows", &mut |_| {});
+            });
+            let rects: Vec<(AppSortMode, Rect)> = st.header_rects.iter().filter_map(|x| *x).collect();
+            assert_eq!(rects.len(), 5);
+            for (idx, (_, r)) in rects.iter().enumerate() {
+                assert!((r.height() - TABLE_HEADER_H).abs() <= 0.1, "height mismatch at ppp={ppp}");
+                assert!(r.width() >= 80.0);
+                if idx > 0 {
+                    assert!(
+                        r.min.x >= rects[idx - 1].1.max.x + SPACE_12 - 0.5,
+                        "headers overlap at idx={idx}, ppp={ppp}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ledger_drawer_lives_inside_its_page() {
+        let report = make_synthetic_apps_report(120, 100);
+        let cfg = AppConfig::default();
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.ledger_collapsed = true;
+        // Expand app:000 (on page 1) and check page 2 shapes vs page 1 shapes
+        st.expanded_apps.insert("app:000".into());
+
+        st.ledger_page = 1; // page 2 (rows 50..100)
+        let raw_p2 = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw_p2, |c| {
+            draw_app_ui(c, &mut st, &cfg, Some(&report), false, None, r"C:\Windows", &mut |_| {});
+        });
+        assert_eq!(st.ledger_page, 1);
+        assert!(
+            !st.expanded_row_heights.contains_key("app:000"),
+            "page 1 drawer should not be laid out when viewing page 2"
+        );
+
+        st.ledger_page = 0; // page 1 (rows 0..50)
+        let raw_p1 = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1020.0, 720.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw_p1, |c| {
+            draw_app_ui(c, &mut st, &cfg, Some(&report), false, None, r"C:\Windows", &mut |_| {});
+        });
+        assert!(
+            st.expanded_row_heights.contains_key("app:000"),
+            "page 1 drawer should be laid out when returning to page 1"
+        );
     }
 }

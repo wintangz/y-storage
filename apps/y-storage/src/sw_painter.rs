@@ -322,21 +322,23 @@ impl SoftwarePainter {
                 while i + 3 <= mesh.indices.len() {
                     if i + 6 <= mesh.indices.len() {
                         let t0 = &mesh.indices[i..i + 6];
-                        if let Some((qx0, qy0, qx1, qy1, col)) =
-                            detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
-                        {
-                            let t_q = stats.as_ref().map(|_| std::time::Instant::now());
-                            fill_solid_rect(
-                                fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
-                            );
-                            if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_q) {
-                                st.solid_quads += 1;
-                                st.quad_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                        let v0_untex = mesh.vertices[t0[0] as usize].uv == WHITE_UV;
+                        if v0_untex {
+                            if let Some((qx0, qy0, qx1, qy1, col)) =
+                                detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
+                            {
+                                let t_q = stats.as_ref().map(|_| std::time::Instant::now());
+                                fill_solid_rect(
+                                    fb, stride, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col,
+                                );
+                                if let (Some(st), Some(t0)) = (stats.as_deref_mut(), t_q) {
+                                    st.solid_quads += 1;
+                                    st.quad_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                                }
+                                i += 6;
+                                continue;
                             }
-                            i += 6;
-                            continue;
-                        }
-                        if let Some(tq) = tex.and_then(|t| {
+                        } else if let Some(tq) = tex.and_then(|t| {
                             detect_aligned_tex_quad(&mesh.vertices, t0, pixels_per_point, t)
                         }) {
                             let t_tex = stats.as_ref().map(|_| std::time::Instant::now());
@@ -508,6 +510,12 @@ fn detect_aligned_tex_quad(
     })
 }
 
+#[inline(always)]
+fn div255(x: u32) -> u32 {
+    let t = x + 128;
+    (t + (t >> 8)) >> 8
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn fill_aligned_tex_rect(
@@ -570,13 +578,13 @@ fn fill_aligned_tex_rect(
                 if a == 0 {
                     continue;
                 }
-                let sa = (ca * a + 127) / 255;
+                let sa = div255(ca * a);
                 if sa == 0 {
                     continue;
                 }
-                let sr = (cr * tc[0] as u32 + 127) / 255;
-                let sg = (cg * tc[1] as u32 + 127) / 255;
-                let sb = (cb * tc[2] as u32 + 127) / 255;
+                let sr = div255(cr * tc[0] as u32);
+                let sg = div255(cg * tc[1] as u32);
+                let sb = div255(cb * tc[2] as u32);
                 if sa == 255 {
                     dst_row[px] = (sr << 16) | (sg << 8) | sb;
                 } else {
@@ -585,9 +593,9 @@ fn fill_aligned_tex_rect(
                     let dg = (dst >> 8) & 0xFF;
                     let db = dst & 0xFF;
                     let inv_a = 255 - sa;
-                    let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
-                    let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
-                    let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+                    let r = (sr + div255(dr * inv_a)).min(255);
+                    let g = (sg + div255(dg * inv_a)).min(255);
+                    let b = (sb + div255(db * inv_a)).min(255);
                     dst_row[px] = (r << 16) | (g << 8) | b;
                 }
             }
@@ -629,10 +637,10 @@ fn fill_aligned_tex_rect(
                 let tr = (p00[0] as u32 * w00 + p10[0] as u32 * w10 + p01[0] as u32 * w01 + p11[0] as u32 * w11 + 32768) >> 16;
                 let tg = (p00[1] as u32 * w00 + p10[1] as u32 * w10 + p01[1] as u32 * w01 + p11[1] as u32 * w11 + 32768) >> 16;
                 let tb = (p00[2] as u32 * w00 + p10[2] as u32 * w10 + p01[2] as u32 * w01 + p11[2] as u32 * w11 + 32768) >> 16;
-                let sr = (cr * tr + 127) / 255;
-                let sg = (cg * tg + 127) / 255;
-                let sb = (cb * tb + 127) / 255;
-                let sa = (ca * ta + 127) / 255;
+                let sr = div255(cr * tr);
+                let sg = div255(cg * tg);
+                let sb = div255(cb * tb);
+                let sa = div255(ca * ta);
                 if sa == 255 {
                     dst_row[px] = (sr << 16) | (sg << 8) | sb;
                 } else if sa > 0 {
@@ -641,9 +649,9 @@ fn fill_aligned_tex_rect(
                     let dg = (dst >> 8) & 0xFF;
                     let db = dst & 0xFF;
                     let inv_a = 255 - sa;
-                    let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
-                    let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
-                    let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+                    let r = (sr + div255(dr * inv_a)).min(255);
+                    let g = (sg + div255(dg * inv_a)).min(255);
+                    let b = (sb + div255(db * inv_a)).min(255);
                     dst_row[px] = (r << 16) | (g << 8) | b;
                 }
             }
@@ -663,6 +671,10 @@ fn detect_solid_quad(
         return None;
     }
     let c = v0.color.to_array();
+    let v1 = &verts[idx6[1] as usize];
+    if v1.uv != WHITE_UV || v1.color.to_array() != c {
+        return None;
+    }
     let mut xs = [f32::INFINITY, f32::NEG_INFINITY];
     let mut ys = [f32::INFINITY, f32::NEG_INFINITY];
     for &idx in idx6 {
@@ -750,9 +762,9 @@ fn blend_premultiplied_span_rows(
             let dr = (d >> 16) & 0xFF;
             let dg = (d >> 8) & 0xFF;
             let db = d & 0xFF;
-            let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
-            let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
-            let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+            let r = (sr + div255(dr * inv_a)).min(255);
+            let g = (sg + div255(dg * inv_a)).min(255);
+            let b = (sb + div255(db * inv_a)).min(255);
             *dst = (r << 16) | (g << 8) | b;
         }
     }
@@ -782,7 +794,17 @@ fn edge_pass(w: f32, ex: f32, ey: f32) -> bool {
     }
 }
 
+#[inline]
+fn precompute_inv_slopes(ey: [f32; 3]) -> [f32; 3] {
+    [
+        if ey[0].abs() > 1e-6 { -1.0 / ey[0] } else { 0.0 },
+        if ey[1].abs() > 1e-6 { -1.0 / ey[1] } else { 0.0 },
+        if ey[2].abs() > 1e-6 { -1.0 / ey[2] } else { 0.0 },
+    ]
+}
+
 /// Computes the exact horizontal `[span_x0 .. span_x1)` covered on scanline `fy` matching `edge_pass`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn scanline_x_span(
@@ -791,6 +813,21 @@ fn scanline_x_span(
     fy: f32,
     ex: [f32; 3],
     ey: [f32; 3],
+    vx: [f32; 3],
+    vy: [f32; 3],
+) -> Option<(usize, usize)> {
+    scanline_x_span_with_inv(min_x, max_x, fy, ex, ey, precompute_inv_slopes(ey), vx, vy)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn scanline_x_span_with_inv(
+    min_x: usize,
+    max_x: usize,
+    fy: f32,
+    ex: [f32; 3],
+    ey: [f32; 3],
+    inv_neg_ey: [f32; 3],
     vx: [f32; 3],
     vy: [f32; 3],
 ) -> Option<(usize, usize)> {
@@ -803,12 +840,12 @@ fn scanline_x_span(
         ex[2] * (fy - vy[0]) + ey[2] * (vx[0] - 0.5),
     ];
     for k in 0..3 {
-        let slope = -ey[k];
-        if slope > 1e-6 {
-            let x_enter = (-c[k] / slope).floor() - 1.0;
+        let inv = inv_neg_ey[k];
+        if inv > 0.0 {
+            let x_enter = (-c[k] * inv).floor() - 1.0;
             lo = lo.max(x_enter);
-        } else if slope < -1e-6 {
-            let x_exit = (-c[k] / slope).ceil() + 2.0;
+        } else if inv < 0.0 {
+            let x_exit = (-c[k] * inv).ceil() + 2.0;
             hi = hi.min(x_exit);
         } else if !edge_pass(c[k], ex[k], ey[k]) {
             return None;
@@ -885,6 +922,7 @@ fn rasterize_triangle(
 
     let ex = [(x2 - x1) * sign, (x0 - x2) * sign, (x1 - x0) * sign];
     let ey = [(y2 - y1) * sign, (y0 - y2) * sign, (y1 - y0) * sign];
+    let inv_neg_ey = precompute_inv_slopes(ey);
     let vx = [x0, x1, x2];
     let vy = [y0, y1, y2];
 
@@ -903,7 +941,9 @@ fn rasterize_triangle(
             let packed = ((c0[0] as u32) << 16) | ((c0[1] as u32) << 8) | (c0[2] as u32);
             for py in min_y..max_y {
                 let fy = py as f32 + 0.5;
-                if let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) {
+                if let Some((sx0, sx1)) =
+                    scanline_x_span_with_inv(min_x, max_x, fy, ex, ey, inv_neg_ey, vx, vy)
+                {
                     let row_off = py * fb_stride;
                     fb[row_off + sx0..row_off + sx1].fill(packed);
                 }
@@ -911,7 +951,9 @@ fn rasterize_triangle(
         } else {
             for py in min_y..max_y {
                 let fy = py as f32 + 0.5;
-                if let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) {
+                if let Some((sx0, sx1)) =
+                    scanline_x_span_with_inv(min_x, max_x, fy, ex, ey, inv_neg_ey, vx, vy)
+                {
                     blend_premultiplied_span_rows(fb, fb_stride, sx0, sx1, py, py + 1, c0);
                 }
             }
@@ -923,9 +965,70 @@ fn rasterize_triangle(
     let db0_dx = -ey[0] * inv_area;
     let db1_dx = -ey[1] * inv_area;
 
+    if untextured {
+        if c0[3] == 0 && c1[3] == 0 && c2[3] == 0 {
+            return;
+        }
+        let c0f = [c0[0] as f32, c0[1] as f32, c0[2] as f32, c0[3] as f32];
+        let c1f = [c1[0] as f32, c1[1] as f32, c1[2] as f32, c1[3] as f32];
+        let c2f = [c2[0] as f32, c2[1] as f32, c2[2] as f32, c2[3] as f32];
+        let dr_dx = (c0f[0] - c2f[0]) * db0_dx + (c1f[0] - c2f[0]) * db1_dx;
+        let dg_dx = (c0f[1] - c2f[1]) * db0_dx + (c1f[1] - c2f[1]) * db1_dx;
+        let db_dx = (c0f[2] - c2f[2]) * db0_dx + (c1f[2] - c2f[2]) * db1_dx;
+        let da_dx = (c0f[3] - c2f[3]) * db0_dx + (c1f[3] - c2f[3]) * db1_dx;
+
+        for py in min_y..max_y {
+            let fy = py as f32 + 0.5;
+            let Some((sx0, sx1)) =
+                scanline_x_span_with_inv(min_x, max_x, fy, ex, ey, inv_neg_ey, vx, vy)
+            else {
+                continue;
+            };
+            let row_off = py * fb_stride;
+            let fx0 = sx0 as f32 + 0.5;
+            let b0 = ((ex[0] * (fy - y1) - ey[0] * (fx0 - x1)) * inv_area).clamp(0.0, 1.0);
+            let b1 = ((ex[1] * (fy - y2) - ey[1] * (fx0 - x2)) * inv_area).clamp(0.0, 1.0);
+            let b2 = (1.0 - b0 - b1).max(0.0);
+
+            let mut r = c0f[0] * b0 + c1f[0] * b1 + c2f[0] * b2;
+            let mut g = c0f[1] * b0 + c1f[1] * b1 + c2f[1] * b2;
+            let mut b = c0f[2] * b0 + c1f[2] * b1 + c2f[2] * b2;
+            let mut a = c0f[3] * b0 + c1f[3] * b1 + c2f[3] * b2;
+
+            for px in sx0..sx1 {
+                let ca = (a + 0.5).clamp(0.0, 255.0) as u32;
+                if ca > 0 {
+                    let cr = (r + 0.5).clamp(0.0, 255.0) as u32;
+                    let cg = (g + 0.5).clamp(0.0, 255.0) as u32;
+                    let cb = (b + 0.5).clamp(0.0, 255.0) as u32;
+                    if ca == 255 {
+                        fb[row_off + px] = (cr << 16) | (cg << 8) | cb;
+                    } else {
+                        let dst = fb[row_off + px];
+                        let dr = (dst >> 16) & 0xFF;
+                        let dg = (dst >> 8) & 0xFF;
+                        let db = dst & 0xFF;
+                        let inv_a = 255 - ca;
+                        let or = (cr + div255(dr * inv_a)).min(255);
+                        let og = (cg + div255(dg * inv_a)).min(255);
+                        let ob = (cb + div255(db * inv_a)).min(255);
+                        fb[row_off + px] = (or << 16) | (og << 8) | ob;
+                    }
+                }
+                r += dr_dx;
+                g += dg_dx;
+                b += db_dx;
+                a += da_dx;
+            }
+        }
+        return;
+    }
+
     for py in min_y..max_y {
         let fy = py as f32 + 0.5;
-        let Some((sx0, sx1)) = scanline_x_span(min_x, max_x, fy, ex, ey, vx, vy) else {
+        let Some((sx0, sx1)) =
+            scanline_x_span_with_inv(min_x, max_x, fy, ex, ey, inv_neg_ey, vx, vy)
+        else {
             continue;
         };
         let row_off = py * fb_stride;
@@ -985,9 +1088,9 @@ fn rasterize_triangle(
                 let dg = (dst >> 8) & 0xFF;
                 let db = dst & 0xFF;
                 let inv_a = 255 - src[3] as u32;
-                let r = (src[0] as u32 + ((dr * inv_a + 127) / 255)).min(255);
-                let g = (src[1] as u32 + ((dg * inv_a + 127) / 255)).min(255);
-                let b = (src[2] as u32 + ((db * inv_a + 127) / 255)).min(255);
+                let r = (src[0] as u32 + div255(dr * inv_a)).min(255);
+                let g = (src[1] as u32 + div255(dg * inv_a)).min(255);
+                let b = (src[2] as u32 + div255(db * inv_a)).min(255);
                 fb[row_off + px] = (r << 16) | (g << 8) | b;
             }
         }

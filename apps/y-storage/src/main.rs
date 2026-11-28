@@ -946,12 +946,23 @@ fn render_screenshot_frame(
     }
 
     let hover_size_mode = view == "hover-size";
+    let hover_header_mode = view == "hover-header" || view == "hover-header-name";
     let hover_web_search_tooltip = view == "unattributed-hover-query";
     let hover_web_search_btn = view == "unattributed-hover-btn";
     let hover_web_search_mode = hover_web_search_tooltip || hover_web_search_btn;
     let hover_unattrib_row = view == "unattributed-row-hover";
-    let hover_mode = hover_size_mode || hover_web_search_mode || hover_unattrib_row;
+    let hover_mode =
+        hover_size_mode || hover_header_mode || hover_web_search_mode || hover_unattrib_row;
     match view {
+        "ledger-page-2" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+            ui_state.ledger_page = 1;
+        }
+        "hover-header" | "hover-header-name" => {
+            ui_state.active_view = ActiveView::Main;
+            ui_state.ledger_collapsed = true;
+        }
         "unattributed-expanded" | "unattributed-hover-query" | "unattributed-hover-btn" => {
             ui_state.active_view = ActiveView::Main;
             ui_state.ledger_collapsed = false;
@@ -1197,6 +1208,18 @@ fn render_screenshot_frame(
     let target_pos_for_state = |st: &StorageUiState| -> Option<Pos2> {
         if hover_size_mode {
             st.first_row_size_rect.map(|r| r.center())
+        } else if view == "hover-header" {
+            st.header_rects
+                .iter()
+                .flatten()
+                .find(|(m, _)| *m == AppSortMode::Size)
+                .map(|(_, r)| Pos2::new((r.max.x - 6.0).max(r.center().x), r.center().y))
+        } else if view == "hover-header-name" {
+            st.header_rects
+                .iter()
+                .flatten()
+                .find(|(m, _)| *m == AppSortMode::Name)
+                .map(|(_, r)| r.center())
         } else if hover_web_search_mode {
             st.first_unattrib_web_search_rect.map(|r| r.center())
         } else if hover_unattrib_row {
