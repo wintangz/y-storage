@@ -9373,6 +9373,56 @@ fn draw_scan_scope_section(
     }
 }
 
+fn draw_rulebook_removable_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    name_font: &FontId,
+    max_inner_w: f32,
+    pal: &ThemePalette,
+) -> bool {
+    let text_w = ui
+        .fonts(|f| f.layout_no_wrap(label.to_owned(), name_font.clone(), pal.text))
+        .size()
+        .x
+        .ceil();
+    let inner_w = (text_w + SPACE_4 + 48.0).min(max_inner_w.max(64.0));
+    let chip_inner_h = 20.0_f32;
+    let mut remove_clicked = false;
+    draw_crisp_frame(
+        ui,
+        pal.panel_alt,
+        pal.border,
+        RADIUS_CONTROL,
+        Margin::symmetric(SPACE_8, SPACE_4),
+        |ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(inner_w, chip_inner_h),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_4;
+                    draw_truncated_text(ui, label, name_font.clone(), pal.text, false);
+                    if draw_z_button(
+                        ui,
+                        "Remove",
+                        Vec2::new(48.0, chip_inner_h),
+                        11.0,
+                        RADIUS_PILL,
+                        true,
+                        false,
+                        ButtonVariant::SubtleOutline,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        remove_clicked = true;
+                    }
+                },
+            );
+        },
+    );
+    remove_clicked
+}
+
 fn draw_rulebook_section(
     ui: &mut egui::Ui,
     ui_state: &mut StorageUiState,
@@ -9503,44 +9553,17 @@ fn draw_rulebook_section(
                                 for row in rows {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = SPACE_8;
+                                        let max_chip_inner_w = (col_w - SPACE_8 * 2.0 - 2.0).max(64.0);
                                         for (idx, name) in row {
-                                            draw_crisp_frame(
+                                            if draw_rulebook_removable_chip(
                                                 ui,
-                                                pal.panel_alt,
-                                                pal.border,
-                                                RADIUS_CONTROL,
-                                                Margin::symmetric(SPACE_8, SPACE_4),
-                                                |ui| {
-                                                    ui.with_layout(
-                                                        Layout::left_to_right(Align::Center),
-                                                        |ui| {
-                                                            ui.spacing_mut().item_spacing.x = SPACE_4;
-                                                            draw_truncated_text(
-                                                                ui,
-                                                                &name,
-                                                                name_font.clone(),
-                                                                pal.text,
-                                                                false,
-                                                            );
-                                                            if draw_z_button(
-                                                                ui,
-                                                                "Remove",
-                                                                Vec2::new(48.0, 20.0),
-                                                                11.0,
-                                                                RADIUS_PILL,
-                                                                true,
-                                                                false,
-                                                                ButtonVariant::SubtleOutline,
-                                                                pal,
-                                                            )
-                                                            .clicked()
-                                                            {
-                                                                remove_name_idx = Some(idx);
-                                                            }
-                                                        },
-                                                    );
-                                                },
-                                            );
+                                                &name,
+                                                &name_font,
+                                                max_chip_inner_w,
+                                                pal,
+                                            ) {
+                                                remove_name_idx = Some(idx);
+                                            }
                                         }
                                     });
                                 }
@@ -9601,44 +9624,17 @@ fn draw_rulebook_section(
                                 .size(10.5)
                                 .color(pal.muted),
                         );
+                        let max_chip_inner_w = (inner_w - SPACE_8 * 2.0 - 2.0).max(64.0);
                         for (idx, path) in matching {
-                            draw_crisp_frame(
+                            if draw_rulebook_removable_chip(
                                 ui,
-                                pal.panel_alt,
-                                pal.border,
-                                RADIUS_CONTROL,
-                                Margin::symmetric(SPACE_8, SPACE_4),
-                                |ui| {
-                                    ui.with_layout(
-                                        Layout::left_to_right(Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_4;
-                                            draw_truncated_text(
-                                                ui,
-                                                &path,
-                                                name_font.clone(),
-                                                pal.text,
-                                                false,
-                                            );
-                                            if draw_z_button(
-                                                ui,
-                                                "Remove",
-                                                Vec2::new(48.0, 20.0),
-                                                11.0,
-                                                RADIUS_PILL,
-                                                true,
-                                                false,
-                                                ButtonVariant::SubtleOutline,
-                                                pal,
-                                            )
-                                            .clicked()
-                                            {
-                                                remove_path_idx = Some(idx);
-                                            }
-                                        },
-                                    );
-                                },
-                            );
+                                &path,
+                                &name_font,
+                                max_chip_inner_w,
+                                pal,
+                            ) {
+                                remove_path_idx = Some(idx);
+                            }
                         }
                     });
                 }
@@ -11867,6 +11863,93 @@ mod tests {
                 max_x > 1400.0,
                 "expected fluid wide content pane > 1400px at 1600px viewport for {section:?}, got {max_x}"
             );
+        }
+    }
+
+    #[test]
+    fn settings_rulebook_zone_chip_labels_share_baseline() {
+        fn collect_text_positions(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(ts) => {
+                    out.push((ts.galley.text().to_owned(), ts.pos.y));
+                }
+                egui::Shape::Vec(vec) => {
+                    for s in vec {
+                        collect_text_positions(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (report, cfg) = make_synthetic_report_for_drives(2);
+        let ctx = egui::Context::default();
+        configure_fonts_and_theme(&ctx, ThemeMode::Dark);
+        let mut st = StorageUiState::default();
+        st.active_view = ActiveView::Settings;
+        st.settings_section = SettingsSection::Rulebook;
+
+        let out = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                draw_app_ui(
+                    c,
+                    &mut st,
+                    &cfg,
+                    Some(&report),
+                    false,
+                    None,
+                    r"C:\Windows",
+                    &mut |_| {},
+                );
+            },
+        );
+
+        let mut text_ys: Vec<(String, f32)> = Vec::new();
+        for cs in &out.shapes {
+            collect_text_positions(&cs.shape, &mut text_ys);
+        }
+
+        for kind in [ZoneRuleKind::AppContainer, ZoneRuleKind::PersonalFiles] {
+            let names: Vec<&str> = cfg
+                .zones
+                .root_zones
+                .iter()
+                .filter(|rz| rz.kind == kind)
+                .map(|rz| rz.name.as_str())
+                .collect();
+            assert!(names.len() >= 2);
+            let ys: Vec<(&str, f32)> = names
+                .iter()
+                .map(|&name| {
+                    let y = text_ys
+                        .iter()
+                        .find(|(txt, _)| txt == name)
+                        .map(|(_, y)| *y)
+                        .unwrap_or_else(|| panic!("missing chip label {name}"));
+                    (name, y)
+                })
+                .collect();
+            let first_y = ys[0].1;
+            let row1: Vec<(&str, f32)> = ys
+                .iter()
+                .copied()
+                .filter(|(_, y)| (*y - first_y).abs() < 8.0)
+                .collect();
+            assert!(
+                row1.len() >= 2,
+                "expected >= 2 chips on first row of {kind:?}, got {row1:?}"
+            );
+            for (name, y) in &row1[1..] {
+                assert!(
+                    (*y - first_y).abs() < 0.5,
+                    "{kind:?} chip {name} y={y} differs from first chip {} y={first_y}",
+                    row1[0].0
+                );
+            }
         }
     }
 
