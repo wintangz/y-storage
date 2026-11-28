@@ -1,11 +1,12 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `b1ffbd5` (`settings-layout` Rulebook Browse... picker)
+- **Branch / Latest Code Commit**: `main` at `7ade0ff` (`settings-layout` semantic red + modal + global reset)
 - **Verification Report**: `specs/033-app-family-rollup/verification.md` (+ `specs/032-settings-layout/verification.md`)
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `ADA28A1D4C0B2CEA2ADC68AE264D8211624677A518B2BDDF79F858D246D8EB0B`)
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `727BAE7B1D99805079D62F49735385A52A573785C25EA36E57B7090D1AF45214`)
 
-## Tests (`cargo test --workspace`)
-- **`y-storage` / `y-core` / `y-platform-windows`**: **58 / 58** / **74 / 74** / **9 / 9** (**141 / 141 total**, **0 failed**, **0 warnings**)
+## Tests
+- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **60 / 60 passed**, **0 failed**, **0 warnings**
+- **`y-core` / `y-platform-windows` (untouched since `e2ed91f` / `0d7a280`)**: **74 / 74** / **9 / 9** (`141` prior workspace total + `2` new = `143` total)
 
 ## Perf (`--bench-perf`, 1275x900, 120 DPI, unchanged since `0d7a280`)
 - **Scroll collapsed / expanded / resize**: `6.93 ms` / `8.02 ms` / `8.95 ms` (`0.0%` idle CPU)
