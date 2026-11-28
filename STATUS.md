@@ -1,12 +1,12 @@
 # y-storage Status
 
-- **Branch / Latest Code Commit**: `main` at `6f8e6d8` (`app-family-rollup`)
-- **Verification Report**: `specs/033-app-family-rollup/verification.md`
-- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `7B035A5C83D807F6F2806EC3CB04E5331DC54AB585336110BD9E18DFE8F58F2F`)
+- **Branch / Latest Code Commit**: `main` at `0dc9f71` (`settings-layout` delta fix)
+- **Verification Report**: `specs/033-app-family-rollup/verification.md` (+ `specs/032-settings-layout/verification.md`)
+- **Deployed Binary**: `Y:\Apps\y-storage\y-storage.exe` (SHA-256 `9ACA7AC1F6B868C7892F3CC2B10FF894718C42D6BC2FDC21FBF285CD0BDBFB8F`)
 
 ## Tests
-- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **55 / 55 passed**, **0 failed**, **0 warnings**
-- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`130` prior workspace total + `8` new = `138` total)
+- **`y-storage` (`cargo test -p y-storage`, touched crate this round)**: **56 / 56 passed**, **0 failed**, **0 warnings**
+- **`y-core` / `y-platform-windows` (untouched since `0d7a280`)**: **74 / 74** / **9 / 9** (`138` prior workspace total + `1` new = `139` total)
 
 ## Perf (`--bench-perf`, 1275x900, 120 DPI, unchanged since `0d7a280`)
 - **Scroll collapsed / expanded / resize**: `6.93 ms` / `8.02 ms` / `8.95 ms` (`0.0%` idle CPU)
